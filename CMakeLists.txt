@@ -13,3 +13,4 @@ project ("QTrading.Cpp")
 
 # 包含子專案。
 add_subdirectory ("QTrading.Service")
+add_subdirectory ("QTrading.Infra")
