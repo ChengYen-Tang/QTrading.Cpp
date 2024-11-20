@@ -27,7 +27,12 @@ void MarketData::load_csv(const std::string& csv_file) {
             std::stod(tokens[2]),
             std::stod(tokens[3]),
             std::stod(tokens[4]),
-            std::stod(tokens[5])
+            std::stod(tokens[5]),
+			tokens[6],
+			std::stod(tokens[7]),
+			std::stoi(tokens[8]),
+			std::stod(tokens[9]),
+			std::stod(tokens[10])
         };
         klines.push_back(kline);
     }

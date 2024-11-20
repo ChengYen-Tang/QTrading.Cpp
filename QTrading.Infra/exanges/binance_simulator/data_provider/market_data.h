@@ -6,12 +6,17 @@
 class MarketData {
 public:
     struct Kline {
-        std::string timestamp;
-        double open;
-        double high;
-        double low;
-        double close;
-        double volume;
+        std::string OpenTime;
+        double OpenPrice;
+        double HighPrice;
+        double LowPrice;
+        double ClosePrice;
+        double Volume;
+        std::string CloseTime;
+        double QuoteVolume;
+        int TradeCount;
+        double TakerBuyBaseVolume;
+        double TakerBuyQuoteVolume;
     };
 
     MarketData(const std::string& symbol, const std::string& csv_file);

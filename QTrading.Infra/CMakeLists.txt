@@ -13,10 +13,12 @@ message(Boost_LIBRARY_DIRS="${Boost_LIBRARY_DIRS}")
 
 SET(header
   "exanges/binance_simulator/futures/config.h",
-  "exanges/binance_simulator/futures/market_data.h"
+  "exanges/binance_simulator/futures/account.h",
+  "exanges/binance_simulator/data_provider/market_data.h"
 )
 SET(source
-  "exanges/binance_simulator/futures/market_data.cpp"
+"exanges/binance_simulator/futures/account.cpp",
+  "exanges/binance_simulator/data_provider/market_data.cpp"
 )
 
 add_library (QTrading.Infra ${source})
