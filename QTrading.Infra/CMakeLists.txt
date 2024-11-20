@@ -4,9 +4,12 @@
 
 # 將來源新增到此專案的可執行檔。
 
-find_package(Boost 1.86.0)
+find_package(Boost 1.86.0 COMPONENTS filesystem)
 if(Boost_FOUND)
 include_directories(${Boost_INCLUDE_DIRS})
+message(Boost_INCLUDE_DIRS="${Boost_INCLUDE_DIRS}")
+link_directories(${Boost_LIBRARY_DIRS})
+message(Boost_LIBRARY_DIRS="${Boost_LIBRARY_DIRS}")
 
 SET(header
   "exanges/binance_simulator/futures/config.h",
