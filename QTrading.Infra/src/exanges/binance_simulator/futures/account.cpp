@@ -1,5 +1,5 @@
 ﻿// account.cpp
-#include "account.h"
+#include "exanges/binance_simulator/futures/account.h"
 #include <iostream>
 #include <iomanip>
 #include <stdexcept>
@@ -96,7 +96,7 @@ void Account::place_order(const std::string& symbol, double quantity, double pri
 void Account::update_positions(const MarketData::Kline& kline) {
     // 更新每个头寸的盈亏
     for (auto& pos : positions) {
-        double market_price = kline.close;
+        double market_price = kline.ClosePrice;
         double pnl = (market_price - pos.entry_price) * pos.quantity * (pos.is_long ? 1 : -1);
         pos.unrealized_pnl = pnl;
 
