@@ -13,8 +13,8 @@ message(Boost_LIBRARY_DIRS="${Boost_LIBRARY_DIRS}")
 
 
 SET(SOURCE_FILES
-  "src/exanges/binance_simulator/futures/account.cpp"
-  "src/exanges/binance_simulator/data_provider/market_data.cpp"
+  "src/Exanges/BinanceSimulator/Futures/Account.cpp"
+  "src/Exanges/BinanceSimulator/DataProvider/MarketData.cpp"
 )
 
 add_library (QTrading.Infra SHARED ${SOURCE_FILES})

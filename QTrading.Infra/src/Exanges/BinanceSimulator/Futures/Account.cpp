@@ -1,5 +1,4 @@
-﻿// account.cpp
-#include "exanges/binance_simulator/futures/account.h"
+﻿#include "Exanges/BinanceSimulator/Futures/Account.hpp"
 #include <iostream>
 #include <iomanip>
 #include <stdexcept>

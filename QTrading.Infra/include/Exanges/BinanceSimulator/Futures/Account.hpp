@@ -1,10 +1,9 @@
-// account.h
 #pragma once
 
 #include <string>
 #include <vector>
-#include "exanges/binance_simulator/data_provider/market_data.h"
-#include "config.h"
+#include "Exanges/BinanceSimulator/DataProvider/MarketData.hpp"
+#include "Config.hpp"
 
 class Account {
 public:
