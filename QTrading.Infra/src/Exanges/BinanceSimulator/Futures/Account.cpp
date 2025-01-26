@@ -1,176 +1,284 @@
 ﻿#include "Exanges/BinanceSimulator/Futures/Account.hpp"
 #include <iostream>
-#include <iomanip>
 #include <stdexcept>
-#include <limits>
+#include <cmath>
 
 Account::Account(double initial_balance, int vip_level)
-    : balance(initial_balance), used_margin(0.0), leverage(100.0), max_leverage_allowed(100.0), vip_level(vip_level) {
-    // 初始化手续费率
-    get_fee_rates();
+    : balance_(initial_balance), used_margin_(0.0), vip_level_(vip_level)
+{
 }
 
-void Account::set_leverage(double lev) {
-    if (lev > 0 && lev <= max_leverage_allowed) {
-        leverage = lev;
-        std::cout << "杠杆已设置为 " << leverage << "x" << std::endl;
+// Return the raw wallet balance. This can be negative in cross margin.
+double Account::get_balance() const {
+    return balance_;
+}
+
+// Sum all positions' unrealized PNL
+double Account::total_unrealized_pnl() const {
+    double total = 0.0;
+    for (auto& pos : positions_) {
+        total += pos.unrealized_pnl;
+    }
+    return total;
+}
+
+// Return total equity = wallet balance + total unrealized PNL
+double Account::get_equity() const {
+    return balance_ + total_unrealized_pnl();
+}
+
+// Retrieve the leverage for a specific symbol, or -1 if not set
+double Account::get_symbol_leverage(const std::string& symbol) const {
+    auto it = symbol_leverage_.find(symbol);
+    if (it == symbol_leverage_.end()) {
+        return -1.0;
+    }
+    return it->second;
+}
+
+// Set (or adjust) the leverage for a specific symbol
+void Account::set_symbol_leverage(const std::string& symbol, double newLeverage) {
+    if (newLeverage <= 0) {
+        throw std::runtime_error("Leverage must be > 0.");
+    }
+
+    double oldLev = -1.0;
+    auto it = symbol_leverage_.find(symbol);
+    if (it != symbol_leverage_.end()) {
+        oldLev = it->second;
+    }
+
+    // If not previously set, just assign
+    if (oldLev < 0) {
+        symbol_leverage_[symbol] = newLeverage;
+        std::cout << "[set_symbol_leverage] " << symbol
+            << " leverage set to " << newLeverage << "x.\n";
     }
     else {
-        std::cerr << "杠杆倍数超出允许范围（最大杠杆：" << max_leverage_allowed << "x）。" << std::endl;
+        // If there's an existing position, we need to adjust margin usage
+        bool success = adjust_position_leverage(symbol, oldLev, newLeverage);
+        if (success) {
+            symbol_leverage_[symbol] = newLeverage;
+            std::cout << "[set_symbol_leverage] " << symbol
+                << " changed leverage from " << oldLev << "x to "
+                << newLeverage << "x.\n";
+        }
+        else {
+            std::cerr << "[set_symbol_leverage] Failed to change leverage for "
+                << symbol << " due to insufficient equity.\n";
+        }
     }
 }
 
-double Account::get_balance() const {
-    return balance;
-}
+// Place an order in cross margin, allowing negative wallet balance if offset by positive PNL
+void Account::place_order(const std::string& symbol,
+    double quantity,
+    double price,
+    bool is_long,
+    bool is_market_order)
+{
+    // Get or set default leverage for this symbol
+    double lev = get_symbol_leverage(symbol);
+    if (lev < 0) {
+        lev = 20.0; // default
+        symbol_leverage_[symbol] = lev;
+        std::cout << "[place_order] " << symbol
+            << " had no leverage set. Using default 20x.\n";
+    }
 
-void Account::place_order(const std::string& symbol, double quantity, double price, bool is_long, bool is_market_order) {
-    // 获取当前手续费率
-    double maker_fee_rate, taker_fee_rate;
-    std::tie(maker_fee_rate, taker_fee_rate) = get_fee_rates();
+    // Retrieve fee rates (maker/taker)
+    double makerFee, takerFee;
+    std::tie(makerFee, takerFee) = get_fee_rates();
+    double feeRate = is_market_order ? takerFee : makerFee;
 
-    // 选择手续费率
-    double fee_rate = is_market_order ? taker_fee_rate : maker_fee_rate;
-
-    // 计算名义价值
+    // Notional value
     double notional = price * quantity;
 
-    // 获取动态的保证金率和最大杠杆
-    double initial_margin_rate, maintenance_margin_rate, max_leverage;
-    std::tie(initial_margin_rate, maintenance_margin_rate, max_leverage) = get_margin_rates(notional);
+    // Tier-based margin check
+    double tier_init_rate, tier_maint_rate, tier_max_lev;
+    std::tie(tier_init_rate, tier_maint_rate, tier_max_lev) = get_margin_rates(notional);
 
-    // 更新最大杠杆限制
-    max_leverage_allowed = max_leverage;
-
-    // 检查用户设置的杠杆是否超出最大杠杆
-    if (leverage > max_leverage_allowed) {
-        std::cerr << "当前仓位允许的最大杠杆为 " << max_leverage_allowed << "x，请调整杠杆。" << std::endl;
+    // If user lever is above the tier's max leverage, reject
+    if (lev > tier_max_lev) {
+        std::cerr << "[place_order] " << symbol
+            << " max allowed leverage is " << tier_max_lev
+            << "x, but requested " << lev << "x. Rejected.\n";
         return;
     }
 
-    // 根据实际杠杆计算初始保证金率
-    initial_margin_rate = 1.0 / leverage;
+    // For cross margin, we simplify initial margin = notional / userLeverage
+    double initial_margin = notional / lev;
+    double maintenance_margin = notional * tier_maint_rate; // tier-based
 
-    // 计算初始保证金
-    double initial_margin = notional * initial_margin_rate;
+    // Fee for opening this position
+    double fee = notional * feeRate;
 
-    // 计算维持保证金
-    double maintenance_margin = notional * maintenance_margin_rate;
+    // Check total equity (wallet balance + unrealized PnL)
+    double equity = get_equity(); // can be > 0 even if balance_ < 0
+    double total_required = initial_margin + fee;
 
-    // 计算手续费
-    double fee = notional * fee_rate;
-
-    // 检查余额是否足够支付初始保证金和手续费
-    if (balance < initial_margin + fee) {
-        std::cerr << "余额不足，无法下单。" << std::endl;
+    if (equity < total_required) {
+        std::cerr << "[place_order] Insufficient equity to open position (need "
+            << total_required << ", have " << equity << ").\n";
         return;
     }
 
-    // 扣除初始保证金和手续费
-    balance -= (initial_margin + fee);
-    used_margin += initial_margin;
+    // Deduct from balance_ (may become negative if balance_ < required)
+    balance_ -= total_required;
 
-    // 创建头寸
-    Position pos = {
+    // Increase used margin
+    used_margin_ += initial_margin;
+
+    Position pos{
         symbol,
         quantity,
         price,
         is_long,
-        0.0,
+        0.0,            // unrealized_pnl
         notional,
         initial_margin,
         maintenance_margin,
         fee,
-        leverage,
-        fee_rate
+        lev,
+        feeRate
     };
-    positions.push_back(pos);
+    positions_.push_back(pos);
 
-    std::cout << "下单成功：" << (is_long ? "做多" : "做空") << " " << quantity << " 手 " << symbol
-        << " @ $" << price << (is_market_order ? "（市价单）" : "（限价单）") << std::endl;
-    std::cout << "初始保证金率: " << initial_margin_rate * 100 << "%, 初始保证金: $" << initial_margin
-        << ", 维持保证金: $" << maintenance_margin << ", 手续费: $" << fee << std::endl;
+    std::cout << "[place_order] " << symbol
+        << (is_long ? " LONG " : " SHORT ") << quantity
+        << " @ " << price << (is_market_order ? " (Market)" : " (Limit)")
+        << ", user leverage=" << lev << "x\n"
+        << "  Required margin+fee=" << total_required
+        << ", new balance=" << balance_ << " (may be negative)\n";
 }
 
+// Update positions with new price, recalc PnL, check for liquidation
 void Account::update_positions(const MarketData::Kline& kline) {
-    // 更新每个头寸的盈亏
-    for (auto& pos : positions) {
-        double market_price = kline.ClosePrice;
-        double pnl = (market_price - pos.entry_price) * pos.quantity * (pos.is_long ? 1 : -1);
+    // 1) Recompute unrealized PnL for each open position
+    for (auto& pos : positions_) {
+        double current_price = kline.ClosePrice;
+        double pnl = (current_price - pos.entry_price) * pos.quantity
+            * (pos.is_long ? 1 : -1);
         pos.unrealized_pnl = pnl;
+    }
 
-        // 计算保证金余额
-        double wallet_balance = balance + total_unrealized_pnl();
-        double margin_balance = wallet_balance; // 这里假设没有未实现的资金费用
+    // 2) Check liquidation: if total equity < sum(maintenance_margin), 
+    // we do a full liquidation. 
+    double equity = get_equity();
+    double total_maint = 0.0;
+    for (auto& pos : positions_) {
+        total_maint += pos.maintenance_margin;
+    }
 
-        // 计算维持保证金
-        double maintenance_margin = pos.maintenance_margin;
-
-        if (margin_balance <= maintenance_margin) {
-            // 触发爆仓
-            std::cout << "头寸爆仓：" << pos.symbol << std::endl;
-            // 扣除剩余保证金作为清算费用
-            balance = 0;
-            positions.clear();
-            used_margin = 0;
-            return;
-        }
+    if (equity < total_maint) {
+        std::cerr << "[update_positions] Liquidation triggered! Equity="
+            << equity << ", required maintenance=" << total_maint << "\n";
+        // Full liquidation
+        balance_ = 0.0;
+        used_margin_ = 0.0;
+        positions_.clear();
     }
 }
 
-void Account::close_position(const std::string& symbol, double price, bool is_market_order) {
-    // 获取当前手续费率
-    double maker_fee_rate, taker_fee_rate;
-    std::tie(maker_fee_rate, taker_fee_rate) = get_fee_rates();
+// Close an existing position
+void Account::close_position(const std::string& symbol, double price, bool is_market_order)
+{
+    double makerFee, takerFee;
+    std::tie(makerFee, takerFee) = get_fee_rates();
+    double feeRate = is_market_order ? takerFee : makerFee;
 
-    // 选择手续费率
-    double fee_rate = is_market_order ? taker_fee_rate : maker_fee_rate;
-
-    // 寻找对应的头寸并平仓
-    for (auto it = positions.begin(); it != positions.end(); ++it) {
+    for (auto it = positions_.begin(); it != positions_.end(); ++it) {
         if (it->symbol == symbol) {
-            double notional = price * it->quantity;
-            double fee = notional * fee_rate;
+            // Recalculate notional at close price (or you can keep original notional)
+            double close_notional = price * it->quantity;
+            double close_fee = close_notional * feeRate;
 
-            // 更新余额
-            balance += (it->initial_margin + it->unrealized_pnl - fee);
-            used_margin -= it->initial_margin;
+            // Realized PnL is the position's current unrealized PnL
+            double realized_pnl = it->unrealized_pnl;
 
-            std::cout << "头寸已平仓：" << symbol << (is_market_order ? "（市价单）" : "（限价单）") << std::endl;
-            std::cout << "平仓收益: $" << it->unrealized_pnl << ", 手续费: $" << fee << std::endl;
+            // "Return" the initial margin, add realized PnL, subtract fee
+            double amount_back = it->initial_margin + realized_pnl - close_fee;
 
-            positions.erase(it);
+            // Put that back to wallet balance (yes, it can become negative or positive)
+            balance_ += amount_back;
+
+            // Decrease used margin
+            used_margin_ -= it->initial_margin;
+
+            std::cout << "[close_position] " << symbol
+                << (is_market_order ? " (Market)" : " (Limit)")
+                << ", realized PnL=" << realized_pnl
+                << ", close fee=" << close_fee
+                << ", new balance=" << balance_ << "\n";
+
+            positions_.erase(it);
             return;
         }
     }
-    std::cerr << "未找到符号为 " << symbol << " 的头寸。" << std::endl;
+    std::cerr << "[close_position] No position found for " << symbol << ".\n";
 }
 
-double Account::total_unrealized_pnl() const {
-    double total_pnl = 0.0;
-    for (const auto& pos : positions) {
-        total_pnl += pos.unrealized_pnl;
-    }
-    return total_pnl;
-}
-
+// Helper: get tier-based margin rates
 std::tuple<double, double, double> Account::get_margin_rates(double notional) const {
-    for (const auto& tier : margin_tiers) {
+    for (auto& tier : margin_tiers) {
         if (notional <= tier.notional_upper) {
-            return std::make_tuple(tier.initial_margin_rate, tier.maintenance_margin_rate, tier.max_leverage);
+            return std::make_tuple(tier.initial_margin_rate,
+                tier.maintenance_margin_rate,
+                tier.max_leverage);
         }
     }
-    // 默认值
-    return std::make_tuple(0.125, 0.075, 8);
+    // Fallback
+    return std::make_tuple(0.125, 0.075, 8.0);
 }
 
+// Helper: get fee rates for the current VIP level (simplified to VIP 0)
 std::tuple<double, double> Account::get_fee_rates() const {
-    auto it = vip_fee_rates.find(vip_level);
+    // If you wanted multiple VIP levels, you'd do:
+    auto it = vip_fee_rates.find(vip_level_);
     if (it != vip_fee_rates.end()) {
         return std::make_tuple(it->second.maker_fee_rate, it->second.taker_fee_rate);
     }
-    else {
-        // 如果 VIP 等级未找到，默认使用 VIP 0 的费率
-        return std::make_tuple(0.0002, 0.0004);
+    // default to VIP 0
+    return std::make_tuple(vip_fee_rates.at(0).maker_fee_rate, vip_fee_rates.at(0).taker_fee_rate);
+}
+
+// Adjust an existing position's margin usage when changing leverage
+bool Account::adjust_position_leverage(const std::string& symbol, double oldLev, double newLev) {
+    bool found = false;
+    for (auto& pos : positions_) {
+        if (pos.symbol == symbol) {
+            found = true;
+            double oldMargin = pos.initial_margin;
+            double newMargin = pos.notional / newLev;
+            double diff = newMargin - oldMargin;
+
+            // If diff > 0, we need more margin
+            if (diff > 0) {
+                // Check if we have enough equity
+                double equity = get_equity();
+                // Just see if equity can cover the extra margin
+                if ((equity - diff) < 0.0) {
+                    return false;
+                }
+                // Deduct from balance_ (can go negative)
+                balance_ -= diff;
+                used_margin_ += diff;
+            }
+            else {
+                // Releasing margin
+                double release = std::fabs(diff);
+                balance_ += release;
+                used_margin_ -= release;
+            }
+
+            pos.initial_margin = newMargin;
+            pos.leverage = newLev;
+            // maintenance_margin doesn't change because notional is the same
+        }
     }
+    // If no position found, it's just setting leverage for a symbol with no position
+    if (!found) {
+        return true;
+    }
+    return true;
 }

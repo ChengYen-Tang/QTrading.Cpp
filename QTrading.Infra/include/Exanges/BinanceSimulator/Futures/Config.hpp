@@ -1,18 +1,16 @@
 ﻿#pragma once
 
 #include <map>
+#include <limits>
+#include <vector>
 
-/// <summary>
-/// Handling fee definition, based on VIP level
-/// </summary>
+// Fee rate structure for maker/taker
 struct FeeRate {
     double maker_fee_rate;
     double taker_fee_rate;
 };
 
-/// <summary>
-/// Define the mapping between VIP levels and handling rates
-/// </summary>
+// Mapping from VIP level to fee rates
 const std::map<int, FeeRate> vip_fee_rates = {
     {0, {0.0002, 0.0004}},   // VIP 0
     {1, {0.00018, 0.00036}}, // VIP 1
@@ -26,15 +24,15 @@ const std::map<int, FeeRate> vip_fee_rates = {
     {9, {0.00002, 0.00020}}  // VIP 9
 };
 
-// 保证金分层结构
+// Margin tier definition
 struct MarginTier {
-    double notional_upper;          // 名义价值上限
-    double initial_margin_rate;     // 初始保证金率
-    double maintenance_margin_rate; // 维持保证金率
-    double max_leverage;            // 最大杠杆
+    double notional_upper;          // Upper limit of notional value
+    double initial_margin_rate;     // Initial margin rate
+    double maintenance_margin_rate; // Maintenance margin rate
+    double max_leverage;            // Maximum leverage
 };
 
-// 定义保证金分层表
+// Tier-based margin configuration
 const std::vector<MarginTier> margin_tiers = {
     {50000,    0.01,  0.005, 100},
     {250000,   0.02,  0.01,   50},

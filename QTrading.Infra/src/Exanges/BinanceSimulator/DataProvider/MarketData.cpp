@@ -11,11 +11,11 @@ MarketData::MarketData(const std::string& symbol, const std::string& csv_file) :
 void MarketData::load_csv(const std::string& csv_file) {
     std::ifstream file(csv_file);
     if (!file.is_open()) {
-        throw std::runtime_error("无法打开文件：" + csv_file);
+        throw std::runtime_error("Cannot open file: " + csv_file);
     }
 
     std::string line;
-    // 跳过 CSV 文件的标题行
+    // Skip the CSV header line
     std::getline(file, line);
     while (std::getline(file, line)) {
         std::vector<std::string> tokens;
@@ -28,11 +28,11 @@ void MarketData::load_csv(const std::string& csv_file) {
             std::stod(tokens[3]),
             std::stod(tokens[4]),
             std::stod(tokens[5]),
-			tokens[6],
-			std::stod(tokens[7]),
-			std::stoi(tokens[8]),
-			std::stod(tokens[9]),
-			std::stod(tokens[10])
+            tokens[6],
+            std::stod(tokens[7]),
+            std::stoi(tokens[8]),
+            std::stod(tokens[9]),
+            std::stod(tokens[10])
         };
         klines.push_back(kline);
     }
