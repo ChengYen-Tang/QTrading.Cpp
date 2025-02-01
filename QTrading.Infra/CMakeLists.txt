@@ -5,6 +5,9 @@
 # 將來源新增到此專案的可執行檔。
 project(QTrading.Infra)
 
+set(Boost_USE_STATIC_LIBS ON)
+set(Boost_USE_MULTITHREADED ON)
+set(Boost_USE_STATIC_RUNTIME ON)
 find_package(Boost 1.86.0 REQUIRED COMPONENTS filesystem system)
 if(Boost_FOUND)
 include_directories(${Boost_INCLUDE_DIRS})

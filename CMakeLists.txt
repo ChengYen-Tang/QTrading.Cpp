@@ -5,6 +5,9 @@ cmake_minimum_required (VERSION 3.14)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+set(CMAKE_CXX_FLAGS_DEBUG "/MTd")   # 使用 MTd（靜態調試庫）
+set(CMAKE_CXX_FLAGS_RELEASE "/MT")  # 使用 MT（靜態釋放庫）
+
 # 啟用自動導出符號（適用於 MSVC）
 if (MSVC)
   set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS ON)
@@ -26,6 +29,7 @@ include(FetchContent)
 FetchContent_Declare(
   googletest
   URL https://github.com/google/googletest/archive/refs/tags/v1.13.0.tar.gz
+  DOWNLOAD_EXTRACT_TIMESTAMP TRUE
 )
 FetchContent_MakeAvailable(googletest)
 
