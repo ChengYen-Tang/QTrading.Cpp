@@ -1,7 +1,7 @@
 ﻿#include "exanges/BinanceSimulator/DataProvider/MarketData.hpp"
-#include <fstream>
-#include <sstream>
 #include <boost/algorithm/string.hpp>
+#include <boost/iostreams/device/file.hpp>
+#include <boost/iostreams/stream.hpp>
 #include <stdexcept>
 
 MarketData::MarketData(const std::string& symbol, const std::string& csv_file) : symbol(symbol) {
@@ -9,32 +9,49 @@ MarketData::MarketData(const std::string& symbol, const std::string& csv_file) :
 }
 
 void MarketData::load_csv(const std::string& csv_file) {
-    std::ifstream file(csv_file);
-    if (!file.is_open()) {
+    namespace io = boost::iostreams;
+
+    // 使用 Boost.IOStreams 打開文件
+    io::file_source file_source(csv_file);
+    if (!file_source.is_open()) {
         throw std::runtime_error("Cannot open file: " + csv_file);
     }
 
+    io::stream<io::file_source> file(file_source);
     std::string line;
-    // Skip the CSV header line
-    std::getline(file, line);
+
+    if (!std::getline(file, line)) {
+        throw std::runtime_error("CSV file is empty or cannot read header: " + csv_file);
+    }
+
     while (std::getline(file, line)) {
         std::vector<std::string> tokens;
         boost::split(tokens, line, boost::is_any_of(","));
-        if (tokens.size() < 6) continue;
-        Kline kline = {
-            tokens[0],
-            std::stod(tokens[1]),
-            std::stod(tokens[2]),
-            std::stod(tokens[3]),
-            std::stod(tokens[4]),
-            std::stod(tokens[5]),
-            tokens[6],
-            std::stod(tokens[7]),
-            std::stoi(tokens[8]),
-            std::stod(tokens[9]),
-            std::stod(tokens[10])
-        };
-        klines.push_back(kline);
+
+        if (tokens.size() < 11) continue;
+
+        try {
+            Kline kline = {
+                tokens[0],
+                std::stod(tokens[1]),
+                std::stod(tokens[2]),
+                std::stod(tokens[3]),
+                std::stod(tokens[4]),
+                std::stod(tokens[5]),
+                tokens[6],
+                std::stod(tokens[7]),
+                std::stoi(tokens[8]),
+                std::stod(tokens[9]),
+                std::stod(tokens[10])
+            };
+            klines.push_back(kline);
+        }
+        catch (const std::invalid_argument& e) {
+            continue;
+        }
+        catch (const std::out_of_range& e) {
+            continue;
+        }
     }
 }
 

@@ -4,25 +4,16 @@
 
 # 將來源新增到此專案的可執行檔。
 project(QTrading.Infra)
-find_package(Boost 1.86.0 COMPONENTS filesystem)
+
+find_package(Boost 1.86.0 REQUIRED COMPONENTS filesystem system)
 if(Boost_FOUND)
 include_directories(${Boost_INCLUDE_DIRS})
 message(Boost_INCLUDE_DIRS="${Boost_INCLUDE_DIRS}")
 link_directories(${Boost_LIBRARY_DIRS})
 message(Boost_LIBRARY_DIRS="${Boost_LIBRARY_DIRS}")
 
+add_subdirectory ("src")
+enable_testing()
+add_subdirectory ("tests")
 
-SET(SOURCE_FILES
-  "src/Exanges/BinanceSimulator/Futures/Account.cpp"
-  "src/Exanges/BinanceSimulator/DataProvider/MarketData.cpp"
-)
-
-add_library (QTrading.Infra SHARED ${SOURCE_FILES})
-target_include_directories(QTrading.Infra PUBLIC include)
-
-target_link_libraries(QTrading.Infra Boost::filesystem)
-
-if (CMAKE_VERSION VERSION_GREATER 3.12)
-  set_property(TARGET QTrading.Infra PROPERTY CXX_STANDARD 20)
-endif()
 endif()

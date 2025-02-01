@@ -3,6 +3,7 @@
 #
 
 # 將來源新增到此專案的可執行檔。
+project ("QTrading.Cpp")
 add_executable (QTrading.Service "QTrading.Service.cpp" "QTrading.Service.h")
 
 if (CMAKE_VERSION VERSION_GREATER 3.12)
