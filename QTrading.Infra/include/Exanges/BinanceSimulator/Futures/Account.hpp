@@ -35,7 +35,7 @@ public:
     // Update positions with new market data:
     //  - Recompute unrealized PNL
     //  - Check liquidation (full liquidation if equity < totalMaintenanceMargin)
-    void update_positions(const MarketData::Kline& kline);
+    void update_positions(const std::map<std::string, double>& symbol_prices);
 
     // Close a position (fully). 
     // This realizes any PNL, refunds margin, subtracts fees, etc.

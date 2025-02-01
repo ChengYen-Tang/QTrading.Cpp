@@ -153,27 +153,35 @@ void Account::place_order(const std::string& symbol,
 }
 
 // Update positions with new price, recalc PnL, check for liquidation
-void Account::update_positions(const MarketData::Kline& kline) {
-    // 1) Recompute unrealized PnL for each open position
+void Account::update_positions(const std::map<std::string, double>& symbol_prices) {
+    // 1) Recompute PnL for each position using the correct symbol price
     for (auto& pos : positions_) {
-        double current_price = kline.ClosePrice;
+        auto itPrice = symbol_prices.find(pos.symbol);
+        if (itPrice == symbol_prices.end()) {
+            // Symbol price not provided; either skip or handle error
+            std::cerr << "[update_positions] No price available for symbol: "
+                << pos.symbol << ". Skipping update.\n";
+            continue;
+        }
+
+        double current_price = itPrice->second;
         double pnl = (current_price - pos.entry_price) * pos.quantity
-            * (pos.is_long ? 1 : -1);
+            * (pos.is_long ? 1.0 : -1.0);
         pos.unrealized_pnl = pnl;
     }
 
-    // 2) Check liquidation: if total equity < sum(maintenance_margin), 
-    // we do a full liquidation. 
-    double equity = get_equity();
+    // 2) Check if total equity < sum of maintenance margins => liquidation
+    double equity = get_equity(); // balance_ + total_unrealized_pnl()
     double total_maint = 0.0;
-    for (auto& pos : positions_) {
+    for (const auto& pos : positions_) {
         total_maint += pos.maintenance_margin;
     }
 
     if (equity < total_maint) {
-        std::cerr << "[update_positions] Liquidation triggered! Equity="
-            << equity << ", required maintenance=" << total_maint << "\n";
-        // Full liquidation
+        std::cerr << "[update_positions] Liquidation triggered. "
+            << "Equity=" << equity
+            << ", totalMaint=" << total_maint << "\n";
+        // Full liquidation for simplicity
         balance_ = 0.0;
         used_margin_ = 0.0;
         positions_.clear();

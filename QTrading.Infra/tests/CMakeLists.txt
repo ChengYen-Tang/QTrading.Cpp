@@ -1,8 +1,9 @@
 ﻿find_package(Boost 1.86.0 COMPONENTS filesystem)
 
 add_executable(QTrading.Infra.Tests
-  "Exanges/BinanceSimulator/DataProvider/MarketDataTest.cpp"
-)
+  "Exanges/BinanceSimulator/DataProvider/MarketDataTests.cpp"
+  "Exanges/BinanceSimulator/Futures/AccountTests.cpp"
+ )
 
 target_include_directories(QTrading.Infra.Tests
     PRIVATE

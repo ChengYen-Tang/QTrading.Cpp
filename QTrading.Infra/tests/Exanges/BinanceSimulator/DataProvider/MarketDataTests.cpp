@@ -5,7 +5,7 @@
 
 static const char* test_csv_filename = "test_kline_data.csv";
 
-class MarketDataTest : public ::testing::Test {
+class MarketDataTests : public ::testing::Test {
 protected:
     void SetUp() override {
         boost::filesystem::ofstream ofs(test_csv_filename);
@@ -21,12 +21,12 @@ protected:
     }
 };
 
-TEST_F(MarketDataTest, LoadCsvAndCheckCount) {
+TEST_F(MarketDataTests, LoadCsvAndCheckCount) {
     MarketData md("BTCUSDT", test_csv_filename);
     EXPECT_EQ(md.get_klines_count(), 2u);
 }
 
-TEST_F(MarketDataTest, GetLatestKline) {
+TEST_F(MarketDataTests, GetLatestKline) {
     MarketData md("BTCUSDT", test_csv_filename);
     auto latest = md.get_latest_kline();
     // 應該是第二筆 (index = 1)
@@ -37,13 +37,13 @@ TEST_F(MarketDataTest, GetLatestKline) {
     EXPECT_EQ(latest.TradeCount, 80);
 }
 
-TEST_F(MarketDataTest, GetKlineOutOfRange) {
+TEST_F(MarketDataTests, GetKlineOutOfRange) {
     MarketData md("BTCUSDT", test_csv_filename);
     // 總共只有 2 筆, index = 2 應該拋出 out_of_range
     EXPECT_THROW(md.get_kline(2), std::out_of_range);
 }
 
-TEST_F(MarketDataTest, GetSymbolAndFirstKline) {
+TEST_F(MarketDataTests, GetSymbolAndFirstKline) {
     MarketData md("BTCUSDT", test_csv_filename);
     // 檢查第一筆
     const auto& kline0 = md.get_kline(0);
