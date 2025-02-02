@@ -31,14 +31,14 @@ void MarketData::load_csv(const std::string& csv_file) {
         if (tokens.size() < 11) continue;
 
         try {
-            Kline kline = {
-                tokens[0],
+            KlineDto kline = {
+                std::stoll(tokens[0]),
                 std::stod(tokens[1]),
                 std::stod(tokens[2]),
                 std::stod(tokens[3]),
                 std::stod(tokens[4]),
                 std::stod(tokens[5]),
-                tokens[6],
+                std::stoll(tokens[6]),
                 std::stod(tokens[7]),
                 std::stoi(tokens[8]),
                 std::stod(tokens[9]),
@@ -55,11 +55,11 @@ void MarketData::load_csv(const std::string& csv_file) {
     }
 }
 
-const MarketData::Kline& MarketData::get_latest_kline() const {
+const KlineDto& MarketData::get_latest_kline() const {
     return klines.back();
 }
 
-const MarketData::Kline& MarketData::get_kline(size_t index) const {
+const KlineDto& MarketData::get_kline(size_t index) const {
     if (index < klines.size()) {
         return klines[index];
     }

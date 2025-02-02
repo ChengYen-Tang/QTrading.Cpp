@@ -1,7 +1,7 @@
 #pragma once
 
-namespace QTrading::dto::market {
+namespace QTrading::Dto::Market {
 	struct BaseMarketDto {
-		unsigned long long timestamp;
+		unsigned long long Timestamp;
 	};
 }

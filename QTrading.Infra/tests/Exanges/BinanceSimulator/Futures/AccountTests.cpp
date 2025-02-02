@@ -14,8 +14,8 @@
 // 測試用小工具: 建立一個簡單的 kline 物件 (只設定ClosePrice即可)
 // (在舊版 update_positions(Kline) 會用到, 現在多數測試將用 map)
 //-------------------------------------------------------------------
-static MarketData::Kline make_kline(double close_price) {
-    MarketData::Kline kl;
+static KlineDto make_kline(double close_price) {
+    KlineDto kl;
     kl.ClosePrice = close_price;
     return kl;
 }

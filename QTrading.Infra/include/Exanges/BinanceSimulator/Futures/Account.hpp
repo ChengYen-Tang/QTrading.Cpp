@@ -4,8 +4,6 @@
 #include <vector>
 #include <map>
 #include <tuple>
-#include "Exanges/BinanceSimulator/DataProvider/MarketData.hpp"
-#include "Config.hpp"
 
 // A simplified cross-margin account
 class Account {
