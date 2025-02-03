@@ -14,6 +14,16 @@ public:
     const KlineDto& get_kline(size_t index) const;
     size_t get_klines_count() const;
 
+    using iterator = std::vector<KlineDto>::iterator;
+    using const_iterator = std::vector<KlineDto>::const_iterator;
+
+    iterator begin();
+    iterator end();
+    const_iterator begin() const;
+    const_iterator end() const;
+    const_iterator cbegin() const;
+    const_iterator cend() const;
+
 private:
     std::string symbol;
     std::vector<KlineDto> klines;

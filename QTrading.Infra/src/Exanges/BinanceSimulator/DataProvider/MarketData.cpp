@@ -71,3 +71,27 @@ const KlineDto& MarketData::get_kline(size_t index) const {
 size_t MarketData::get_klines_count() const {
     return klines.size();
 }
+
+MarketData::iterator MarketData::begin() {
+	return klines.begin();
+}
+
+MarketData::iterator MarketData::end() {
+	return klines.end();
+}
+
+MarketData::const_iterator MarketData::begin() const {
+	return klines.begin();
+}
+
+MarketData::const_iterator MarketData::end() const {
+	return klines.end();
+}
+
+MarketData::const_iterator MarketData::cbegin() const {
+	return klines.cbegin();
+}
+
+MarketData::const_iterator MarketData::cend() const {
+	return klines.cend();
+}

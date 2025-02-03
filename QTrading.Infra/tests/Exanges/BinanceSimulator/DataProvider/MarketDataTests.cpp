@@ -52,3 +52,44 @@ TEST_F(MarketDataTests, GetSymbolAndFirstKline) {
     EXPECT_DOUBLE_EQ(kline0.Volume, 100.0);
     EXPECT_EQ(kline0.TradeCount, 50);
 }
+
+TEST_F(MarketDataTests, IteratorTraversal) {
+    MarketData md("BTCUSDT", test_csv_filename);
+    std::vector<long long> expectedTimestamps = { 1733497260000, 1733497320000 };
+    size_t index = 0;
+    // 使用 range-based for loop 檢查每個 kline
+    for (const auto& kline : md) {
+        ASSERT_LT(index, expectedTimestamps.size());
+        EXPECT_EQ(kline.Timestamp, expectedTimestamps[index]);
+        index++;
+    }
+    EXPECT_EQ(index, md.get_klines_count());
+}
+
+TEST_F(MarketDataTests, ManualIteratorUsage) {
+    MarketData md("BTCUSDT", test_csv_filename);
+    auto it = md.begin();
+    ASSERT_NE(it, md.end());
+    EXPECT_EQ(it->Timestamp, 1733497260000);
+    ++it;
+    ASSERT_NE(it, md.end());
+    EXPECT_EQ(it->Timestamp, 1733497320000);
+    ++it;
+    EXPECT_EQ(it, md.end());
+}
+
+TEST_F(MarketDataTests, ConstIteratorTraversal) {
+    MarketData md("BTCUSDT", test_csv_filename);
+    const MarketData& c_md = md;
+    size_t count = 0;
+    for (auto it = c_md.cbegin(); it != c_md.cend(); ++it) {
+        if (count == 0) {
+            EXPECT_EQ(it->Timestamp, 1733497260000);
+        }
+        else if (count == 1) {
+            EXPECT_EQ(it->Timestamp, 1733497320000);
+        }
+        count++;
+    }
+    EXPECT_EQ(count, md.get_klines_count());
+}
