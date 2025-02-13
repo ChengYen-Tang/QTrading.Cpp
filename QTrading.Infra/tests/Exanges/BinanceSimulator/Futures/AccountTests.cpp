@@ -11,16 +11,6 @@
 #include "Exanges/BinanceSimulator/DataProvider/MarketData.hpp"
 
 //-------------------------------------------------------------------
-// 測試用小工具: 建立一個簡單的 kline 物件 (只設定ClosePrice即可)
-// (在舊版 update_positions(Kline) 會用到, 現在多數測試將用 map)
-//-------------------------------------------------------------------
-static KlineDto make_kline(double close_price) {
-    KlineDto kl;
-    kl.ClosePrice = close_price;
-    return kl;
-}
-
-//-------------------------------------------------------------------
 // Google Test Fixture
 //-------------------------------------------------------------------
 class AccountTest : public ::testing::Test {
@@ -51,8 +41,8 @@ TEST_F(AccountTest, ConstructorAndGetters) {
 //-------------------------------------------------------------------
 TEST_F(AccountTest, SetAndGetSymbolLeverage) {
     Account account(2000.0, 0);
-    // 預設沒設定 => -1
-    EXPECT_DOUBLE_EQ(account.get_symbol_leverage("BTCUSDT"), -1.0);
+    // 預設沒設定 => 1
+    EXPECT_DOUBLE_EQ(account.get_symbol_leverage("BTCUSDT"), 1.0);
 
     // 設置 50x
     account.set_symbol_leverage("BTCUSDT", 50.0);

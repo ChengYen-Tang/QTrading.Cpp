@@ -63,7 +63,7 @@ private:
     std::map<std::string, double> symbol_leverage_;
 
     // Helper: obtain tier-based margin rates
-    std::tuple<double, double, double> get_margin_rates(double notional) const;
+    std::tuple<double, double> get_tier_info(double notional) const;
 
     // Helper: obtain maker/taker fee rates for the current VIP level
     std::tuple<double, double> get_fee_rates() const;
