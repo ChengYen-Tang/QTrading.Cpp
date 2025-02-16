@@ -3,16 +3,21 @@
 #include <iostream>
 #include <stdexcept>
 #include <cmath>
+#include <algorithm>
 
 Account::Account(double initial_balance, int vip_level)
-    : balance_(initial_balance), used_margin_(0.0), vip_level_(vip_level)
+    : balance_(initial_balance),
+    used_margin_(0.0),
+    vip_level_(vip_level),
+    next_order_id_(1),
+    next_position_id_(1)
 {
 }
 
+/* ------------------- Basic Getters ------------------- */
 double Account::get_balance() const {
     return balance_;
 }
-
 double Account::total_unrealized_pnl() const {
     double total = 0.0;
     for (const auto& pos : positions_) {
@@ -20,19 +25,18 @@ double Account::total_unrealized_pnl() const {
     }
     return total;
 }
-
 double Account::get_equity() const {
     return balance_ + total_unrealized_pnl();
 }
 
+/* ------------------- Leverage ------------------- */
 double Account::get_symbol_leverage(const std::string& symbol) const {
     auto it = symbol_leverage_.find(symbol);
     if (it == symbol_leverage_.end()) {
-        return 1.0; // not set
+        return 1.0; // default
     }
     return it->second;
 }
-
 void Account::set_symbol_leverage(const std::string& symbol, double newLeverage) {
     if (newLeverage <= 0) {
         throw std::runtime_error("Leverage must be > 0.");
@@ -43,12 +47,9 @@ void Account::set_symbol_leverage(const std::string& symbol, double newLeverage)
         oldLev = it->second;
     }
 
-    // If we already have a position for this symbol, adjust margin usage
-    if (oldLev < 0) {
-        // just set
+    if (symbol_leverage_.find(symbol) == symbol_leverage_.end()) {
         symbol_leverage_[symbol] = newLeverage;
-        std::cout << "[set_symbol_leverage] " << symbol
-            << " = " << newLeverage << "x\n";
+        std::cout << "[set_symbol_leverage] " << symbol << " = " << newLeverage << "x\n";
     }
     else {
         bool success = adjust_position_leverage(symbol, oldLev, newLeverage);
@@ -64,256 +65,469 @@ void Account::set_symbol_leverage(const std::string& symbol, double newLeverage)
     }
 }
 
+/* ------------------- ID Generators ------------------- */
+int Account::generate_order_id() {
+    return next_order_id_++;
+}
+int Account::generate_position_id() {
+    return next_position_id_++;
+}
+
+/* ----------------------------------------------------
+   place_order():
+   - price <= 0 => market
+   - price > 0  => limit
+   - closing_position_id = -1 => normal opening order
+-----------------------------------------------------*/
 void Account::place_order(const std::string& symbol,
     double quantity,
     double price,
-    bool is_long,
-    bool is_market_order)
+    bool is_long)
 {
-    // 1) Retrieve or assign user leverage
-    double lev = get_symbol_leverage(symbol);
-
-    // 2) Get maker/taker fees
-    double makerFee, takerFee;
-    std::tie(makerFee, takerFee) = get_fee_rates();
-    double feeRate = (is_market_order ? takerFee : makerFee);
-
-    double notional = price * quantity;
-
-    // 3) Get tier-based maintenance_margin_rate, max_leverage
-    double mmr, tier_max_lev;
-    std::tie(mmr, tier_max_lev) = get_tier_info(notional);
-
-    if (lev > tier_max_lev) {
-        std::cerr << "[place_order] user leverage=" << lev
-            << "x > tier max=" << tier_max_lev
-            << "x. Rejected.\n";
+    if (quantity <= 0) {
+        std::cerr << "[place_order] Invalid quantity <= 0\n";
         return;
     }
-
-    // 4) initial_margin = notional / userLeverage
-    double initial_margin = notional / lev;
-    // maintenance margin = notional * mmr
-    double maintenance_margin = notional * mmr;
-
-    // 5) fees for opening
-    double fee = notional * feeRate;
-
-    // 6) Check if total equity >= (initial_margin + fee)
-    double equity = get_equity();
-    double required = initial_margin + fee;
-    if (equity < required) {
-        std::cerr << "[place_order] Not enough equity("
-            << equity << ") < " << required << "\n";
-        return;
-    }
-
-    // 7) Subtract from wallet balance (may go negative in cross)
-    balance_ -= required;
-    used_margin_ += initial_margin;
-
-    // 8) Create the position
-    Position pos{
+    int oid = generate_order_id();
+    std::string ordType = (price <= 0.0) ? "(Market)" : "(Limit)";
+    Order newOrd{
+        oid,
         symbol,
         quantity,
         price,
         is_long,
-        0.0,            // unrealized_pnl
-        notional,
-        initial_margin,
-        maintenance_margin,
-        fee,
-        lev,
-        feeRate
+        -1 // normal order
     };
-    positions_.push_back(pos);
 
-    std::cout << "[place_order] " << symbol
+    open_orders_.push_back(newOrd);
+
+    std::cout << "[place_order] Created Order ID=" << oid
         << (is_long ? " LONG " : " SHORT ")
-        << quantity << " @ " << price
-        << (is_market_order ? " (Market)" : " (Limit)")
-        << ", userLeverage=" << lev << "x\n"
-        << "  margin+fee=" << required
-        << ", new balance=" << balance_ << "\n";
+        << ordType << " " << quantity << " " << symbol
+        << " @ " << price << "\n";
 }
 
-void Account::update_positions(const std::map<std::string, double>& symbol_prices) {
-    // 1) Recompute each position's unrealized PnL based on the correct symbol price
+/* ----------------------------------------------------
+   place_closing_order() - internal helper
+   - Opposite direction from the position
+   - No margin required, realize PnL on fill
+-----------------------------------------------------*/
+void Account::place_closing_order(int position_id, double quantity, double price)
+{
+    // find the position
     for (auto& pos : positions_) {
-        auto itPrice = symbol_prices.find(pos.symbol);
-        if (itPrice == symbol_prices.end()) {
-            // If no price for this symbol was provided, skip or handle error
-            std::cerr << "[update_positions] Missing price for " << pos.symbol << "\n";
+        if (pos.id == position_id) {
+            int oid = generate_order_id();
+            // opposite direction
+            bool oppositeDir = !pos.is_long;
+            std::string ordType = (price <= 0.0) ? "(Market)" : "(Limit)";
+
+            Order closingOrd{
+                oid,
+                pos.symbol,
+                quantity,
+                price,
+                oppositeDir,
+                position_id // link to a position => closing
+            };
+            open_orders_.push_back(closingOrd);
+
+            std::cout << "[place_closing_order] Created closing order ID=" << oid
+                << " => close pos_id=" << position_id
+                << (oppositeDir ? " SHORT " : " LONG ")
+                << ordType << " " << quantity << " " << pos.symbol
+                << " @ " << price << "\n";
+            return;
+        }
+    }
+    std::cerr << "[place_closing_order] position_id=" << position_id << " not found\n";
+}
+
+/* ----------------------------------------------------
+   update_positions():
+   - For each order:
+       if closing_position_id != -1 => offset that position
+       else => normal open
+   - partial fill logic
+   - recompute PnL
+   - check liquidation
+-----------------------------------------------------*/
+void Account::update_positions(const std::map<std::string, std::pair<double, double>>& symbol_price_volume)
+{
+    double makerFee, takerFee;
+    std::tie(makerFee, takerFee) = get_fee_rates();
+
+    std::vector<Order> leftover;
+    leftover.reserve(open_orders_.size());
+
+    for (auto& ord : open_orders_) {
+        // check market data
+        auto it = symbol_price_volume.find(ord.symbol);
+        if (it == symbol_price_volume.end()) {
+            leftover.push_back(ord);
             continue;
         }
-        double current_price = itPrice->second;
-        double pnl = (current_price - pos.entry_price) * pos.quantity
+        double current_price = it->second.first;
+        double available_vol = it->second.second;
+        if (available_vol <= 0) {
+            leftover.push_back(ord);
+            continue;
+        }
+
+        // Decide market or limit
+        bool is_market = (ord.price <= 0.0);
+        bool can_fill = false;
+        if (is_market) {
+            can_fill = true;
+        }
+        else {
+            // limit logic
+            if (ord.is_long && current_price <= ord.price) {
+                can_fill = true;
+            }
+            else if (!ord.is_long && current_price >= ord.price) {
+                can_fill = true;
+            }
+        }
+        if (!can_fill) {
+            leftover.push_back(ord);
+            continue;
+        }
+
+        // partial fill
+        double fill_qty = std::min(ord.quantity, available_vol);
+        if (fill_qty <= 0) {
+            leftover.push_back(ord);
+            continue;
+        }
+
+        double fill_price = current_price; // simplified
+        double notional = fill_qty * fill_price;
+
+        // fee
+        double feeRate = (is_market ? takerFee : makerFee);
+        double fee = notional * feeRate;
+
+        // ----------- Case A: Closing Order ------------
+        if (ord.closing_position_id >= 0) {
+            bool foundPos = false;
+            for (auto& pos : positions_) {
+                if (pos.id == ord.closing_position_id) {
+                    foundPos = true;
+                    double close_qty = std::min(fill_qty, pos.quantity);
+
+                    // realized PnL
+                    double realized_pnl = (fill_price - pos.entry_price) * close_qty
+                        * (pos.is_long ? 1.0 : -1.0);
+
+                    double ratio = (close_qty / pos.quantity);
+                    double freed_margin = pos.initial_margin * ratio;
+                    double freed_maint = pos.maintenance_margin * ratio;
+                    double freed_fee = pos.fee * ratio; // partial approach
+                    double returned_amount = freed_margin + realized_pnl - fee;
+
+                    balance_ += returned_amount;
+                    used_margin_ -= freed_margin;
+
+                    pos.quantity -= close_qty;
+                    pos.initial_margin -= freed_margin;
+                    pos.maintenance_margin -= freed_maint;
+                    pos.fee -= freed_fee;
+                    pos.notional = pos.entry_price * pos.quantity; // or recalc
+
+                    std::cout << "[update_positions] Closing fill => pos_id=" << pos.id
+                        << ", closeQty=" << close_qty
+                        << ", realizedPnL=" << realized_pnl
+                        << ", closeFee=" << fee
+                        << ", new balance=" << balance_ << "\n";
+
+                    // reduce order qty
+                    ord.quantity -= close_qty;
+
+                    // check if pos fully closed
+                    if (pos.quantity <= 1e-8) {
+                        // remove from order_to_position_
+                        for (auto itMap = order_to_position_.begin(); itMap != order_to_position_.end(); ) {
+                            if (itMap->second == pos.id) {
+                                itMap = order_to_position_.erase(itMap);
+                            }
+                            else {
+                                ++itMap;
+                            }
+                        }
+                        // set quantity=0 => we erase it after loop
+                        pos.quantity = 0.0;
+                    }
+
+                    if (ord.quantity > 1e-8) {
+                        leftover.push_back(ord); // partial leftover
+                    }
+                    break;
+                }
+            }
+            if (!foundPos) {
+                std::cerr << "[update_positions] closing_position_id=" << ord.closing_position_id
+                    << " not found\n";
+                leftover.push_back(ord);
+            }
+        }
+        // ----------- Case B: Opening Order -------------
+        else {
+            double lev = get_symbol_leverage(ord.symbol);
+            double mmr, maxLev;
+            std::tie(mmr, maxLev) = get_tier_info(notional);
+            if (lev > maxLev) {
+                std::cerr << "[update_positions] Leverage too high => skip.\n";
+                leftover.push_back(ord);
+                continue;
+            }
+            double init_margin = notional / lev;
+            double maint_margin = notional * mmr;
+            double required = init_margin + fee;
+
+            double eq = get_equity();
+            if (eq < required) {
+                std::cerr << "[update_positions] Not enough equity => skip.\n";
+                leftover.push_back(ord);
+                continue;
+            }
+
+            // deduct margin + fee
+            balance_ -= required;
+            used_margin_ += init_margin;
+
+            // find if we have an existing position for this order
+            auto pm = order_to_position_.find(ord.id);
+            if (pm == order_to_position_.end()) {
+                // new position
+                int pid = generate_position_id();
+                Position newPos{
+                    pid,
+                    ord.id,
+                    ord.symbol,
+                    fill_qty,
+                    fill_price,
+                    ord.is_long,
+                    0.0,  // unrealized
+                    notional,
+                    init_margin,
+                    maint_margin,
+                    fee,
+                    lev,
+                    feeRate
+                };
+                positions_.push_back(newPos);
+                order_to_position_[ord.id] = pid;
+            }
+            else {
+                // partial fill for existing position
+                int pid = pm->second;
+                for (auto& p : positions_) {
+                    if (p.id == pid) {
+                        double old_notional = p.notional;
+                        double new_notional = old_notional + notional;
+                        double old_qty = p.quantity;
+                        double new_qty = old_qty + fill_qty;
+                        double new_entry = new_notional / new_qty;
+
+                        p.quantity = new_qty;
+                        p.entry_price = new_entry;
+                        p.notional = new_notional;
+                        p.initial_margin += init_margin;
+                        p.maintenance_margin += maint_margin;
+                        p.fee += fee;
+                        break;
+                    }
+                }
+            }
+
+            // leftover
+            double leftoverQty = ord.quantity - fill_qty;
+            if (leftoverQty > 1e-8) {
+                ord.quantity = leftoverQty;
+                leftover.push_back(ord);
+            }
+        }
+    }
+
+    // remove fully closed positions
+    positions_.erase(
+        std::remove_if(positions_.begin(), positions_.end(),
+            [](const Position& pp) { return pp.quantity <= 1e-8; }),
+        positions_.end()
+    );
+
+    // open_orders_ => leftover
+    open_orders_ = std::move(leftover);
+
+    // recompute unrealized PnL for all active positions
+    for (auto& pos : positions_) {
+        auto itp = symbol_price_volume.find(pos.symbol);
+        if (itp == symbol_price_volume.end()) {
+            continue;
+        }
+        double cur_price = itp->second.first;
+        double pnl = (cur_price - pos.entry_price) * pos.quantity
             * (pos.is_long ? 1.0 : -1.0);
         pos.unrealized_pnl = pnl;
     }
 
-    // 2) Check liquidation: if equity < sum of all maintenance margin => full liquidation
+    // liquidation check
     double equity = get_equity();
-    double total_maint = 0.0;
+    double totalMaint = 0.0;
     for (auto& p : positions_) {
-        total_maint += p.maintenance_margin;
+        totalMaint += p.maintenance_margin;
     }
-
-    if (equity < total_maint) {
-        std::cerr << "[update_positions] Liquidation triggered."
-            << " equity=" << equity
-            << ", totalMaint=" << total_maint << "\n";
-        // Full liquidation
+    if (equity < totalMaint) {
+        std::cerr << "[update_positions] Liquidation triggered! equity=" << equity
+            << ", totalMaint=" << totalMaint << "\n";
         balance_ = 0.0;
         used_margin_ = 0.0;
         positions_.clear();
+        open_orders_.clear();
+        order_to_position_.clear();
     }
 }
 
-void Account::close_position(const std::string& symbol, double price, bool is_market_order) {
-    double makerFee, takerFee;
-    std::tie(makerFee, takerFee) = get_fee_rates();
-    double feeRate = (is_market_order ? takerFee : makerFee);
+/* ----------------------------------------------------
+   close_position(by symbol):
+   - price <= 0 => market close
+   - price > 0  => limit close
+   - For each position on that symbol, create a closing order
+-----------------------------------------------------*/
+void Account::close_position(const std::string& symbol, double price) {
+    bool found = false;
+    for (auto& pos : positions_) {
+        if (pos.symbol == symbol) {
+            found = true;
+            double qtyToClose = pos.quantity;
+            place_closing_order(pos.id, qtyToClose, price);
+        }
+    }
+    if (!found) {
+        std::cerr << "[close_position] No position found for symbol=" << symbol << "\n";
+    }
+}
 
-    for (auto it = positions_.begin(); it != positions_.end(); ++it) {
-        if (it->symbol == symbol) {
-            // Compute "close notional" at current price
-            double close_notional = price * it->quantity;
-            // Closing fee
-            double close_fee = close_notional * feeRate;
-
-            // Realized PnL is the position's current unrealized
-            double realized_pnl = it->unrealized_pnl;
-
-            // Return margin + realized PnL, minus close fee
-            double returned_amount = it->initial_margin + realized_pnl - close_fee;
-
-            balance_ += returned_amount;
-            used_margin_ -= it->initial_margin;
-
-            std::cout << "[close_position] " << symbol
-                << (is_market_order ? " (Market)" : " (Limit)")
-                << ", realizedPnL=" << realized_pnl
-                << ", closeFee=" << close_fee
-                << ", new balance=" << balance_ << "\n";
-
-            positions_.erase(it);
+/* ----------------------------------------------------
+   close_position_by_id:
+   - price <= 0 => market, else => limit
+   - create a single closing order for that pos_id
+-----------------------------------------------------*/
+void Account::close_position_by_id(int position_id, double price) {
+    for (auto& pos : positions_) {
+        if (pos.id == position_id) {
+            double qtyToClose = pos.quantity;
+            place_closing_order(position_id, qtyToClose, price);
             return;
         }
     }
-    std::cerr << "[close_position] No position found for symbol " << symbol << "\n";
+    std::cerr << "[close_position_by_id] No position found with ID=" << position_id << "\n";
 }
 
-/**
- * Retrieves "maintenance_margin_rate" and "max_leverage" from margin_tiers,
- * based on position's notional.
- */
+/* ------------------- Queries & Cancel -------------------*/
+const std::vector<Account::Order>& Account::get_all_open_orders() const {
+    return open_orders_;
+}
+const std::vector<Account::Position>& Account::get_all_positions() const {
+    return positions_;
+}
+
+void Account::cancel_order_by_id(int order_id) {
+    bool found = false;
+    for (auto it = open_orders_.begin(); it != open_orders_.end();) {
+        if (it->id == order_id) {
+            found = true;
+            std::cout << "[cancel_order_by_id] Canceling order ID=" << order_id
+                << ", leftover qty=" << it->quantity << "\n";
+            it = open_orders_.erase(it);
+        }
+        else {
+            ++it;
+        }
+    }
+    if (!found) {
+        std::cerr << "[cancel_order_by_id] No open order with ID=" << order_id << "\n";
+    }
+}
+
+/* ------------------- Fee & Tier Helpers ------------------- */
 std::tuple<double, double> Account::get_tier_info(double notional) const {
-    // margin_tiers is sorted in ascending order by notional_upper
     for (auto& tier : margin_tiers) {
         if (notional <= tier.notional_upper) {
             return std::make_tuple(tier.maintenance_margin_rate, tier.max_leverage);
         }
     }
     // fallback
-    return std::make_tuple(margin_tiers.at(0).maintenance_margin_rate, margin_tiers.at(0).max_leverage);
+    return std::make_tuple(margin_tiers.at(0).maintenance_margin_rate,
+        margin_tiers.at(0).max_leverage);
 }
-
-/**
- * Retrieves maker/taker fees from vip_fee_rates (or default to VIP 0).
- */
 std::tuple<double, double> Account::get_fee_rates() const {
     auto it = vip_fee_rates.find(vip_level_);
     if (it != vip_fee_rates.end()) {
         return std::make_tuple(it->second.maker_fee_rate, it->second.taker_fee_rate);
     }
-    // fallback: VIP 0
-    return std::make_tuple(vip_fee_rates.at(0).maker_fee_rate, vip_fee_rates.at(0).taker_fee_rate);
+    // fallback VIP0
+    return std::make_tuple(vip_fee_rates.at(0).maker_fee_rate,
+        vip_fee_rates.at(0).taker_fee_rate);
 }
 
-/**
- * When user changes leverage for a symbol that already has a position,
- * we adjust margin usage. If new leverage is lower, we free up some margin;
- * if it's higher, we require more margin.
- */
+/* ----------------------------------------------------
+   adjust_position_leverage:
+   - If user changes symbol's leverage => recalc margin
+   - Not netting positions, just recalc each individually.
+-----------------------------------------------------*/
 bool Account::adjust_position_leverage(const std::string& symbol, double oldLev, double newLev) {
-    // Step 1: Gather all positions for this symbol
-    std::vector<std::reference_wrapper<Position>> symbolPositions;
+    std::vector<std::reference_wrapper<Position>> related;
     for (auto& pos : positions_) {
         if (pos.symbol == symbol) {
-            symbolPositions.push_back(pos);
+            related.push_back(pos);
         }
     }
-    if (symbolPositions.empty()) {
-        // No positions for this symbol, so we can just set the new leverage
-        return true;
+    if (related.empty()) {
+        return true; // no positions => ok
     }
 
-    // Variables to track total difference of margin
-    double totalDiff = 0.0;   // if > 0, means we need additional margin
-    // if < 0, means we release margin
-// We'll also store each position's new maintenance margin 
-// in case we need to revert.
-    std::vector<double> newMaintMargins(symbolPositions.size());
+    double totalDiff = 0.0;
+    std::vector<double> newMaint(related.size());
 
-    // Step 2: For each position, compute how margin usage would change
-    for (size_t i = 0; i < symbolPositions.size(); i++) {
-        Position& pos = symbolPositions[i].get();
-
-        double oldMargin = pos.initial_margin;
-        double newMargin = pos.notional / newLev; // Since notional is constant
-
-        // Check the tier for notional => get maintenance_margin_rate, max_leverage
-        double mmr, tier_max_lev;
-        std::tie(mmr, tier_max_lev) = get_tier_info(pos.notional);
-
-        // If newLeverage exceeds tier max, fail immediately (rollback).
-        if (newLev > tier_max_lev) {
+    for (size_t i = 0; i < related.size(); i++) {
+        Position& p = related[i].get();
+        double mmr, maxLev;
+        std::tie(mmr, maxLev) = get_tier_info(p.notional);
+        if (newLev > maxLev) {
             std::cerr << "[adjust_position_leverage] newLev=" << newLev
-                << "x > tier_max_lev=" << tier_max_lev << "x for notional="
-                << pos.notional << " => cannot change.\n";
-            return false; // no changes made
+                << " > maxLev=" << maxLev << "\n";
+            return false;
         }
+        double oldM = p.initial_margin;
+        double newM = p.notional / newLev;
+        double diff = (newM - oldM);
+        totalDiff += diff;
 
-        // We'll calculate how maintenance margin changes as well
-        double newMaintMargin = pos.notional * mmr;
-        newMaintMargins[i] = newMaintMargin;
-
-        double diff = newMargin - oldMargin;
-        totalDiff += diff; // sum up all differences
+        newMaint[i] = p.notional * mmr;
     }
 
-    // Step 3: Check if we have enough equity if totalDiff > 0
+    double eq = get_equity();
     if (totalDiff > 0) {
-        double eq = get_equity(); // could become negative balance, but we still need eq >= totalDiff
         if (eq < totalDiff) {
-            std::cerr << "[adjust_position_leverage] Not enough equity. Need "
-                << totalDiff << ", have " << eq << ".\n";
-            return false; // fail => no partial changes
+            std::cerr << "[adjust_position_leverage] Not enough equity.\n";
+            return false;
         }
-    }
-
-    // Step 4: If we pass all checks, apply changes to *all* positions
-    // This ensures atomicity: either all are updated or none.
-    if (totalDiff > 0) {
-        // we need more margin
-        balance_ -= totalDiff;    // can go negative if eq covers it
+        balance_ -= totalDiff;
         used_margin_ += totalDiff;
     }
     else {
-        // we release margin
-        double release = std::fabs(totalDiff);
-        balance_ += release;
-        used_margin_ -= release;
+        balance_ += std::fabs(totalDiff);
+        used_margin_ -= std::fabs(totalDiff);
     }
 
-    // Step 5: Update each position's initial_margin, leverage, maintenance_margin
-    for (size_t i = 0; i < symbolPositions.size(); i++) {
-        Position& pos = symbolPositions[i].get();
-        double newMargin = pos.notional / newLev;
-        pos.initial_margin = newMargin;
-        pos.leverage = newLev;
-        pos.maintenance_margin = newMaintMargins[i];
+    // apply
+    for (size_t i = 0; i < related.size(); i++) {
+        Position& p = related[i].get();
+        p.initial_margin = p.notional / newLev;
+        p.leverage = newLev;
+        p.maintenance_margin = newMaint[i];
     }
 
     return true;

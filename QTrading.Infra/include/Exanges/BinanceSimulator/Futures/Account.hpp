@@ -3,71 +3,129 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <unordered_map>
 #include <tuple>
 
-// A simplified cross-margin account
+/**
+ * Hedge-mode Account class:
+ * - Allows multiple positions (long/short) on the same symbol simultaneously.
+ * - Distinguishes positions from different orders (one order -> one position, partial fill merges).
+ * - Closing a position also goes through the matching engine by creating a "closing order".
+ * - Market or Limit is determined by price <= 0 => market, > 0 => limit.
+ */
 class Account {
 public:
-    // Constructor with initial balance. We allow cross margin with negative wallet balance
-    // as long as total equity >= 0.
     Account(double initial_balance, int vip_level = 0);
 
-    double get_balance() const;      // Raw wallet balance (may be negative in cross margin)
+    double get_balance() const;
     double total_unrealized_pnl() const;
-    double get_equity() const;       // = balance_ + total_unrealized_pnl()
+    double get_equity() const;
 
-    // Set the leverage for a specific symbol
+    // Leverage set/get
     void set_symbol_leverage(const std::string& symbol, double newLeverage);
-    // Get the leverage for a specific symbol
     double get_symbol_leverage(const std::string& symbol) const;
 
-    // Place a new order (long/short, market/limit). 
-    // This will check total equity vs required margin+fee, 
-    // and reduce balance_ by (margin+fee) allowing negative.
+    /**
+     * place_order:
+     * If price > 0 => limit order, else (price <= 0) => market order.
+     * closing_position_id = -1 => normal opening order.
+     */
     void place_order(const std::string& symbol,
         double quantity,
         double price,
-        bool is_long,
-        bool is_market_order);
+        bool is_long);
 
-    // Update positions with new market data:
-    //  - Recompute unrealized PNL
-    //  - Check liquidation (full liquidation if equity < totalMaintenanceMargin)
-    void update_positions(const std::map<std::string, double>& symbol_prices);
+    /**
+     * The main matching function:
+     * - For each open order:
+     *   - If closing_position_id != -1 => offset that existing position
+     *   - Else => normal opening order
+     * - Support partial fills
+     * - Recompute PnL, check liquidation
+     */
+    void update_positions(const std::map<std::string, std::pair<double, double>>& symbol_price_volume);
 
-    // Close a position (fully). 
-    // This realizes any PNL, refunds margin, subtracts fees, etc.
-    void close_position(const std::string& symbol, double price, bool is_market_order);
+    /**
+     * close_position(by symbol):
+     * - If user provides price <= 0 => market close,
+     *   else => limit close
+     * - Internally creates "closing orders" for all positions under that symbol.
+     */
+    void close_position(const std::string& symbol, double price = 0.0);
 
-private:
-    struct Position {
+    /**
+     * close_position_by_id:
+     * - If price <= 0 => market close, else => limit close
+     * - Creates a single "closing order" for a specific position
+     */
+    void close_position_by_id(int position_id, double price = 0.0);
+
+    // Cancel a specific open order by ID (remaining part).
+    void cancel_order_by_id(int order_id);
+
+    // ------------------- Data Structures -------------------
+    struct Order {
+        int         id;               // unique order ID
         std::string symbol;
-        double quantity;
-        double entry_price;
-        bool is_long;
-        double unrealized_pnl;
-        double notional;
-        double initial_margin;
-        double maintenance_margin;
-        double fee;
-        double leverage;
-        double fee_rate;
+        double      quantity;         // remaining quantity to be matched
+        double      price;            // <= 0 => market, > 0 => limit
+        bool        is_long;
+
+        // If >= 0 => means this order is closing an existing position_id
+        // If -1 => normal opening order
+        int         closing_position_id;
     };
 
-    double balance_;          // The wallet balance. Can be negative in cross margin
-    double used_margin_;      // The sum of initial_margin across all positions (not strictly needed in cross, but kept)
-    int vip_level_;           // For future VIP-based fees
+    struct Position {
+        int         id;             // unique position ID
+        int         order_id;       // which order originally opened it
+        std::string symbol;
+        double      quantity;
+        double      entry_price;
+        bool        is_long;
+        double      unrealized_pnl;
+        double      notional;
+        double      initial_margin;
+        double      maintenance_margin;
+        double      fee;
+        double      leverage;
+        double      fee_rate;
+    };
 
-    std::vector<Position> positions_;
-    // Keep a map from symbol -> leverage
+    // ------------------- Queries & Cancel -------------------
+    const std::vector<Account::Order>& get_all_open_orders() const;
+    const std::vector<Account::Position>& get_all_positions() const;
+
+private:
+
+    double balance_;
+    double used_margin_;
+    int    vip_level_;
+
+    // Per-symbol leverage
     std::map<std::string, double> symbol_leverage_;
 
-    // Helper: obtain tier-based margin rates
+    // ID counters
+    int next_order_id_;
+    int next_position_id_;
+
+    // All open orders
+    std::vector<Order> open_orders_;
+
+    // All active positions
+    std::vector<Position> positions_;
+
+    // For partial fills from same order => same position
+    std::unordered_map<int, int> order_to_position_;
+
+    // ------------------- Internal Helpers -------------------
+    int  generate_order_id();
+    int  generate_position_id();
+
     std::tuple<double, double> get_tier_info(double notional) const;
-
-    // Helper: obtain maker/taker fee rates for the current VIP level
     std::tuple<double, double> get_fee_rates() const;
-
-    // If a position for this symbol already exists, adjust margin usage after changing leverage
     bool adjust_position_leverage(const std::string& symbol, double oldLev, double newLev);
+
+    // Helper to place a "closing order" for position
+    void place_closing_order(int position_id, double quantity, double price);
 };
