@@ -34,9 +34,8 @@ double Account::get_symbol_leverage(const std::string& symbol) const {
 }
 
 void Account::set_symbol_leverage(const std::string& symbol, double newLeverage) {
-    if (newLeverage <= 0.0) {
-        std::cerr << "[set_symbol_leverage] Invalid leverage <= 0\n";
-        return;
+    if (newLeverage <= 0) {
+        throw std::runtime_error("Leverage must be > 0.");
     }
     double oldLev = 1.0;
     auto it = symbol_leverage_.find(symbol);
@@ -73,12 +72,6 @@ void Account::place_order(const std::string& symbol,
 {
     // 1) Retrieve or assign user leverage
     double lev = get_symbol_leverage(symbol);
-    if (lev < 0.0) {
-        lev = 20.0; // default if not set
-        symbol_leverage_[symbol] = lev;
-        std::cout << "[place_order] " << symbol
-            << " leverage not set, using default 20x\n";
-    }
 
     // 2) Get maker/taker fees
     double makerFee, takerFee;
@@ -223,7 +216,7 @@ std::tuple<double, double> Account::get_tier_info(double notional) const {
         }
     }
     // fallback
-    return std::make_tuple(0.075, 8.0);
+    return std::make_tuple(margin_tiers.at(0).maintenance_margin_rate, margin_tiers.at(0).max_leverage);
 }
 
 /**
@@ -235,7 +228,7 @@ std::tuple<double, double> Account::get_fee_rates() const {
         return std::make_tuple(it->second.maker_fee_rate, it->second.taker_fee_rate);
     }
     // fallback: VIP 0
-    return std::make_tuple(0.0002, 0.0004);
+    return std::make_tuple(vip_fee_rates.at(0).maker_fee_rate, vip_fee_rates.at(0).taker_fee_rate);
 }
 
 /**
@@ -244,45 +237,84 @@ std::tuple<double, double> Account::get_fee_rates() const {
  * if it's higher, we require more margin.
  */
 bool Account::adjust_position_leverage(const std::string& symbol, double oldLev, double newLev) {
-    bool found = false;
+    // Step 1: Gather all positions for this symbol
+    std::vector<std::reference_wrapper<Position>> symbolPositions;
     for (auto& pos : positions_) {
         if (pos.symbol == symbol) {
-            found = true;
-            // Recompute required margin
-            double oldMargin = pos.initial_margin;
-            double newMargin = pos.notional / newLev;
-
-            double diff = newMargin - oldMargin;
-            if (diff > 0) {
-                // Need more margin
-                double eq = get_equity();
-                if (eq < diff) {
-                    return false;  // insufficient equity
-                }
-                balance_ -= diff;        // balance can go negative
-                used_margin_ += diff;
-            }
-            else {
-                // Releasing margin
-                double release = std::fabs(diff);
-                balance_ += release;
-                used_margin_ -= release;
-            }
-
-            pos.initial_margin = newMargin;
-            pos.leverage = newLev;
-
-            // maintenance_margin is based on notional * mmr 
-            // but mmr depends on tier => optionally, re-check if notional still in same tier
-            double mmr, tier_max_lev;
-            std::tie(mmr, tier_max_lev) = get_tier_info(pos.notional);
-            // If newLev > tier_max_lev => might fail or you do partial logic
-            pos.maintenance_margin = pos.notional * mmr;
+            symbolPositions.push_back(pos);
         }
     }
-    // no position found => simply set or ignore
-    if (!found) {
+    if (symbolPositions.empty()) {
+        // No positions for this symbol, so we can just set the new leverage
         return true;
     }
+
+    // Variables to track total difference of margin
+    double totalDiff = 0.0;   // if > 0, means we need additional margin
+    // if < 0, means we release margin
+// We'll also store each position's new maintenance margin 
+// in case we need to revert.
+    std::vector<double> newMaintMargins(symbolPositions.size());
+
+    // Step 2: For each position, compute how margin usage would change
+    for (size_t i = 0; i < symbolPositions.size(); i++) {
+        Position& pos = symbolPositions[i].get();
+
+        double oldMargin = pos.initial_margin;
+        double newMargin = pos.notional / newLev; // Since notional is constant
+
+        // Check the tier for notional => get maintenance_margin_rate, max_leverage
+        double mmr, tier_max_lev;
+        std::tie(mmr, tier_max_lev) = get_tier_info(pos.notional);
+
+        // If newLeverage exceeds tier max, fail immediately (rollback).
+        if (newLev > tier_max_lev) {
+            std::cerr << "[adjust_position_leverage] newLev=" << newLev
+                << "x > tier_max_lev=" << tier_max_lev << "x for notional="
+                << pos.notional << " => cannot change.\n";
+            return false; // no changes made
+        }
+
+        // We'll calculate how maintenance margin changes as well
+        double newMaintMargin = pos.notional * mmr;
+        newMaintMargins[i] = newMaintMargin;
+
+        double diff = newMargin - oldMargin;
+        totalDiff += diff; // sum up all differences
+    }
+
+    // Step 3: Check if we have enough equity if totalDiff > 0
+    if (totalDiff > 0) {
+        double eq = get_equity(); // could become negative balance, but we still need eq >= totalDiff
+        if (eq < totalDiff) {
+            std::cerr << "[adjust_position_leverage] Not enough equity. Need "
+                << totalDiff << ", have " << eq << ".\n";
+            return false; // fail => no partial changes
+        }
+    }
+
+    // Step 4: If we pass all checks, apply changes to *all* positions
+    // This ensures atomicity: either all are updated or none.
+    if (totalDiff > 0) {
+        // we need more margin
+        balance_ -= totalDiff;    // can go negative if eq covers it
+        used_margin_ += totalDiff;
+    }
+    else {
+        // we release margin
+        double release = std::fabs(totalDiff);
+        balance_ += release;
+        used_margin_ -= release;
+    }
+
+    // Step 5: Update each position's initial_margin, leverage, maintenance_margin
+    for (size_t i = 0; i < symbolPositions.size(); i++) {
+        Position& pos = symbolPositions[i].get();
+        double newMargin = pos.notional / newLev;
+        pos.initial_margin = newMargin;
+        pos.leverage = newLev;
+        pos.maintenance_margin = newMaintMargins[i];
+    }
+
     return true;
 }

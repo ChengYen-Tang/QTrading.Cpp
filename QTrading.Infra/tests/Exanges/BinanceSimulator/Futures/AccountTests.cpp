@@ -66,13 +66,13 @@ TEST_F(AccountTest, PlaceOrderSuccess) {
     testing::internal::CaptureStdout();
 
     // 下單: BTCUSDT, 1 BTC @7000, 多單, limit order
-    //   未設定槓桿 => 預設=20
-    //   notional=7000 => init_margin=350 => fee=7000*0.0002=1.4 => total=351.4
-    //   balance=10000-351.4=9648.6
+    //   未設定槓桿 => 預設=1
+	//   notional=7000 => init_margin=7000 => fee=7000*0.0002=1.4 => total=7001.4
+	//   balance=10000-7001.4=2998.6
     account.place_order("BTCUSDT", 1.0, 7000.0, true, false);
 
     std::string output = testing::internal::GetCapturedStdout();
-    EXPECT_DOUBLE_EQ(account.get_balance(), 9648.6);
+    EXPECT_DOUBLE_EQ(account.get_balance(), 2998.6);
     EXPECT_TRUE(output.find("BTCUSDT LONG 1 @ 7000") != std::string::npos);
 }
 
@@ -94,7 +94,7 @@ TEST_F(AccountTest, PlaceOrderInsufficientEquity) {
     // balance 不變
     EXPECT_DOUBLE_EQ(account.get_balance(), 100.0);
     // 驗證輸出
-    EXPECT_TRUE(errOutput.find("Insufficient equity") != std::string::npos);
+    EXPECT_TRUE(errOutput.find("Not enough equity") != std::string::npos);
 }
 
 //-------------------------------------------------------------------
@@ -112,11 +112,11 @@ TEST_F(AccountTest, PlaceOrderExceedTierLeverage) {
     account.set_symbol_leverage("BTCUSDT", 60.0);
 
     testing::internal::CaptureStderr();
-    account.place_order("BTCUSDT", 1.0, 100000.0, true, false);
+    account.place_order("BTCUSDT", 120.0, 100000.0, true, false);
     std::string out = testing::internal::GetCapturedStderr();
 
     EXPECT_DOUBLE_EQ(account.get_balance(), 100000.0);
-    EXPECT_TRUE(out.find("max allowed leverage is 50") != std::string::npos);
+    EXPECT_TRUE(out.find("tier max=50") != std::string::npos);
 }
 
 //-------------------------------------------------------------------
@@ -129,15 +129,19 @@ TEST_F(AccountTest, UpdatePositionsMultipleSymbols) {
     // VIP=1 => maker=0.00018, taker=0.00036
     Account account(50000.0, 1);
 
+	account.set_symbol_leverage("BTCUSDT", 20.0);
+
     // 下單1: BTCUSDT 多單(限價)
-    //   notional= 2*20000=40000 => leverage=20 => init_margin=2000 => fee=40000*0.00018=7.2 => total=2007.2
-    //   balance=47992.8
+    //   notional= 2*20000=40000 => leverage=20 => init_margin=2000 => fee=40000*0.00016=6.4 => total=2006.4
+    //   balance=47993.6
     account.place_order("BTCUSDT", 2.0, 20000.0, true, false);
-    EXPECT_DOUBLE_EQ(account.get_balance(), 47992.8);
+    EXPECT_DOUBLE_EQ(account.get_balance(), 47993.6);
+
+    account.set_symbol_leverage("ETHUSDT", 20.0);
 
     // 下單2: ETHUSDT 空單(市價)
-    //   notional=10*2000=20000 => leverage=20 => init_margin=1000 => fee=20000*0.00036=7.2 => total=1007.2
-    //   balance=47992.8-1007.2=46985.6
+    //   notional=10*2000=20000 => leverage=20 => init_margin=1000 => fee=20000*0.00040=8.0 => total=1008.0
+    //   balance=47993.6-1008.0=46985.6
     account.place_order("ETHUSDT", 10.0, 2000.0, false, true);
     EXPECT_DOUBLE_EQ(account.get_balance(), 46985.6);
 
@@ -167,12 +171,19 @@ TEST_F(AccountTest, UpdatePositionsMultipleSymbols) {
 TEST_F(AccountTest, UpdatePositionsMissingSymbolPrice) {
     Account account(30000.0, 0);
 
-    // 下多單: BTCUSDT, 1@20000 => margin=1000 => fee=2 => bal=28998
+	account.set_symbol_leverage("BTCUSDT", 20.0);
+    // 下單1: BTCUSDT 多單(市價)
+    //   notional= 1*20000=20000 => leverage=20 => init_margin=1000 => fee=20000*0.0005=10 => total=1010
+    //   balance=28990
     account.place_order("BTCUSDT", 1.0, 20000.0, true, true);
+    EXPECT_DOUBLE_EQ(account.get_balance(), 28990);
 
-    // 下空單: ETHUSDT, 5@1500 => notional=7500 => margin=375 => fee=3 => total=378 => bal=28620
+    account.set_symbol_leverage("ETHUSDT", 20.0);
+    // 下單2: ETHUSDT 空單(限價)
+    //   notional=5*1500=7500 => leverage=20 => init_margin=375 => fee=7500*0.00020=1.5 => total=376.5
+    //   balance=28990-376.5=288613.5
     account.place_order("ETHUSDT", 5.0, 1500.0, false, false);
-    EXPECT_DOUBLE_EQ(account.get_balance(), 28620.0);
+    EXPECT_DOUBLE_EQ(account.get_balance(), 28613.5);
 
     // 價格 map 只提供 BTCUSDT
     std::map<std::string, double> priceMap{
@@ -188,11 +199,11 @@ TEST_F(AccountTest, UpdatePositionsMissingSymbolPrice) {
     // ETH(空): no price => skip => unrealized=0
     // total_unrealized=1000
     EXPECT_DOUBLE_EQ(account.total_unrealized_pnl(), 1000.0);
-    // equity=28620+1000=29620
-    EXPECT_DOUBLE_EQ(account.get_equity(), 29620.0);
+    // equity=28613.5+1000=29613.5
+    EXPECT_DOUBLE_EQ(account.get_equity(), 29613.5);
 
-    // 應該印出 "No price available for symbol: ETHUSDT"
-    EXPECT_TRUE(logs.find("No price available for symbol: ETHUSDT") != std::string::npos);
+    // 應該印出 "Missing price for ETHUSDT"
+    EXPECT_TRUE(logs.find("Missing price for ETHUSDT") != std::string::npos);
 }
 
 //-------------------------------------------------------------------
@@ -205,6 +216,7 @@ TEST_F(AccountTest, UpdatePositionsTriggerLiquidation) {
     // 下多單: 5 BTC@1000 => notional=5000 => 20x => init_margin=250 => fee=1 => total=251 => bal=3749
     //   (為了更快達到維持保證金檢查，可再下單)
     Account account(4000.0, 0);
+    account.set_symbol_leverage("BTCUSDT", 20.0);
     account.place_order("BTCUSDT", 5.0, 1000.0, true, false);
     EXPECT_DOUBLE_EQ(account.get_balance(), 3749.0);
 
@@ -235,6 +247,7 @@ TEST_F(AccountTest, UpdatePositionsTriggerLiquidation) {
 TEST_F(AccountTest, ClosePosition) {
     Account account(10000.0, 0);
 
+    account.set_symbol_leverage("BTCUSDT", 20.0);
     // 下單: 1 BTC@5000 => notional=5000 => init_margin=250 => fee=1 => total=251 => bal=9749
     account.place_order("BTCUSDT", 1.0, 5000.0, true, false);
     EXPECT_DOUBLE_EQ(account.get_balance(), 9749.0);
@@ -256,16 +269,16 @@ TEST_F(AccountTest, ClosePosition) {
     account.close_position("BTCUSDT", 6000.0, false);
     std::string msg = testing::internal::GetCapturedStdout();
 
-    EXPECT_TRUE(msg.find("realized PnL=1000") != std::string::npos);
+    EXPECT_TRUE(msg.find("realizedPnL=1000") != std::string::npos);
     EXPECT_NEAR(account.get_balance(), 10997.8, 1e-9);
     EXPECT_DOUBLE_EQ(account.total_unrealized_pnl(), 0.0);
     EXPECT_DOUBLE_EQ(account.get_equity(), 10997.8);
 
     // 再關同 symbol => "No position found"
-    testing::internal::CaptureStdout();
+    testing::internal::CaptureStderr();
     account.close_position("BTCUSDT", 6000.0, false);
-    std::string msg2 = testing::internal::GetCapturedStdout();
-    EXPECT_TRUE(msg2.find("No position found for BTCUSDT") != std::string::npos);
+    std::string msg2 = testing::internal::GetCapturedStderr();
+    EXPECT_TRUE(msg2.find("No position found for symbol BTCUSDT") != std::string::npos);
 }
 
 //-------------------------------------------------------------------
@@ -277,42 +290,46 @@ TEST_F(AccountTest, ClosePosition) {
 TEST_F(AccountTest, AdjustPositionLeverage) {
     Account account(10000.0, 0);
 
-    // 先下單: 1 BTC @4000 => notional=4000 => init_margin=200 => fee=0.8 => total=200.8 => bal=9799.2
+    account.set_symbol_leverage("BTCUSDT", 20.0);
+    // 先下單: 1 BTC @4000 => notional=4000 => init_margin=200 => fee=2 => total=202 => bal=9798
     account.place_order("BTCUSDT", 1.0, 4000.0, true, true);
-    EXPECT_DOUBLE_EQ(account.get_balance(), 9799.2);
+    EXPECT_DOUBLE_EQ(account.get_balance(), 9798);
 
-    // 改槓桿: 20=>10 => newMargin=400 => diff=+200 => bal=9799.2-200=9599.2
+    // 改槓桿: 20=>10 => newMargin=400 => diff=+200 => bal=9798-200=9598
     account.set_symbol_leverage("BTCUSDT", 10.0);
-    EXPECT_DOUBLE_EQ(account.get_balance(), 9599.2);
+    EXPECT_DOUBLE_EQ(account.get_balance(), 9598);
 
-    // 再將槓桿10=>40 => newMargin=4000/40=100 => 釋放300 => bal=9599.2+300=9899.2
+    // 再將槓桿10=>40 => newMargin=4000/40=100 => 釋放300 => bal=9598+300=9898
     account.set_symbol_leverage("BTCUSDT", 40.0);
-    EXPECT_DOUBLE_EQ(account.get_balance(), 9899.2);
+    EXPECT_DOUBLE_EQ(account.get_balance(), 9898);
 
     // 若餘額不足 => 調小槓桿需要更多margin => 失敗
     // 先下單再追加大倉, 減少balance
     account.place_order("BTCUSDT", 5.0, 4000.0, true, true);
-    // 5 BTC@4000 => notional=20000 => margin=20000/40=500 => fee=20000*0.0004=8 => total=508 => bal=9899.2-508=9391.2
+    // 5 BTC@4000 => notional=20000 => margin=20000/40=500 => fee=20000*0.0005=10 => total=510 => bal=9898-510=9388
+    EXPECT_DOUBLE_EQ(account.get_balance(), 9388);
 
     // 現在將槓桿從40 =>1 => newMargin=? 
     //   position(1BTC) => notional=4000
     //   position(5BTC) => notional=20000
     //   total notional=24000 => newMargin=24000/1=24000 => diff=24000 - ( (4000/40)+(20000/40) )= 24000- (100+500)=23400 => 需要23400
-    //   但balance只有9391.2 + unrealized(暫時0)=9391.2 => 不足 => fail
+    //   但balance只有9388 + unrealized(暫時0)=9388 => 不足 => fail
     testing::internal::CaptureStderr();
     account.set_symbol_leverage("BTCUSDT", 1.0);
     std::string leverageLogs = testing::internal::GetCapturedStderr();
 
+    EXPECT_DOUBLE_EQ(account.get_symbol_leverage("BTCUSDT"), 40.0);
     // balance 不會變
-    EXPECT_DOUBLE_EQ(account.get_balance(), 9391.2);
+    EXPECT_DOUBLE_EQ(account.get_balance(), 9388);
     // stderr => "Failed to change leverage"
-    EXPECT_TRUE(leverageLogs.find("Failed to change leverage") != std::string::npos);
+    EXPECT_TRUE(leverageLogs.find("Not enough equity to adjust") != std::string::npos);
 }
 
 TEST_F(AccountTest, UpdatePositionsMultipleSymbolOneLiquidation) {
     // 假設初始餘額 5000 美金, VIP=0
     Account account(5000.0, 0);
 
+	account.set_symbol_leverage("BTCUSDT", 20.0);
     // 1) 下單：BTCUSDT 多單，數量很大 => 容易在行情不利時爆倉
     //    notional = 3 BTC * 2000 = 6000
     //    leverage 預設=20 => initial_margin=6000/20=300, fee=6000*0.0002=1.2 => total=301.2
@@ -320,6 +337,7 @@ TEST_F(AccountTest, UpdatePositionsMultipleSymbolOneLiquidation) {
     account.place_order("BTCUSDT", 3.0, 2000.0, true, /*is_market=*/false);
     EXPECT_DOUBLE_EQ(account.get_balance(), 4698.8);
 
+    account.set_symbol_leverage("ETHUSDT", 20.0);
     // 2) 下單：ETHUSDT 空單，數量相對小 => 不易引發爆倉
     //    notional= 10 ETH * 1500= 15000
     //    leverage=20 => initial_margin=750 => fee=15000*0.0002=3 => total=753 => balance=3945.8
@@ -360,8 +378,5 @@ TEST_F(AccountTest, UpdatePositionsMultipleSymbolOneLiquidation) {
     EXPECT_DOUBLE_EQ(account.get_balance(), 0.0);
     EXPECT_DOUBLE_EQ(account.total_unrealized_pnl(), 0.0);
     EXPECT_DOUBLE_EQ(account.get_equity(), 0.0);
-
-    // positions_ 皆被清空後，再做多餘檢查
-    // (您可以修改 Account 類別讓它提供類似 get_positions() 的方法，或者以 friend 方式檢查，但這裡僅檢查 equity=0 即可)
 }
 

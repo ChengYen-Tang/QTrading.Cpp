@@ -12,7 +12,7 @@ struct FeeRate {
 
 // Mapping from VIP level to fee rates
 const std::map<int, FeeRate> vip_fee_rates = {
-    {0, {0.00020, 0.00050}},   // VIP 0
+    {0, {0.00020, 0.00050}}, // VIP 0
     {1, {0.00016, 0.00040}}, // VIP 1
     {2, {0.00014, 0.00035}}, // VIP 2
     {3, {0.00012, 0.00032}}, // VIP 3
