@@ -107,6 +107,13 @@ void Account::place_order(const std::string& symbol,
         << " @ " << price << "\n";
 }
 
+void Account::place_order(const std::string& symbol,
+	double quantity,
+	bool is_long)
+{
+	place_order(symbol, quantity, 0.0, is_long);
+}
+
 /* ----------------------------------------------------
    place_closing_order() - internal helper
    - Opposite direction from the position
@@ -387,6 +394,8 @@ void Account::update_positions(const std::map<std::string, std::pair<double, dou
         open_orders_.clear();
         order_to_position_.clear();
     }
+	std::cout << "[update_positions] equity=" << equity
+		<< ", totalMaint=" << totalMaint << "\n";
 }
 
 /* ----------------------------------------------------
@@ -409,6 +418,10 @@ void Account::close_position(const std::string& symbol, double price) {
     }
 }
 
+void Account::close_position(const std::string& symbol) {
+	close_position(symbol, 0.0);
+}
+
 /* ----------------------------------------------------
    close_position_by_id:
    - price <= 0 => market, else => limit
@@ -423,6 +436,10 @@ void Account::close_position_by_id(int position_id, double price) {
         }
     }
     std::cerr << "[close_position_by_id] No position found with ID=" << position_id << "\n";
+}
+
+void Account::close_position_by_id(int position_id) {
+	close_position_by_id(position_id, 0.0);
 }
 
 /* ------------------- Queries & Cancel -------------------*/

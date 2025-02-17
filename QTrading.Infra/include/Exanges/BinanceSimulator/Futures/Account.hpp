@@ -28,11 +28,16 @@ public:
     /**
      * place_order:
      * If price > 0 => limit order, else (price <= 0) => market order.
-     * closing_position_id = -1 => normal opening order.
      */
     void place_order(const std::string& symbol,
         double quantity,
         double price,
+        bool is_long);
+    /**
+     * market order.
+     */
+    void place_order(const std::string& symbol,
+        double quantity,
         bool is_long);
 
     /**
@@ -51,14 +56,26 @@ public:
      *   else => limit close
      * - Internally creates "closing orders" for all positions under that symbol.
      */
-    void close_position(const std::string& symbol, double price = 0.0);
+    void close_position(const std::string& symbol, double price);
+    /**
+     * close_position(by symbol):
+     * - Use market close
+     * - Internally creates "closing orders" for all positions under that symbol.
+     */
+    void close_position(const std::string& symbol);
 
     /**
      * close_position_by_id:
      * - If price <= 0 => market close, else => limit close
      * - Creates a single "closing order" for a specific position
      */
-    void close_position_by_id(int position_id, double price = 0.0);
+    void close_position_by_id(int position_id, double price);
+    /**
+     * close_position_by_id:
+     * - Use market close
+     * - Creates a single "closing order" for a specific position
+     */
+    void close_position_by_id(int position_id);
 
     // Cancel a specific open order by ID (remaining part).
     void cancel_order_by_id(int order_id);
