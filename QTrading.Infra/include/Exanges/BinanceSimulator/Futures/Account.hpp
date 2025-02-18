@@ -2,82 +2,65 @@
 
 #include <string>
 #include <vector>
-#include <map>
 #include <unordered_map>
 #include <tuple>
 
 /**
- * Hedge-mode Account class:
- * - Allows multiple positions (long/short) on the same symbol simultaneously.
- * - Distinguishes positions from different orders (one order -> one position, partial fill merges).
- * - Closing a position also goes through the matching engine by creating a "closing order".
- * - Market or Limit is determined by price <= 0 => market, > 0 => limit.
+ * Optimized Hedge-mode Account class for high-frequency trading.
+ * - Allows multiple positions (long/short) on the same symbol concurrently.
+ * - Distinguishes positions by order; partial fills from the same order merge.
+ * - Closing a position goes through the matching engine via "closing orders."
+ * - Market order: price <= 0; Limit order: price > 0.
  */
 class Account {
 public:
     Account(double initial_balance, int vip_level = 0);
 
+    // Basic getters
     double get_balance() const;
     double total_unrealized_pnl() const;
     double get_equity() const;
 
-    // Leverage set/get
+    // Leverage: set and get for a given symbol
     void set_symbol_leverage(const std::string& symbol, double newLeverage);
     double get_symbol_leverage(const std::string& symbol) const;
 
     /**
-     * place_order:
-     * If price > 0 => limit order, else (price <= 0) => market order.
+     * Place an order.
+     * If price > 0, it's a limit order; if price <= 0, it's a market order.
      */
-    void place_order(const std::string& symbol,
-        double quantity,
-        double price,
-        bool is_long);
-    /**
-     * market order.
-     */
-    void place_order(const std::string& symbol,
-        double quantity,
-        bool is_long);
+    void place_order(const std::string& symbol, double quantity, double price, bool is_long);
+    // Overload for market order (price defaults to 0)
+    void place_order(const std::string& symbol, double quantity, bool is_long);
 
     /**
-     * The main matching function:
-     * - For each open order:
-     *   - If closing_position_id != -1 => offset that existing position
-     *   - Else => normal opening order
-     * - Support partial fills
-     * - Recompute PnL, check liquidation
+     * Main matching function.
+     * For each open order:
+     *  - If closing_position_id != -1, process as a closing order.
+     *  - Else, process as a normal opening order.
+     * Supports partial fills, recalculates PnL, and checks for liquidation.
+     *
+     * The parameter symbol_price_volume uses unordered_map for O(1) lookups.
      */
-    void update_positions(const std::map<std::string, std::pair<double, double>>& symbol_price_volume);
+    void update_positions(const std::unordered_map<std::string, std::pair<double, double>>& symbol_price_volume);
 
     /**
-     * close_position(by symbol):
-     * - If user provides price <= 0 => market close,
-     *   else => limit close
-     * - Internally creates "closing orders" for all positions under that symbol.
+     * Close positions by symbol.
+     * If price <= 0, market close; if price > 0, limit close.
+     * Internally creates closing orders for all positions under that symbol.
      */
     void close_position(const std::string& symbol, double price);
-    /**
-     * close_position(by symbol):
-     * - Use market close
-     * - Internally creates "closing orders" for all positions under that symbol.
-     */
     void close_position(const std::string& symbol);
 
     /**
-     * close_position_by_id:
-     * - If price <= 0 => market close, else => limit close
-     * - Creates a single "closing order" for a specific position
+     * Close a specific position by its ID.
+     * If price <= 0, market close; if price > 0, limit close.
+     * Creates a single closing order for the specified position.
      */
     void close_position_by_id(int position_id, double price);
-    /**
-     * close_position_by_id:
-     * - Use market close
-     * - Creates a single "closing order" for a specific position
-     */
     void close_position_by_id(int position_id);
 
-    // Cancel a specific open order by ID (remaining part).
+    // Cancel an open order by its ID (cancels only the unfilled portion)
     void cancel_order_by_id(int order_id);
 
     // ------------------- Data Structures -------------------
@@ -109,40 +92,42 @@ public:
         double      fee_rate;
     };
 
-    // ------------------- Queries & Cancel -------------------
-    const std::vector<Account::Order>& get_all_open_orders() const;
-    const std::vector<Account::Position>& get_all_positions() const;
+    // Query functions returning const references to avoid copying.
+    const std::vector<Order>& get_all_open_orders() const;
+    const std::vector<Position>& get_all_positions() const;
 
 private:
-
     double balance_;
     double used_margin_;
-    int    vip_level_;
+    int vip_level_;
 
-    // Per-symbol leverage
-    std::map<std::string, double> symbol_leverage_;
+    // Mapping from symbol to its leverage.
+    std::unordered_map<std::string, double> symbol_leverage_;
 
-    // ID counters
+    // ID counters.
     int next_order_id_;
     int next_position_id_;
 
-    // All open orders
+    // All open orders.
     std::vector<Order> open_orders_;
 
-    // All active positions
+    // All active positions.
     std::vector<Position> positions_;
 
-    // For partial fills from same order => same position
+    // Map for merging partial fills from the same order: order_id -> position_id.
     std::unordered_map<int, int> order_to_position_;
 
     // ------------------- Internal Helpers -------------------
-    int  generate_order_id();
-    int  generate_position_id();
+    int generate_order_id();
+    int generate_position_id();
 
+    // Returns (maintenance_margin_rate, max_leverage) for a given notional.
     std::tuple<double, double> get_tier_info(double notional) const;
+    // Returns (maker_fee_rate, taker_fee_rate) based on VIP level.
     std::tuple<double, double> get_fee_rates() const;
+    // Adjust positions for a given symbol if leverage changes.
     bool adjust_position_leverage(const std::string& symbol, double oldLev, double newLev);
 
-    // Helper to place a "closing order" for position
+    // Helper to place a closing order for a given position.
     void place_closing_order(int position_id, double quantity, double price);
 };

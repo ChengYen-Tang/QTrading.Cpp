@@ -91,7 +91,7 @@ TEST_F(AccountTest, UpdatePositionsPartialFillSameOrder) {
     account.place_order("BTCUSDT", 5.0, 1000.0, true);
 
     // build market data => current_price=1000, available_volume=2 => partial fill
-    std::map<std::string, std::pair<double, double>> marketData{
+    std::unordered_map<std::string, std::pair<double, double>> marketData{
         {"BTCUSDT",{1000.0, 2.0}}
     };
 
@@ -110,7 +110,7 @@ TEST_F(AccountTest, UpdatePositionsPartialFillSameOrder) {
     EXPECT_EQ(positions[0].symbol, "BTCUSDT");
 
     // Next update => fill the leftover 3
-    std::map<std::string, std::pair<double, double>> nextData{
+    std::unordered_map<std::string, std::pair<double, double>> nextData{
         {"BTCUSDT",{1000.0, 10.0}}
     };
     account.update_positions(nextData);
@@ -139,14 +139,14 @@ TEST_F(AccountTest, ClosePositionBySymbol) {
     account.place_order("BTCUSDT", 2.0, 1000.0, true);
 
     // 2) match => fully filled
-    std::map<std::string, std::pair<double, double>> data1{
+    std::unordered_map<std::string, std::pair<double, double>> data1{
         {"BTCUSDT",{1000.0, 5.0}}
     };
     account.update_positions(data1);
     // now we have a position of 2 BTC at 1000
 
     // Let the price go up => e.g., 1200 => unrealized profit
-    std::map<std::string, std::pair<double, double>> data2{
+    std::unordered_map<std::string, std::pair<double, double>> data2{
         {"BTCUSDT",{1200.0, 5.0}}
     };
     account.update_positions(data2);
@@ -186,7 +186,7 @@ TEST_F(AccountTest, ClosePositionByID) {
     account.place_order("BTCUSDT", 2.0, 5000.0, true);
 
     // update => fill them
-    std::map<std::string, std::pair<double, double>> data{
+    std::unordered_map<std::string, std::pair<double, double>> data{
         {"BTCUSDT",{5000.0, 10.0}}
     };
     account.update_positions(data);
@@ -202,7 +202,7 @@ TEST_F(AccountTest, ClosePositionByID) {
     account.close_position_by_id(posID1, 5100.0);
 
     // There's a new "closing order" => update to fill it
-    std::map<std::string, std::pair<double, double>> data2{
+    std::unordered_map<std::string, std::pair<double, double>> data2{
         {"BTCUSDT",{5100.0, 10.0}}
     };
     account.update_positions(data2);
@@ -226,7 +226,7 @@ TEST_F(AccountTest, CancelOrderByID) {
     int oid = orders[0].id;
 
     // partial fill => 2 BTC
-    std::map<std::string, std::pair<double, double>> data1{
+    std::unordered_map<std::string, std::pair<double, double>> data1{
         {"BTCUSDT",{500.0, 2.0}}
     };
     account.update_positions(data1);
@@ -258,14 +258,14 @@ TEST_F(AccountTest, Liquidation) {
     account.place_order("BTCUSDT", 4.0, 500.0, true);
 
     // fill it
-    std::map<std::string, std::pair<double, double>> fillData{
+    std::unordered_map<std::string, std::pair<double, double>> fillData{
         {"BTCUSDT",{500.0, 10.0}}
     };
     account.update_positions(fillData);
     EXPECT_DOUBLE_EQ(account.get_all_positions().size(), 1);
 
     // now let's crash price => 50 => negative PnL => triggers liquidation
-    std::map<std::string, std::pair<double, double>> crashData{
+    std::unordered_map<std::string, std::pair<double, double>> crashData{
         {"BTCUSDT",{50.0, 10.0}}
     };
 
@@ -294,7 +294,7 @@ TEST_F(AccountTest, HedgeModeSameSymbolOppositeDirection) {
     account.place_order("BTCUSDT", 1.0, 3000.0, false);
 
     // fill them all
-    std::map<std::string, std::pair<double, double>> data{
+    std::unordered_map<std::string, std::pair<double, double>> data{
         {"BTCUSDT",{3000.0, 10.0}}
     };
     account.update_positions(data);
@@ -326,7 +326,7 @@ TEST_F(AccountTest, SameSymbolSameDirectionDifferentOrders) {
     account.place_order("BTCUSDT", 1.0, 3000.0, true); // order A
     account.place_order("BTCUSDT", 2.0, 3000.0, true); // order B
 
-    std::map<std::string, std::pair<double, double>> data{
+    std::unordered_map<std::string, std::pair<double, double>> data{
         {"BTCUSDT",{3000.0, 10.0}}
     };
     account.update_positions(data);
