@@ -254,14 +254,15 @@ TEST_F(AccountTest, Liquidation) {
     Account account(2000.0, 0);
     account.set_symbol_leverage("BTCUSDT", 10.0);
 
-    // place an order => e.g., 3 BTC at 500 => notional=1500 => margin=150 => fee=some small => ok
-    account.place_order("BTCUSDT", 3.0, 500.0, true);
+    // place an order => e.g., 4 BTC at 500 => notional=2000 => margin=200 => fee=some small => ok
+    account.place_order("BTCUSDT", 4.0, 500.0, true);
 
     // fill it
     std::map<std::string, std::pair<double, double>> fillData{
         {"BTCUSDT",{500.0, 10.0}}
     };
     account.update_positions(fillData);
+    EXPECT_DOUBLE_EQ(account.get_all_positions().size(), 1);
 
     // now let's crash price => 50 => negative PnL => triggers liquidation
     std::map<std::string, std::pair<double, double>> crashData{

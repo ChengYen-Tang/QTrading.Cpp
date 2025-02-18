@@ -394,8 +394,6 @@ void Account::update_positions(const std::map<std::string, std::pair<double, dou
         open_orders_.clear();
         order_to_position_.clear();
     }
-	std::cout << "[update_positions] equity=" << equity
-		<< ", totalMaint=" << totalMaint << "\n";
 }
 
 /* ----------------------------------------------------
