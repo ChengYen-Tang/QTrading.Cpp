@@ -13,7 +13,7 @@ Account::Account(double initial_balance, int vip_level)
     : balance_(initial_balance),
     used_margin_(0.0),
     vip_level_(vip_level),
-    hedge_mode_(false),          // Default to one-way mode (false) or hedge mode (true) as needed
+    hedge_mode_(false),          // Default to one‑way mode
     next_order_id_(1),
     next_position_id_(1)
 {
@@ -41,17 +41,17 @@ double Account::get_equity() const {
 }
 
 // --------------------------------------------
-//  One-way / Hedge mode
+//  One‑way / Hedge mode
 // --------------------------------------------
 void Account::set_position_mode(bool hedgeMode) {
-    // Disallow switching mode if there are open positions
+    // Disallow switching mode if there are open positions.
     if (!positions_.empty()) {
         std::cerr << "[set_position_mode] Cannot switch mode while positions are open.\n";
         return;
     }
     hedge_mode_ = hedgeMode;
     std::cout << "[set_position_mode] Now in "
-        << (hedge_mode_ ? "HEDGE (dual) mode.\n" : "ONE-WAY mode.\n");
+        << (hedge_mode_ ? "HEDGE (dual) mode.\n" : "ONE‑WAY mode.\n");
 }
 
 bool Account::is_hedge_mode() const {
@@ -101,9 +101,7 @@ int Account::generate_position_id() {
 }
 
 // --------------------------------------------
-//  place_order:
-//    reduce_only = false => default is to open a new position (in hedge mode, long and short can coexist)
-//    reduce_only = true  => order is used for reducing positions only (effective only in hedge mode)
+//  place_order: Entry point
 // --------------------------------------------
 void Account::place_order(const std::string& symbol,
     double quantity,
@@ -116,95 +114,13 @@ void Account::place_order(const std::string& symbol,
         return;
     }
 
-    // In one-way mode, check for existing position for the symbol.
-    // If the order direction is the same => treat as adding to the position.
-    // If the order direction is opposite => automatically reduce or reverse the position.
+    // In one‑way mode, attempt to process reverse orders.
     if (!hedge_mode_) {
-        // One-way mode
-        for (auto& pos : positions_) {
-            if (pos.symbol == symbol) {
-                if (pos.is_long == is_long) {
-                    // Same direction, proceed as usual.
-                    break;
-                }
-                else {
-                    // Reverse order: attempt to reduce position.
-                    double pos_qty = pos.quantity;
-                    double order_qty = quantity;
-                    if (order_qty < pos_qty) {
-                        // Directly reduce the position.
-                        int oid = generate_order_id();
-                        Order closingOrd{
-                            oid,
-                            symbol,
-                            order_qty,
-                            price,
-                            pos.is_long,
-                            false,      // reduce_only not important because closing_position_id is specified
-                            pos.id      // Which position to close
-                        };
-                        open_orders_.push_back(closingOrd);
-                        std::cout << "[place_order: one-way] Auto reduce position by " << order_qty
-                            << " on pos_id=" << pos.id << "\n";
-                        return;
-                    }
-                    else if (order_qty == pos_qty) {
-                        // Exactly closing the existing position.
-                        int oid = generate_order_id();
-                        Order closingOrd{
-                            oid,
-                            symbol,
-                            order_qty,
-                            price,
-                            pos.is_long,
-                            false,
-                            pos.id
-                        };
-                        open_orders_.push_back(closingOrd);
-                        std::cout << "[place_order: one-way] Auto close entire position (qty="
-                            << order_qty << ") pos_id=" << pos.id << "\n";
-                        return;
-                    }
-                    else {
-                        // Order quantity greater than existing position: close old position then open a new reverse position.
-                        double closeQty = pos_qty;
-                        {
-                            int oid = generate_order_id();
-                            Order closingOrd{
-                                oid,
-                                symbol,
-                                closeQty,
-                                price,
-                                pos.is_long,
-                                false,
-                                pos.id
-                            };
-                            open_orders_.push_back(closingOrd);
-                            std::cout << "[place_order: one-way] Auto close entire position first.\n";
-                        }
-                        // Open new reverse position.
-                        double newOpenQty = order_qty - closeQty;
-                        int openOid = generate_order_id();
-                        Order newOpen{
-                            openOid,
-                            symbol,
-                            newOpenQty,
-                            price,
-                            is_long,   // New position direction
-                            false,     // reduce_only
-                            -1
-                        };
-                        open_orders_.push_back(newOpen);
-                        std::cout << "[place_order: one-way] Open new reversed position with qty="
-                            << newOpenQty << "\n";
-                        return;
-                    }
-                }
-            }
-        }
+        if (handleOneWayReverseOrder(symbol, quantity, price, is_long))
+            return; // Reverse order processed.
     }
 
-    // For hedge mode or if no existing position is found in one-way mode, proceed with normal order creation.
+    // Otherwise, create a new order.
     int oid = generate_order_id();
     Order newOrd{
         oid,
@@ -230,7 +146,90 @@ void Account::place_order(const std::string& symbol, double quantity, bool is_lo
 }
 
 // --------------------------------------------
-//  Internal function to create a closing order for a given position.
+//  handleOneWayReverseOrder: Process reverse orders in one‑way mode.
+// Returns true if the reverse order was handled.
+// --------------------------------------------
+bool Account::handleOneWayReverseOrder(const std::string& symbol, double quantity, double price, bool is_long) {
+    for (auto& pos : positions_) {
+        if (pos.symbol == symbol) {
+            if (pos.is_long == is_long) {
+                // Same direction: treat as adding to position.
+                return false;
+            }
+            // Reverse order: process reduction.
+            double pos_qty = pos.quantity;
+            double order_qty = quantity;
+            if (order_qty < pos_qty) {
+                int oid = generate_order_id();
+                Order closingOrd{
+                    oid,
+                    symbol,
+                    order_qty,
+                    price,
+                    pos.is_long,
+                    false,
+                    pos.id
+                };
+                open_orders_.push_back(closingOrd);
+                std::cout << "[handleOneWayReverseOrder] Auto reduce position by " << order_qty
+                    << " on pos_id=" << pos.id << "\n";
+                return true;
+            }
+            else if (order_qty == pos_qty) {
+                int oid = generate_order_id();
+                Order closingOrd{
+                    oid,
+                    symbol,
+                    order_qty,
+                    price,
+                    pos.is_long,
+                    false,
+                    pos.id
+                };
+                open_orders_.push_back(closingOrd);
+                std::cout << "[handleOneWayReverseOrder] Auto close entire position (qty=" << order_qty
+                    << ") pos_id=" << pos.id << "\n";
+                return true;
+            }
+            else {
+                // order_qty > pos_qty: first close the existing position, then open a new reverse position.
+                double closeQty = pos_qty;
+                {
+                    int oid = generate_order_id();
+                    Order closingOrd{
+                        oid,
+                        symbol,
+                        closeQty,
+                        price,
+                        pos.is_long,
+                        false,
+                        pos.id
+                    };
+                    open_orders_.push_back(closingOrd);
+                    std::cout << "[handleOneWayReverseOrder] Auto close entire position first.\n";
+                }
+                double newOpenQty = order_qty - closeQty;
+                int openOid = generate_order_id();
+                Order newOpen{
+                    openOid,
+                    symbol,
+                    newOpenQty,
+                    price,
+                    is_long,   // New position direction
+                    false,
+                    -1
+                };
+                open_orders_.push_back(newOpen);
+                std::cout << "[handleOneWayReverseOrder] Open new reversed position with qty=" << newOpenQty << "\n";
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+// --------------------------------------------
+//  place_closing_order: Generate a closing order for a given position.
 // --------------------------------------------
 void Account::place_closing_order(int position_id, double quantity, double price) {
     for (const auto& pos : positions_) {
@@ -242,7 +241,7 @@ void Account::place_closing_order(int position_id, double quantity, double price
                 quantity,
                 price,
                 pos.is_long,
-                false,  // reduce_only=false because closing_position_id is specified
+                false,  // reduce_only is false for closing orders.
                 position_id
             };
             open_orders_.push_back(closingOrd);
@@ -258,14 +257,12 @@ void Account::place_closing_order(int position_id, double quantity, double price
 }
 
 // --------------------------------------------
-//  merge_positions(): 
-//   Merge positions with the same (symbol, is_long) into one position.
-//   Calculate weighted average entry price, sum margins, fees, etc.
+//  merge_positions: Merge positions with the same symbol and direction.
 // --------------------------------------------
 void Account::merge_positions() {
     if (positions_.empty()) return;
 
-    // Key: (symbol, is_long)
+    // Define a key by symbol and direction.
     struct Key {
         std::string sym;
         bool dir;
@@ -285,42 +282,35 @@ void Account::merge_positions() {
     for (auto& pos : positions_) {
         Key key{ pos.symbol, pos.is_long };
         if (merged.find(key) == merged.end()) {
-            merged[key] = pos;  // First occurrence
+            merged[key] = pos;
         }
         else {
-            // Merge positions
             Position& p0 = merged[key];
             double totalQty = p0.quantity + pos.quantity;
             if (totalQty < 1e-8) {
                 p0.quantity = 0;
                 continue;
             }
-            double weightedPrice =
-                (p0.entry_price * p0.quantity + pos.entry_price * pos.quantity)
-                / totalQty;
-            // Sum margins/fees
+            double weightedPrice = (p0.entry_price * p0.quantity + pos.entry_price * pos.quantity) / totalQty;
             p0.quantity = totalQty;
             p0.entry_price = weightedPrice;
             p0.notional += pos.notional;
             p0.initial_margin += pos.initial_margin;
             p0.maintenance_margin += pos.maintenance_margin;
             p0.fee += pos.fee;
-            // Fee rate is assumed to remain unchanged (or can be calculated using a weighted method)
         }
     }
 
-    // Rebuild the positions_ vector.
     positions_.clear();
     positions_.reserve(merged.size());
     for (auto& kv : merged) {
-        if (kv.second.quantity > 1e-8) {
+        if (kv.second.quantity > 1e-8)
             positions_.push_back(kv.second);
-        }
     }
 }
 
 // --------------------------------------------
-//  update_positions: Matching and settlement logic
+//  update_positions: Main matching and settlement logic.
 // --------------------------------------------
 void Account::update_positions(const std::unordered_map<std::string, std::pair<double, double>>& symbol_price_volume) {
     double makerFee, takerFee;
@@ -329,11 +319,10 @@ void Account::update_positions(const std::unordered_map<std::string, std::pair<d
     std::vector<Order> leftover;
     leftover.reserve(open_orders_.size());
 
-    // Process each open order
+    // Process each open order.
     for (auto& ord : open_orders_) {
         auto itPrice = symbol_price_volume.find(ord.symbol);
         if (itPrice == symbol_price_volume.end()) {
-            // No market data for the symbol, cannot match order.
             leftover.push_back(ord);
             continue;
         }
@@ -350,20 +339,16 @@ void Account::update_positions(const std::unordered_map<std::string, std::pair<d
             can_fill = true;
         }
         else {
-            // Limit order
-            if (ord.is_long && current_price <= ord.price) {
+            if (ord.is_long && current_price <= ord.price)
                 can_fill = true;
-            }
-            else if (!ord.is_long && current_price >= ord.price) {
+            else if (!ord.is_long && current_price >= ord.price)
                 can_fill = true;
-            }
         }
         if (!can_fill) {
             leftover.push_back(ord);
             continue;
         }
 
-        // Determine fill quantity (partial fills possible)
         double fill_qty = std::min(ord.quantity, available_vol);
         if (fill_qty < 1e-8) {
             leftover.push_back(ord);
@@ -375,183 +360,26 @@ void Account::update_positions(const std::unordered_map<std::string, std::pair<d
         double feeRate = (is_market ? takerFee : makerFee);
         double fee = notional * feeRate;
 
-        // Case A: Closing Order (closing_position_id >= 0)
         if (ord.closing_position_id >= 0) {
-            bool foundPos = false;
-            for (auto& pos : positions_) {
-                if (pos.id == ord.closing_position_id) {
-                    foundPos = true;
-                    double close_qty = std::min(fill_qty, pos.quantity);
-                    double realized_pnl = (fill_price - pos.entry_price) * close_qty * (pos.is_long ? 1.0 : -1.0);
-                    double ratio = close_qty / pos.quantity;
-                    double freed_margin = pos.initial_margin * ratio;
-                    double freed_maint = pos.maintenance_margin * ratio;
-                    double freed_fee = pos.fee * ratio; // Approximation
-                    double returned_amount = freed_margin + realized_pnl - fee;
-
-                    balance_ += returned_amount;
-                    used_margin_ -= freed_margin;
-
-                    // Update the position
-                    pos.quantity -= close_qty;
-                    pos.initial_margin -= freed_margin;
-                    pos.maintenance_margin -= freed_maint;
-                    pos.fee -= freed_fee;
-                    pos.notional = pos.entry_price * pos.quantity;
-
-                    std::cout << "[update_positions] Closing fill: pos_id=" << pos.id
-                        << ", closeQty=" << close_qty
-                        << ", realizedPnL=" << realized_pnl
-                        << ", closeFee=" << fee
-                        << ", new balance=" << balance_ << "\n";
-
-                    // Update remaining order quantity
-                    ord.quantity -= close_qty;
-                    if (ord.quantity > 1e-8) {
-                        leftover.push_back(ord);
-                    }
-                    break;
-                }
-            }
-            if (!foundPos) {
-                std::cerr << "[update_positions] closing_position_id="
-                    << ord.closing_position_id << " not found\n";
-                leftover.push_back(ord);
-            }
+            processClosingOrder(ord, fill_qty, fill_price, fee, leftover);
         }
-        // Case B: Opening Order (closing_position_id == -1)
         else {
-            // If reduce_only is true but no matching position exists or direction doesn't match,
-            // it can be ignored or an error reported per requirements.
-            if (ord.reduce_only) {
-                // Look for an existing position with the same symbol and direction.
-                bool hasPositionToReduce = false;
-                for (auto& pos : positions_) {
-                    if (pos.symbol == ord.symbol && pos.is_long == ord.is_long) {
-                        hasPositionToReduce = true;
-                        double close_qty = std::min(fill_qty, pos.quantity);
-                        double realized_pnl = (fill_price - pos.entry_price) * close_qty * (pos.is_long ? 1.0 : -1.0);
-                        double ratio = close_qty / pos.quantity;
-                        double freed_margin = pos.initial_margin * ratio;
-                        double freed_maint = pos.maintenance_margin * ratio;
-                        double freed_fee = pos.fee * ratio;
-                        double returned_amount = freed_margin + realized_pnl - fee;
-
-                        balance_ += returned_amount;
-                        used_margin_ -= freed_margin;
-
-                        pos.quantity -= close_qty;
-                        pos.initial_margin -= freed_margin;
-                        pos.maintenance_margin -= freed_maint;
-                        pos.fee -= freed_fee;
-                        pos.notional = pos.entry_price * pos.quantity;
-
-                        std::cout << "[update_positions] reduceOnly fill: reduced pos_id=" << pos.id
-                            << ", closeQty=" << close_qty
-                            << ", realizedPnL=" << realized_pnl
-                            << ", fee=" << fee << "\n";
-
-                        ord.quantity -= close_qty;
-                        if (ord.quantity > 1e-8) {
-                            leftover.push_back(ord);
-                        }
-                        break; // Process one match per order
-                    }
-                }
-                if (!hasPositionToReduce) {
-                    std::cout << "[update_positions] reduce_only order has no matching position to reduce. Ignored.\n";
-                    // If no position to reduce, ignore the order.
-                }
-            }
-            else {
-                // Normal opening order
-                double lev = get_symbol_leverage(ord.symbol);
-                double mmr, maxLev;
-                std::tie(mmr, maxLev) = get_tier_info(notional);
-                if (lev > maxLev) {
-                    std::cerr << "[update_positions] Leverage too high for order id=" << ord.id << "\n";
-                    leftover.push_back(ord);
-                    continue;
-                }
-                double init_margin = notional / lev;
-                double maint_margin = notional * mmr;
-                double required = init_margin + fee;
-                double eq = get_equity();
-                if (eq < required) {
-                    std::cerr << "[update_positions] Not enough equity for order id=" << ord.id << "\n";
-                    leftover.push_back(ord);
-                    continue;
-                }
-                balance_ -= required;
-                used_margin_ += init_margin;
-
-                // If this order has not yet opened a position, create a new position.
-                auto pm = order_to_position_.find(ord.id);
-                if (pm == order_to_position_.end()) {
-                    int pid = generate_position_id();
-                    positions_.push_back(Position{
-                        pid,
-                        ord.id,
-                        ord.symbol,
-                        fill_qty,
-                        fill_price,
-                        ord.is_long,
-                        0.0, // unrealized PnL
-                        notional,
-                        init_margin,
-                        maint_margin,
-                        fee,
-                        lev,
-                        feeRate
-                        });
-                    order_to_position_[ord.id] = pid;
-                }
-                else {
-                    // If the order was partially filled before, add to the existing position.
-                    int pid = pm->second;
-                    for (auto& pos : positions_) {
-                        if (pos.id == pid) {
-                            double old_notional = pos.notional;
-                            double new_notional = old_notional + notional;
-                            double old_qty = pos.quantity;
-                            double new_qty = old_qty + fill_qty;
-                            double new_entry = new_notional / new_qty;
-
-                            pos.quantity = new_qty;
-                            pos.entry_price = new_entry;
-                            pos.notional += notional;
-                            pos.initial_margin += init_margin;
-                            pos.maintenance_margin += maint_margin;
-                            pos.fee += fee;
-                            break;
-                        }
-                    }
-                }
-                double leftoverQty = ord.quantity - fill_qty;
-                if (leftoverQty > 1e-8) {
-                    ord.quantity = leftoverQty;
-                    leftover.push_back(ord);
-                }
-            }
+            processOpeningOrder(ord, fill_qty, fill_price, notional, fee, feeRate, leftover);
         }
-    } // End processing orders
+    }
 
-    // Replace open_orders_ with any leftover orders.
     open_orders_.swap(leftover);
 
-    // Remove positions with near-zero quantity.
+    // Remove positions with negligible quantity.
     positions_.erase(
         std::remove_if(positions_.begin(), positions_.end(),
-            [](const Position& p) {
-                return p.quantity <= 1e-8;
-            }),
+            [](const Position& p) { return p.quantity <= 1e-8; }),
         positions_.end()
     );
 
-    // Merge positions with the same direction (for both one-way and hedge mode if needed).
     merge_positions();
 
-    // Recalculate unrealized PnL for all positions.
+    // Recalculate unrealized PnL.
     for (auto& pos : positions_) {
         auto itp = symbol_price_volume.find(pos.symbol);
         if (itp != symbol_price_volume.end()) {
@@ -560,7 +388,6 @@ void Account::update_positions(const std::unordered_map<std::string, std::pair<d
         }
     }
 
-    // Check for liquidation.
     double equity = get_equity();
     double totalMaint = 0.0;
     for (const auto& pos : positions_) {
@@ -580,10 +407,178 @@ void Account::update_positions(const std::unordered_map<std::string, std::pair<d
 }
 
 // --------------------------------------------
+//  processClosingOrder: Process a closing order fill.
+// --------------------------------------------
+void Account::processClosingOrder(Order& ord, double fill_qty, double fill_price, double fee, std::vector<Order>& leftover) {
+    bool foundPos = false;
+    for (auto& pos : positions_) {
+        if (pos.id == ord.closing_position_id) {
+            foundPos = true;
+            double close_qty = std::min(fill_qty, pos.quantity);
+            double realized_pnl = (fill_price - pos.entry_price) * close_qty * (pos.is_long ? 1.0 : -1.0);
+            double ratio = close_qty / pos.quantity;
+            double freed_margin = pos.initial_margin * ratio;
+            double freed_maint = pos.maintenance_margin * ratio;
+            double freed_fee = pos.fee * ratio;
+            double returned_amount = freed_margin + realized_pnl - fee;
+
+            balance_ += returned_amount;
+            used_margin_ -= freed_margin;
+
+            pos.quantity -= close_qty;
+            pos.initial_margin -= freed_margin;
+            pos.maintenance_margin -= freed_maint;
+            pos.fee -= freed_fee;
+            pos.notional = pos.entry_price * pos.quantity;
+
+            std::cout << "[processClosingOrder] Closing fill: pos_id=" << pos.id
+                << ", closeQty=" << close_qty
+                << ", realizedPnL=" << realized_pnl
+                << ", closeFee=" << fee
+                << ", new balance=" << balance_ << "\n";
+
+            ord.quantity -= close_qty;
+            if (ord.quantity > 1e-8)
+                leftover.push_back(ord);
+            break;
+        }
+    }
+    if (!foundPos) {
+        std::cerr << "[processClosingOrder] closing_position_id=" << ord.closing_position_id << " not found\n";
+        leftover.push_back(ord);
+    }
+}
+
+// --------------------------------------------
+//  processReduceOnlyOrder: Process a reduce_only opening order fill.
+// --------------------------------------------
+bool Account::processReduceOnlyOrder(Order& ord, double fill_qty, double fill_price, double fee, std::vector<Order>& leftover) {
+    for (auto& pos : positions_) {
+        if (pos.symbol == ord.symbol && pos.is_long == ord.is_long) {
+            double close_qty = std::min(fill_qty, pos.quantity);
+            double realized_pnl = (fill_price - pos.entry_price) * close_qty * (pos.is_long ? 1.0 : -1.0);
+            double ratio = close_qty / pos.quantity;
+            double freed_margin = pos.initial_margin * ratio;
+            double freed_maint = pos.maintenance_margin * ratio;
+            double freed_fee = pos.fee * ratio;
+            double returned_amount = freed_margin + realized_pnl - fee;
+
+            balance_ += returned_amount;
+            used_margin_ -= freed_margin;
+
+            pos.quantity -= close_qty;
+            pos.initial_margin -= freed_margin;
+            pos.maintenance_margin -= freed_maint;
+            pos.fee -= freed_fee;
+            pos.notional = pos.entry_price * pos.quantity;
+
+            std::cout << "[processReduceOnlyOrder] reduceOnly fill: reduced pos_id=" << pos.id
+                << ", closeQty=" << close_qty
+                << ", realizedPnL=" << realized_pnl
+                << ", fee=" << fee << "\n";
+
+            ord.quantity -= close_qty;
+            if (ord.quantity > 1e-8)
+                leftover.push_back(ord);
+            return true;
+        }
+    }
+    std::cout << "[processReduceOnlyOrder] reduce_only order has no matching position to reduce. Ignored.\n";
+    return false;
+}
+
+// --------------------------------------------
+//  processNormalOpeningOrder: Process a normal opening order fill.
+// --------------------------------------------
+void Account::processNormalOpeningOrder(Order& ord, double fill_qty, double fill_price, double notional,
+    double fee, double feeRate, std::vector<Order>& leftover) {
+    double lev = get_symbol_leverage(ord.symbol);
+    double mmr, maxLev;
+    std::tie(mmr, maxLev) = get_tier_info(notional);
+    if (lev > maxLev) {
+        std::cerr << "[processNormalOpeningOrder] Leverage too high for order id=" << ord.id << "\n";
+        leftover.push_back(ord);
+        return;
+    }
+    double init_margin = notional / lev;
+    double maint_margin = notional * mmr;
+    double required = init_margin + fee;
+    double eq = get_equity();
+    if (eq < required) {
+        std::cerr << "[processNormalOpeningOrder] Not enough equity for order id=" << ord.id << "\n";
+        leftover.push_back(ord);
+        return;
+    }
+    balance_ -= required;
+    used_margin_ += init_margin;
+
+    auto pm = order_to_position_.find(ord.id);
+    if (pm == order_to_position_.end()) {
+        int pid = generate_position_id();
+        positions_.push_back(Position{
+            pid,
+            ord.id,
+            ord.symbol,
+            fill_qty,
+            fill_price,
+            ord.is_long,
+            0.0, // unrealized PnL will be recalculated
+            notional,
+            init_margin,
+            maint_margin,
+            fee,
+            lev,
+            feeRate
+            });
+        order_to_position_[ord.id] = pid;
+    }
+    else {
+        int pid = pm->second;
+        for (auto& pos : positions_) {
+            if (pos.id == pid) {
+                double old_notional = pos.notional;
+                double new_notional = old_notional + notional;
+                double old_qty = pos.quantity;
+                double new_qty = old_qty + fill_qty;
+                double new_entry = new_notional / new_qty;
+
+                pos.quantity = new_qty;
+                pos.entry_price = new_entry;
+                pos.notional += notional;
+                pos.initial_margin += init_margin;
+                pos.maintenance_margin += maint_margin;
+                pos.fee += fee;
+                break;
+            }
+        }
+    }
+    double leftoverQty = ord.quantity - fill_qty;
+    if (leftoverQty > 1e-8) {
+        ord.quantity = leftoverQty;
+        leftover.push_back(ord);
+    }
+}
+
+// --------------------------------------------
+//  processOpeningOrder: Process an opening order fill.
+// --------------------------------------------
+void Account::processOpeningOrder(Order& ord, double fill_qty, double fill_price, double notional,
+    double fee, double feeRate, std::vector<Order>& leftover) {
+    if (ord.reduce_only) {
+        if (!processReduceOnlyOrder(ord, fill_qty, fill_price, fee, leftover)) {
+            // If no matching position to reduce, ignore the order.
+        }
+    }
+    else {
+        processNormalOpeningOrder(ord, fill_qty, fill_price, notional, fee, feeRate, leftover);
+    }
+}
+
+// --------------------------------------------
 //  close_position functions
 // --------------------------------------------
 void Account::close_position(const std::string& symbol, double price) {
-    // In one-way mode, simply close all positions for the symbol.
+    // In one‑way mode, close all positions for the symbol.
     // In hedge mode, this version can be customized to close both long and short positions.
     bool found = false;
     for (const auto& pos : positions_) {
@@ -601,7 +596,6 @@ void Account::close_position(const std::string& symbol) {
     close_position(symbol, 0.0);
 }
 
-// New: In hedge mode, specify whether to close long or short position.
 void Account::close_position(const std::string& symbol, bool is_long, double price) {
     bool found = false;
     for (const auto& pos : positions_) {
@@ -617,7 +611,7 @@ void Account::close_position(const std::string& symbol, bool is_long, double pri
 }
 
 // --------------------------------------------
-//  Cancel order by ID
+//  cancel_order_by_id: Cancel an open order by its ID.
 // --------------------------------------------
 void Account::cancel_order_by_id(int order_id) {
     bool found = false;
@@ -688,8 +682,7 @@ bool Account::adjust_position_leverage(const std::string& symbol, double oldLev,
         double mmr, maxLev;
         std::tie(mmr, maxLev) = get_tier_info(p.notional);
         if (newLev > maxLev) {
-            std::cerr << "[adjust_position_leverage] newLev=" << newLev
-                << " > maxLev=" << maxLev << "\n";
+            std::cerr << "[adjust_position_leverage] newLev=" << newLev << " > maxLev=" << maxLev << "\n";
             return false;
         }
         double oldM = p.initial_margin;
@@ -700,7 +693,6 @@ bool Account::adjust_position_leverage(const std::string& symbol, double oldLev,
     }
     double eq = get_equity();
     if (totalDiff > 0) {
-        // Additional margin required
         if (eq < totalDiff) {
             std::cerr << "[adjust_position_leverage] Not enough equity.\n";
             return false;
@@ -709,11 +701,9 @@ bool Account::adjust_position_leverage(const std::string& symbol, double oldLev,
         used_margin_ += totalDiff;
     }
     else {
-        // Release margin
         balance_ += std::fabs(totalDiff);
         used_margin_ -= std::fabs(totalDiff);
     }
-    // Update each position
     for (size_t i = 0; i < related.size(); ++i) {
         Position& p = related[i].get();
         p.initial_margin = p.notional / newLev;

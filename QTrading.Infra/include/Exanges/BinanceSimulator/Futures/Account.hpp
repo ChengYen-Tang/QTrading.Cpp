@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <string>
 #include <vector>
@@ -6,7 +6,7 @@
 #include <tuple>
 
 /**
- * Simulated Binance Futures Account (supports one-way / hedge mode)
+ * Simulated Binance Futures Account (supports one‑way / hedge mode)
  */
 class Account {
 public:
@@ -17,7 +17,7 @@ public:
     double total_unrealized_pnl() const;
     double get_equity() const;
 
-    // Set/get trading mode (one-way or hedge)
+    // Set/get trading mode (one‑way or hedge)
     void set_position_mode(bool hedgeMode);
     bool is_hedge_mode() const;
 
@@ -30,7 +30,7 @@ public:
      *  - price > 0 => Limit Order
      *  - price <= 0 => Market Order
      *  - If reduce_only is true, this order is used for reducing positions only.
-     *    In one-way mode, this parameter is rarely used since reverse orders automatically reduce positions;
+     *    In one‑way mode, this parameter is rarely used since reverse orders automatically reduce positions;
      *    In hedge mode, it clearly distinguishes whether the order is for increasing or reducing position.
      */
     void place_order(const std::string& symbol,
@@ -53,7 +53,7 @@ public:
      * close_position:
      *  - If price <= 0 => market close; if price > 0 => limit close.
      *
-     *  In one-way mode: close_position(symbol) directly closes all positions for that symbol.
+     *  In one‑way mode: close_position(symbol) directly closes all positions for that symbol.
      *  In hedge mode:
      *      - close_position(symbol, is_long) can close only long or short positions.
      *      - The version without direction can be customized (e.g., close both long and short) per requirements.
@@ -63,8 +63,6 @@ public:
 
     // New: In hedge mode, specify whether to close long or short position.
     void close_position(const std::string& symbol, bool is_long, double price = 0.0);
-
-    // Removed: close_position_by_id
 
     // Cancel an open order by its ID (cancels only the unfilled portion)
     void cancel_order_by_id(int order_id);
@@ -76,7 +74,7 @@ public:
         double      quantity;         // Remaining quantity to be matched
         double      price;            // <= 0 => market order, > 0 => limit order
         bool        is_long;
-        bool        reduce_only;      // New: true means the order is for reducing positions only
+        bool        reduce_only;      // true means the order is for reducing positions only
         int         closing_position_id; // >=0: specifies which position to close; -1: normal opening order
     };
 
@@ -106,7 +104,7 @@ private:
     double used_margin_;
     int vip_level_;
 
-    // One-way / Hedge mode flag
+    // One‑way / Hedge mode flag
     bool hedge_mode_;
 
     // Mapping from symbol to leverage
@@ -132,9 +130,30 @@ private:
     std::tuple<double, double> get_fee_rates() const;
     bool adjust_position_leverage(const std::string& symbol, double oldLev, double newLev);
 
-    // Internal helper: generate a closing order for a given position.
+    // Helper for generating a closing order for a given position.
     void place_closing_order(int position_id, double quantity, double price);
 
-    // New: Merge positions with the same (symbol, is_long) into one.
+    // Helper to merge positions with the same (symbol, is_long) into one.
     void merge_positions();
+
+    // --- New private helper functions for refactoring ---
+
+    // Process reverse orders in one‑way mode.
+    // Returns true if the reverse order was handled.
+    bool handleOneWayReverseOrder(const std::string& symbol, double quantity, double price, bool is_long);
+
+    // Process a closing order fill: update the matching position based on the fill quantity
+    // and add any remaining order quantity to the leftover orders.
+    void processClosingOrder(Order& ord, double fill_qty, double fill_price, double fee, std::vector<Order>& leftover);
+
+    // Process a reduce_only opening order; returns true if processed.
+    bool processReduceOnlyOrder(Order& ord, double fill_qty, double fill_price, double fee, std::vector<Order>& leftover);
+
+    // Process a normal (non‑reduce_only) opening order fill.
+    void processNormalOpeningOrder(Order& ord, double fill_qty, double fill_price, double notional,
+        double fee, double feeRate, std::vector<Order>& leftover);
+
+    // Process an opening order fill, calling either the reduce_only or normal order processing.
+    void processOpeningOrder(Order& ord, double fill_qty, double fill_price, double notional,
+        double fee, double feeRate, std::vector<Order>& leftover);
 };
