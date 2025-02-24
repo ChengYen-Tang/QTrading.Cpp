@@ -240,14 +240,14 @@ void Account::place_closing_order(int position_id, double quantity, double price
                 pos.symbol,
                 quantity,
                 price,
-                pos.is_long,
+                !pos.is_long,
                 false,  // reduce_only is false for closing orders.
                 position_id
             };
             open_orders_.push_back(closingOrd);
             std::cout << "[place_closing_order] Created closing order ID=" << oid
                 << " to close pos_id=" << position_id
-                << (pos.is_long ? " (LONG)" : " (SHORT)")
+                << (!pos.is_long ? " (LONG)" : " (SHORT)")
                 << ((price <= 0.0) ? " (Market)" : " (Limit)")
                 << " qty=" << quantity << " " << pos.symbol << " @ " << price << "\n";
             return;
