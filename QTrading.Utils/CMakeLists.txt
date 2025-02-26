@@ -16,7 +16,7 @@ link_directories(${Boost_LIBRARY_DIRS})
 message(Boost_LIBRARY_DIRS="${Boost_LIBRARY_DIRS}")
 
 #add_subdirectory ("src")
-#enable_testing()
-#add_subdirectory ("tests")
+enable_testing()
+add_subdirectory ("tests")
 
 endif()

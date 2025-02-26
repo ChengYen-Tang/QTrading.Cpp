@@ -27,6 +27,8 @@ private:
 
 public:
 	// Initialize the channel with a given capacity and overflow policy
+	// - capacity: the maximum number of elements in the queue
+	// - policy: the overflow policy
     explicit BoundedChannel(size_t capacity, OverflowPolicy policy = OverflowPolicy::Block)
         : queue(capacity), capacity(capacity), policy(policy) {
     }
@@ -42,20 +44,36 @@ public:
             return true;
         }
 
-        if (policy == OverflowPolicy::Reject) {
+        switch (policy) {
+        case OverflowPolicy::Reject:
+            return false;
+
+        case OverflowPolicy::DropOldest: {
+            T temp;
+            if (queue.pop(temp)) {
+                queue.push(std::move(value));
+                cv.notify_one();
+                return true;
+            }
             return false;
         }
-        else if (policy == OverflowPolicy::DropOldest) {
-            T temp;
-            queue.pop(temp);
-            queue.push(std::move(value));
-            return true;
+
+        case OverflowPolicy::Block:
+        default: {
+            while (!closed) {
+                bool canPush = queue.push(T());
+                if (canPush) {
+                    T dummy;
+                    queue.pop(dummy);
+
+                    queue.push(std::move(value));
+                    cv.notify_one();
+                    return true;
+                }
+                cv.wait(lock);
+            }
+            return false;
         }
-        else if (policy == OverflowPolicy::Block) {
-            cv.wait(lock, [this] { return queue.push(T()); });
-            queue.pop();
-            queue.push(std::move(value));
-            return true;
         }
 
         return false;
@@ -64,19 +82,31 @@ public:
 	// Receive a value from the channel
     std::optional<T> Receive() {
         std::unique_lock<std::mutex> lock(mtx);
+
         cv.wait(lock, [this] { return !queue.empty() || closed; });
 
-        if (queue.empty()) return std::nullopt;
+        if (queue.empty()) {
+            return std::nullopt;
+        }
 
         T value;
         queue.pop(value);
+
+        cv.notify_one();
+
         return value;
     }
 
 	// Try to receive a value without blocking
     std::optional<T> TryReceive() {
         T value;
-        if (queue.pop(value)) return value;
+        if (queue.pop(value)) {
+            {
+                std::unique_lock<std::mutex> lock(mtx);
+                cv.notify_one();
+            }
+            return value;
+        }
         return std::nullopt;
     }
 
