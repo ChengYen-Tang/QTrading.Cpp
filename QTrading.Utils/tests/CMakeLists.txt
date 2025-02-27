@@ -1,6 +1,6 @@
 ﻿add_executable(QTrading.Utils.Tests
-  "Queue/BoundedChannelTest.cpp"
- )
+  "Queue/BoundedChannelTests.cpp"
+  "Queue/UnboundedChannelTests.cpp")
 
 target_include_directories(QTrading.Utils.Tests
     PRIVATE

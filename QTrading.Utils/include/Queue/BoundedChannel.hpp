@@ -1,119 +1,118 @@
-#include <boost/lockfree/queue.hpp>
+#pragma once
+
+#include <queue>
 #include <mutex>
 #include <condition_variable>
-#include <optional>
-#include <iostream>
-#include <thread>
+#include "Channel.hpp"
 
-// Bounded channel with overflow policy
-// - Block: block the sender until there is space in the queue
-// - DropOldest: drop the oldest message in the queue
-// - Reject: reject the message
-enum class OverflowPolicy {
-    Block,
-    DropOldest,
-    Reject
-};
+namespace QTrading::Utils::Queue
+{
+    // Block: block the sender until there is space in the queue
+    // DropOldest: drop the oldest element in the queue to make space for the new element
+    // Reject: reject the new element if the queue is full
+    enum class OverflowPolicy {
+        Block,
+        DropOldest,
+        Reject
+    };
 
-template <typename T>
-class BoundedChannel {
-private:
-    boost::lockfree::queue<T> queue;
-    std::mutex mtx;
-    std::condition_variable cv;
-    bool closed = false;
-    size_t capacity;
-    OverflowPolicy policy;
+    // BoundedChannel is a thread-safe channel with a fixed capacity
+    template <typename T>
+    class BoundedChannel : public Channel<T> {
+    private:
+        std::queue<T> queue_;
+        size_t capacity_;
+        OverflowPolicy policy_;
 
-public:
-	// Initialize the channel with a given capacity and overflow policy
-	// - capacity: the maximum number of elements in the queue
-	// - policy: the overflow policy
-    explicit BoundedChannel(size_t capacity, OverflowPolicy policy = OverflowPolicy::Block)
-        : queue(capacity), capacity(capacity), policy(policy) {
-    }
+        std::mutex mtx_;
 
-	// Send a value to the channel
-    bool Send(T value) {
-        std::unique_lock<std::mutex> lock(mtx);
+        std::condition_variable cv_not_empty_;
+        std::condition_variable cv_not_full_;
 
-        if (closed) return false;
-
-        if (queue.push(std::move(value))) {
-            cv.notify_one();
-            return true;
+    public:
+        // Create a new BoundedChannel with the given capacity and overflow policy
+        // The default overflow policy is Block
+        // The capacity must be greater than 0
+        explicit BoundedChannel(size_t capacity, OverflowPolicy policy = OverflowPolicy::Block)
+            : capacity_(capacity), policy_(policy) {
         }
 
-        switch (policy) {
-        case OverflowPolicy::Reject:
-            return false;
+        // Send a value to the channel
+        bool Send(T value) override {
+            std::unique_lock<std::mutex> lock(mtx_);
 
-        case OverflowPolicy::DropOldest: {
-            T temp;
-            if (queue.pop(temp)) {
-                queue.push(std::move(value));
-                cv.notify_one();
+            if (this->closed_) {
+                return false;
+            }
+
+            if (queue_.size() < capacity_) {
+                queue_.push(std::move(value));
+                cv_not_empty_.notify_one();
                 return true;
             }
-            return false;
-        }
 
-        case OverflowPolicy::Block:
-        default: {
-            while (!closed) {
-                bool canPush = queue.push(T());
-                if (canPush) {
-                    T dummy;
-                    queue.pop(dummy);
+            switch (policy_) {
+            case OverflowPolicy::Reject:
+                return false;
 
-                    queue.push(std::move(value));
-                    cv.notify_one();
-                    return true;
+            case OverflowPolicy::DropOldest:
+                if (!queue_.empty()) {
+                    queue_.pop();
                 }
-                cv.wait(lock);
+                queue_.push(std::move(value));
+                cv_not_empty_.notify_one();
+                return true;
+
+            case OverflowPolicy::Block:
+            default:
+                while (!this->closed_ && queue_.size() == capacity_) {
+                    cv_not_full_.wait(lock);
+                }
+                if (this->closed_) {
+                    return false;
+                }
+                queue_.push(std::move(value));
+                cv_not_empty_.notify_one();
+                return true;
             }
-            return false;
-        }
         }
 
-        return false;
-    }
+        // Receive a value from the channel
+        std::optional<T> Receive() override {
+            std::unique_lock<std::mutex> lock(mtx_);
 
-	// Receive a value from the channel
-    std::optional<T> Receive() {
-        std::unique_lock<std::mutex> lock(mtx);
-
-        cv.wait(lock, [this] { return !queue.empty() || closed; });
-
-        if (queue.empty()) {
-            return std::nullopt;
-        }
-
-        T value;
-        queue.pop(value);
-
-        cv.notify_one();
-
-        return value;
-    }
-
-	// Try to receive a value without blocking
-    std::optional<T> TryReceive() {
-        T value;
-        if (queue.pop(value)) {
-            {
-                std::unique_lock<std::mutex> lock(mtx);
-                cv.notify_one();
+            while (queue_.empty() && !this->closed_) {
+                cv_not_empty_.wait(lock);
             }
-            return value;
-        }
-        return std::nullopt;
-    }
+            if (queue_.empty()) {
+                return std::nullopt;
+            }
 
-	// Close the channel
-    void Close() {
-        std::unique_lock<std::mutex> lock(mtx);
-        closed = true;
-        cv.notify_all();
-    }
-};
+            T frontVal = std::move(queue_.front());
+            queue_.pop();
+
+            cv_not_full_.notify_one();
+            return frontVal;
+        }
+
+        // Try to receive a value from the channel without blocking
+        std::optional<T> TryReceive() override {
+            std::lock_guard<std::mutex> lock(mtx_);
+            if (queue_.empty()) {
+                return std::nullopt;
+            }
+            T frontVal = std::move(queue_.front());
+            queue_.pop();
+            cv_not_full_.notify_one();
+            return frontVal;
+        }
+
+        // Close the channel
+        void Close() override {
+            std::unique_lock<std::mutex> lock(mtx_);
+            this->closed_ = true;
+            cv_not_empty_.notify_all();
+            cv_not_full_.notify_all();
+        }
+    };
+}
