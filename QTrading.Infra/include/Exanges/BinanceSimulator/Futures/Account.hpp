@@ -4,6 +4,10 @@
 #include <vector>
 #include <unordered_map>
 #include <tuple>
+#include "Dto/Order.hpp"
+#include "Dto/Position.hpp"
+
+using namespace QTrading::dto;
 
 /**
  * Simulated Binance Futures Account (supports one‑way / hedge mode)
@@ -66,33 +70,6 @@ public:
 
     // Cancel an open order by its ID (cancels only the unfilled portion)
     void cancel_order_by_id(int order_id);
-
-    // ------------------- Data Structures -------------------
-    struct Order {
-        int         id;               // Unique order ID
-        std::string symbol;
-        double      quantity;         // Remaining quantity to be matched
-        double      price;            // <= 0 => market order, > 0 => limit order
-        bool        is_long;
-        bool        reduce_only;      // true means the order is for reducing positions only
-        int         closing_position_id; // >=0: specifies which position to close; -1: normal opening order
-    };
-
-    struct Position {
-        int         id;
-        int         order_id;       // The order that originally opened this position
-        std::string symbol;
-        double      quantity;
-        double      entry_price;
-        bool        is_long;
-        double      unrealized_pnl;
-        double      notional;
-        double      initial_margin;
-        double      maintenance_margin;
-        double      fee;
-        double      leverage;
-        double      fee_rate;
-    };
 
     // Query functions returning const references to avoid copying.
     const std::vector<Order>& get_all_open_orders() const;
