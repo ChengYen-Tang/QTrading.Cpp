@@ -101,36 +101,36 @@ private:
     std::unordered_map<int, int> order_to_position_;
 
     // ------------------- Internal Helpers -------------------
-    int generate_order_id();
-    int generate_position_id();
-    std::tuple<double, double> get_tier_info(double notional) const;
-    std::tuple<double, double> get_fee_rates() const;
-    bool adjust_position_leverage(const std::string& symbol, double oldLev, double newLev);
+    inline int generate_order_id();
+    inline int generate_position_id();
+    inline std::tuple<double, double> get_tier_info(double notional) const;
+    inline std::tuple<double, double> get_fee_rates() const;
+    inline bool adjust_position_leverage(const std::string& symbol, double oldLev, double newLev);
 
     // Helper for generating a closing order for a given position.
-    void place_closing_order(int position_id, double quantity, double price);
+    inline void place_closing_order(int position_id, double quantity, double price);
 
     // Helper to merge positions with the same (symbol, is_long) into one.
-    void merge_positions();
+    inline void merge_positions();
 
     // --- New private helper functions for refactoring ---
 
     // Process reverse orders in one‑way mode.
     // Returns true if the reverse order was handled.
-    bool handleOneWayReverseOrder(const std::string& symbol, double quantity, double price, bool is_long);
+    inline bool handleOneWayReverseOrder(const std::string& symbol, double quantity, double price, bool is_long);
 
     // Process a closing order fill: update the matching position based on the fill quantity
     // and add any remaining order quantity to the leftover orders.
-    void processClosingOrder(Order& ord, double fill_qty, double fill_price, double fee, std::vector<Order>& leftover);
+    inline void processClosingOrder(Order& ord, double fill_qty, double fill_price, double fee, std::vector<Order>& leftover);
 
     // Process a reduce_only opening order; returns true if processed.
-    bool processReduceOnlyOrder(Order& ord, double fill_qty, double fill_price, double fee, std::vector<Order>& leftover);
+    inline bool processReduceOnlyOrder(Order& ord, double fill_qty, double fill_price, double fee, std::vector<Order>& leftover);
 
     // Process a normal (non‑reduce_only) opening order fill.
-    void processNormalOpeningOrder(Order& ord, double fill_qty, double fill_price, double notional,
+    inline void processNormalOpeningOrder(Order& ord, double fill_qty, double fill_price, double notional,
         double fee, double feeRate, std::vector<Order>& leftover);
 
     // Process an opening order fill, calling either the reduce_only or normal order processing.
-    void processOpeningOrder(Order& ord, double fill_qty, double fill_price, double notional,
+    inline void processOpeningOrder(Order& ord, double fill_qty, double fill_price, double notional,
         double fee, double feeRate, std::vector<Order>& leftover);
 };
