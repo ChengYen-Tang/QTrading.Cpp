@@ -1,4 +1,4 @@
-﻿# CMakeList.txt: QTrading.Service 的 CMake 專案，在此包含來源及定義
+﻿# CMakeList.txt: QTrading.Infra 的 CMake 專案，在此包含來源及定義
 # 專案專屬邏輯。
 #
 
