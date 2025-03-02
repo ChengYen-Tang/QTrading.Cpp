@@ -634,11 +634,11 @@ void Account::cancel_order_by_id(int order_id) {
 // --------------------------------------------
 //  Get all open orders & positions
 // --------------------------------------------
-const std::vector<Account::Order>& Account::get_all_open_orders() const {
+const std::vector<Order>& Account::get_all_open_orders() const {
     return open_orders_;
 }
 
-const std::vector<Account::Position>& Account::get_all_positions() const {
+const std::vector<Position>& Account::get_all_positions() const {
     return positions_;
 }
 

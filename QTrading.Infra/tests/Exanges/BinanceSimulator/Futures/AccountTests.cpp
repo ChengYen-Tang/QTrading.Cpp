@@ -291,7 +291,7 @@ TEST(AccountTest, SwitchingModeWithoutPositionsSucceeds) {
 // 2. Single Mode Auto-Reduce vs. Hedge Mode reduceOnly
 /////////////////////////////////////////////////////////
 
-// Scenario 3: Single mode auto-reduce (reverse order logic)
+// Scenario 1: Single mode auto-reduce (reverse order logic)
 TEST(AccountTest, SingleModeAutoReduceReverseOrder) {
     Account account(10000.0, 0);
     account.set_position_mode(false);
@@ -317,7 +317,7 @@ TEST(AccountTest, SingleModeAutoReduceReverseOrder) {
     EXPECT_NEAR(positions[0].quantity, 1.0, 1e-6);
 }
 
-// Scenario 4: Hedge mode with reduce_only = true
+// Scenario 2: Hedge mode with reduce_only = true
 TEST(AccountTest, HedgeModeReduceOnlyOrder) {
     Account account(10000.0, 0);
     // Switch to hedge mode.
@@ -358,7 +358,7 @@ TEST(AccountTest, HedgeModeReduceOnlyOrder) {
 // 3. Merge Positions (Same Symbol & Direction)
 /////////////////////////////////////////////////////////
 
-// Scenario 5: Verifying position merging in hedge mode
+// Scenario 1: Verifying position merging in hedge mode
 TEST(AccountTest, MergePositionsSameDirection) {
     Account account(10000.0, 0);
     // Switch to hedge mode.
@@ -378,7 +378,7 @@ TEST(AccountTest, MergePositionsSameDirection) {
     EXPECT_DOUBLE_EQ(positions[0].quantity, 6.0);
 }
 
-// Scenario 6: Verifying that different directions do not merge
+// Scenario 2: Verifying that different directions do not merge
 TEST(AccountTest, MergePositionsDifferentDirectionNotMerged) {
     Account account(10000.0, 0);
     // Switch to hedge mode.
@@ -411,7 +411,7 @@ TEST(AccountTest, MergePositionsDifferentDirectionNotMerged) {
 // 4. Closing Positions in Hedge Mode with Direction
 /////////////////////////////////////////////////////////
 
-// Scenario 7: Close only the LONG side of a hedge-mode symbol
+// Scenario 1: Close only the LONG side of a hedge-mode symbol
 TEST(AccountTest, CloseOnlyLongSideInHedgeMode) {
     Account account(10000.0, 0);
     account.set_position_mode(true);
@@ -436,7 +436,7 @@ TEST(AccountTest, CloseOnlyLongSideInHedgeMode) {
     EXPECT_FALSE(positions[0].is_long);
 }
 
-// Scenario 8: Close both sides by calling close_position(symbol) with no direction in hedge mode
+// Scenario 2: Close both sides by calling close_position(symbol) with no direction in hedge mode
 TEST(AccountTest, CloseBothSidesInHedgeMode) {
     Account account(10000.0, 0);
     account.set_position_mode(true);
@@ -465,7 +465,7 @@ TEST(AccountTest, CloseBothSidesInHedgeMode) {
 // 5. Leverage Adjustments With Existing Positions
 /////////////////////////////////////////////////////////
 
-// Scenario 10: Adjust leverage successfully on a symbol with open positions
+// Scenario 1: Adjust leverage successfully on a symbol with open positions
 TEST(AccountTest, AdjustLeverageWithExistingPositions) {
     Account account(10000.0, 0);
     account.set_symbol_leverage("BTCUSDT", 20.0);
@@ -509,7 +509,7 @@ TEST(AccountTest, AdjustLeverageWithExistingPositions) {
 // 6. Additional Edge Cases for reduceOnly
 /////////////////////////////////////////////////////////
 
-// Scenario 11: reduceOnly order in single mode
+// Scenario 1: reduceOnly order in single mode
 TEST(AccountTest, ReduceOnlyOrderInSingleMode) {
     Account account(10000.0, 0);
     // In one-way mode.
@@ -526,7 +526,7 @@ TEST(AccountTest, ReduceOnlyOrderInSingleMode) {
     ASSERT_EQ(positions.size(), 0u);
 }
 
-// Scenario 12: reduceOnly with partial fill in hedge mode
+// Scenario 2: reduceOnly with partial fill in hedge mode
 TEST(AccountTest, ReduceOnlyPartialFillInHedgeMode) {
     Account account(10000.0, 0);
     account.set_position_mode(true);
@@ -567,7 +567,7 @@ TEST(AccountTest, ReduceOnlyPartialFillInHedgeMode) {
 // 7. Ensuring All Behaviors Work with Merged Positions
 /////////////////////////////////////////////////////////
 
-// Scenario 13: Merge then close partially
+// Scenario 1: Merge then close partially
 TEST(AccountTest, MergeThenPartialClose) {
     Account account(10000.0, 0);
     account.set_position_mode(true);
@@ -597,7 +597,7 @@ TEST(AccountTest, MergeThenPartialClose) {
 // 8. Attempting to Re-Switch Mode After Positions are Closed
 /////////////////////////////////////////////////////////
 
-// Scenario 14: Switch from hedge to single mode after closing all positions.
+// Scenario 2: Switch from hedge to single mode after closing all positions.
 TEST(AccountTest, SwitchModeAfterPositionsClosed) {
     Account account(10000.0, 0);
     account.set_position_mode(true);
@@ -627,7 +627,7 @@ TEST(AccountTest, SwitchModeAfterPositionsClosed) {
 // 9. Additional Test Cases for Multiple Symbols
 /////////////////////////////////////////////////////////
 
-// Scenario A: Hedge mode, open BTC long and ETH short, then partially fill them.
+// Scenario 1: Hedge mode, open BTC long and ETH short, then partially fill them.
 TEST(AccountTest, HedgeMode_BTC_Long_ETH_Short_PartialFills) {
     Account account(10000.0, 0);
     // Switch to hedge mode.
@@ -661,7 +661,7 @@ TEST(AccountTest, HedgeMode_BTC_Long_ETH_Short_PartialFills) {
     EXPECT_EQ(openOrders.size(), 2u);
 }
 
-// Scenario B: Multiple symbols in single mode (should not interfere with each other)
+// Scenario 2: Multiple symbols in single mode (should not interfere with each other)
 TEST(AccountTest, SingleMode_MultipleSymbols) {
     Account account(10000.0, 0);
     account.set_position_mode(false);
@@ -708,7 +708,7 @@ TEST(AccountTest, SingleMode_MultipleSymbols) {
     EXPECT_DOUBLE_EQ(ethQty, 2.0);
 }
 
-// Scenario C: Hedge mode with multiple symbols and reduce_only orders.
+// Scenario 3: Hedge mode with multiple symbols and reduce_only orders.
 TEST(AccountTest, HedgeMode_MultipleSymbols_ReduceOnly) {
     Account account(10000.0, 0);
     // Switch to hedge mode.

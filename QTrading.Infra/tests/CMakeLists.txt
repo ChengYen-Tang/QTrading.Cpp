@@ -13,6 +13,7 @@ target_include_directories(QTrading.Infra.Tests
 target_link_libraries(QTrading.Infra.Tests
     PRIVATE
         QTrading.Infra.Library         # 連結到剛剛建立的函式庫
+        ${Boost_LIBRARIES}
         Boost::filesystem
         GTest::gtest
         GTest::gtest_main  # 或 GTest::gtest + GTest::gtest_main
