@@ -3,7 +3,7 @@
 add_executable(QTrading.Infra.Tests
   "Exanges/BinanceSimulator/DataProvider/MarketDataTests.cpp"
   "Exanges/BinanceSimulator/Futures/AccountTests.cpp"
- )
+  "Exanges/BinanceSimulator/BinanceExchangeTests.cpp")
 
 target_include_directories(QTrading.Infra.Tests
     PRIVATE

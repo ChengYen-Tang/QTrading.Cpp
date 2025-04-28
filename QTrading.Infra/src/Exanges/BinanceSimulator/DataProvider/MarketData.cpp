@@ -31,20 +31,21 @@ void MarketData::load_csv(const std::string& csv_file) {
         if (tokens.size() < 11) continue;
 
         try {
-            KlineDto kline = {
-                std::stoll(tokens[0]),
-                std::stod(tokens[1]),
-                std::stod(tokens[2]),
-                std::stod(tokens[3]),
-                std::stod(tokens[4]),
-                std::stod(tokens[5]),
-                std::stoll(tokens[6]),
-                std::stod(tokens[7]),
-                std::stoi(tokens[8]),
-                std::stod(tokens[9]),
-                std::stod(tokens[10])
-            };
-            klines.push_back(kline);
+            auto openTs = std::stoll(tokens[0]);
+            auto openP = std::stod(tokens[1]);
+            auto highP = std::stod(tokens[2]);
+            auto lowP = std::stod(tokens[3]);
+            auto closeP = std::stod(tokens[4]);
+            auto vol = std::stod(tokens[5]);
+            auto closeTs = std::stoll(tokens[6]);
+            auto quoteVol = std::stod(tokens[7]);
+            auto trades = std::stoi(tokens[8]);
+            auto takerBB = std::stod(tokens[9]);
+            auto takerBQ = std::stod(tokens[10]);
+
+            klines.emplace_back(
+                openTs, openP, highP, lowP, closeP, vol,
+                closeTs, quoteVol, trades, takerBB, takerBQ);
         }
         catch (const std::invalid_argument& e) {
             continue;
@@ -53,6 +54,11 @@ void MarketData::load_csv(const std::string& csv_file) {
             continue;
         }
     }
+
+	std::sort(klines.begin(), klines.end(),
+		[](const KlineDto& a, const KlineDto& b) {
+			return a.Timestamp < b.Timestamp;
+		});
 }
 
 const KlineDto& MarketData::get_latest_kline() const {
