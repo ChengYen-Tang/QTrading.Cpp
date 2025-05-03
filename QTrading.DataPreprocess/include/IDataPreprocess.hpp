@@ -17,15 +17,20 @@ namespace QTrading::DataPreprocess {
 			return market_channel;
 		}
 
-        void start() {
-            if (workerThread) {
-                std::cout << "[Data Preprocess Module] Thread is already running!\n";
-                return;
-            }
+		void start() {
+			if (stopFlag.load()) {
+				std::cout << "[Data Preprocess Module] Thread has been stopped!\n";
+				std::cout << "[Data Preprocess Module] Please create a new instance to start again!\n";
+				throw std::runtime_error("The module has expired.");
+			}
+			if (workerThread.joinable()) {
+				std::cout << "[Data Preprocess Module] Thread is already running!\n";
+				return;
+			}
 
-            std::cout << "[Data Preprocess Module] Starting thread...\n";
-            workerThread = boost::thread(&IDataPreprocess::run, this);
-        }
+			std::cout << "[Data Preprocess Module] Starting thread...\n";
+			workerThread = boost::thread(&IDataPreprocess::run, this);
+		}
 
         void stop() {
             std::cout << "[Data PreprocessModule] Stopping thread...\n";
@@ -33,11 +38,11 @@ namespace QTrading::DataPreprocess {
             if (workerThread.joinable()) {
                 workerThread.join();
             }
+			market_channel->Close();
         }
 
 		virtual ~IDataPreprocess() {
 			stop();
-			market_channel->Close();
 		}
 	protected:
 		std::atomic<bool> stopFlag;

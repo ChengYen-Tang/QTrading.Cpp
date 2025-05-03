@@ -76,6 +76,14 @@ const std::vector<dto::Order>& BinanceExchange::get_all_open_orders() const {
     return account.get_all_open_orders();
 }
 
+void BinanceExchange::close()
+{
+    for (auto& [s, idx] : cursor) 
+        idx = md.at(s).get_klines_count();
+
+	IExchange<MultiKlinePtr>::close();
+}
+
 /* ------------------------------------------------------------------ */
 /* helpers                                                             */
 /* ------------------------------------------------------------------ */

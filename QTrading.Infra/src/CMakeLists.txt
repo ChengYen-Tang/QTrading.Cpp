@@ -1,7 +1,7 @@
 ﻿SET(SOURCE_FILES
   "Exanges/BinanceSimulator/Futures/Account.cpp"
   "Exanges/BinanceSimulator/DataProvider/MarketData.cpp"
-  "Exanges/BinanceSimulator/BinanceExchange.cpp")
+  "Exanges/BinanceSimulator/BinanceExchange.cpp" )
 
 add_library (QTrading.Infra.Library STATIC ${SOURCE_FILES})
 target_include_directories(QTrading.Infra.Library PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/../include", "${CMAKE_CURRENT_SOURCE_DIR}/../../QTrading.Utils/include")

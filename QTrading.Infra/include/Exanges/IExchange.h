@@ -30,6 +30,14 @@ namespace QTrading::Infra::Exanges {
 
 		virtual const std::vector<Position>& get_all_positions()   const = 0;
 		virtual const std::vector<Order>& get_all_open_orders() const = 0;
+
+		virtual void close()
+		{
+			/*  default: just close every public channel  */
+			if (market_channel && !market_channel->IsClosed())   market_channel->Close();
+			if (position_channel && !position_channel->IsClosed()) position_channel->Close();
+			if (order_channel && !order_channel->IsClosed())    order_channel->Close();
+		}
 	protected:
 		std::shared_ptr<Channel<TMarket>>             market_channel;
 		std::shared_ptr<Channel<std::vector<Position>>> position_channel;

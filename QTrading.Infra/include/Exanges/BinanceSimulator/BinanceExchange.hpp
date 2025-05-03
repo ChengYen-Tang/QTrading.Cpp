@@ -37,7 +37,7 @@ namespace QTrading::Infra::Exanges::BinanceSim {
 
         const std::vector<dto::Position>& get_all_positions()   const override;
         const std::vector<dto::Order>& get_all_open_orders() const override;
-
+		void  close() override;
     private:
         /* ------------- data members ------------- */
         std::unordered_map<std::string, MarketData> md;       // CSV cache
