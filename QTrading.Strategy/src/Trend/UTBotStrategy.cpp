@@ -1,96 +1,91 @@
-#include "Trend/UTBotStrategy.hpp"
+﻿#include "Trend/UTBotStrategy.hpp"
 #include <cmath>
+#include <numeric>
 
 using namespace QTrading;
 using namespace QTrading::Dto::Market::Binance;
+using namespace QTrading::DataPreprocess::Dto;
 using namespace QTrading::Strategy;
 
 /* ------------------------------------------------------------------ */
-UTBotStrategy::UTBotStrategy(ExchangePtr ex, double a, int c, double qty)
-    : keyA(a), atrPeriod(c), orderQty(qty), ex(std::move(ex))
-{
+UTBotStrategy::UTBotStrategy(ExchangePtr ex, double key, double q, bool useHA)
+    : ex(std::move(ex)), a(key), qty(q), useHA(useHA) {
 }
 
 /* ------------------------------------------------------------------ */
-void UTBotStrategy::on_data(const MultiPtr& dto)
+void UTBotStrategy::on_data(const AggPtr& dto)
 {
-    for (const auto& [sym, opt] : dto->klines) {
-        if (!opt) continue;                // missing minute
-        handle_symbol(sym, opt.value());
-    }
+    for (const auto& [sym, bars] : dto->HistoricalKlines)
+        if (!bars.empty()) process_symbol(sym, bars);
 }
 
-/* ------------------------------------------------------------------ */
-void UTBotStrategy::handle_symbol(const std::string& sym,
-    const KlineDto& k)
+/* ---------- per‑symbol processing -------------------------------- */
+void UTBotStrategy::process_symbol(const std::string& sym,
+    const std::deque<KlineDto>& bars)
 {
-    auto& s = st[sym];
+    auto& S = st[sym];
+    const KlineDto& live = bars.front();             // still building
 
-    /* ---------- ATR update ---------- */
-    double tr = calcTR(k.HighPrice, k.LowPrice, s.prevSrc == 0.0 ? k.ClosePrice : s.prevSrc);
-    s.trBuf.push_back(tr);
-    if (static_cast<int>(s.trBuf.size()) > atrPeriod) s.trBuf.pop_front();
+    /* --- build srcCurrent / srcPrev (HA or normal) --------------- */
+    const double srcCur = useHA ? ha_close(live) : live.ClosePrice;
+    const double srcPrev = S.init ? S.prevSrc :
+        (bars.size() > 1
+            ? (useHA ? ha_close(bars[1]) : bars[1].ClosePrice)
+            : srcCur);
 
-    if (!s.atrInit) {
-        if (static_cast<int>(s.trBuf.size()) == atrPeriod) {
-            double sma = 0.0;
-            for (double v : s.trBuf) sma += v;
-            sma /= atrPeriod;
-            s.atr = sma;
-            s.atrInit = true;
-        }
+    /* --- ATR from finished bars (skip index 0) -------------------- */
+    if (bars.size() < 2) {           // not enough history yet
+        S.prevSrc = srcCur; return;
     }
-    else {
-        s.atr = rma_next(s.atr, tr, atrPeriod, true, 0.0);
-    }
+    double sumTR = 0.0;
+    for (size_t i = 1; i < bars.size(); ++i)
+        sumTR += true_range(bars[i],
+            (i + 1 < bars.size() ? &bars[i + 1] : nullptr));
+    const int    atrLen = static_cast<int>(bars.size()) - 1;
+    const double atr = sumTR / static_cast<double>(atrLen);
+    const double nLoss = a * atr;
 
-    if (!s.atrInit) { s.prevSrc = k.ClosePrice; return; }   // wait ATR ready
+    /* --- trailing‑stop update (identical logic) ------------------- */
+    const double prevTrail = S.init ? S.trailing : srcCur - nLoss;
+    double trail;
 
-    /* ---------- trailing stop ---------- */
-    s.prevTrailing = s.trailing;
-    double nLoss = keyA * s.atr;
-
-    if (k.ClosePrice > s.prevTrailing && s.prevSrc > s.prevTrailing)
-        s.trailing = std::max(s.prevTrailing, k.ClosePrice - nLoss);
-    else if (k.ClosePrice < s.prevTrailing && s.prevSrc < s.prevTrailing)
-        s.trailing = std::min(s.prevTrailing, k.ClosePrice + nLoss);
-    else if (k.ClosePrice > s.prevTrailing)
-        s.trailing = k.ClosePrice - nLoss;
+    if (srcCur > prevTrail && srcPrev > prevTrail)
+        trail = std::max(prevTrail, srcCur - nLoss);
+    else if (srcCur < prevTrail && srcPrev < prevTrail)
+        trail = std::min(prevTrail, srcCur + nLoss);
+    else if (srcCur > prevTrail)
+        trail = srcCur - nLoss;
     else
-        s.trailing = k.ClosePrice + nLoss;
+        trail = srcCur + nLoss;
 
-    /* ---------- position logic ---------- */
-    int newPos = s.pos;
-    if (s.prevSrc < s.prevTrailing && k.ClosePrice > s.trailing)  newPos = 1;   // long
-    if (s.prevSrc > s.prevTrailing && k.ClosePrice < s.trailing)  newPos = -1;   // short
+    /* --- long / short crossover ---------------------------------- */
+    int newPos = S.pos;
+    if (srcPrev < prevTrail && srcCur > trail) newPos = 1;
+    if (srcPrev > prevTrail && srcCur < trail) newPos = -1;
 
-    if (newPos != s.pos) {
-        // Close opposite, open new
-        if (newPos == 1) {
-            ex->place_order(sym, orderQty, 0.0, true, false);   // market long
-        }
-        else if (newPos == -1) {
-            ex->place_order(sym, orderQty, 0.0, false, false);  // market short
-        }
-        s.pos = newPos;
+    if (newPos != S.pos) {
+        if (newPos == 1) ex->place_order(sym, qty, 0.0, true);  // LONG mkt
+        if (newPos == -1) ex->place_order(sym, qty, 0.0, false);  // SHORT mkt
+        S.pos = newPos;
     }
 
-    /* save previous close */
-    s.prevSrc = k.ClosePrice;
+    /* --- persist -------------------------------------------------- */
+    S.trailing = trail;
+    S.prevSrc = srcCur;
+    S.init = true;
+}
+
+/* ---------- helpers ---------------------------------------------- */
+double UTBotStrategy::ha_close(const KlineDto& k)
+{
+    return (k.OpenPrice + k.HighPrice + k.LowPrice + k.ClosePrice) / 4.0;
 }
 
 /* ------------------------------------------------------------------ */
-double UTBotStrategy::calcTR(double high, double low, double prevClose)
+double UTBotStrategy::true_range(const KlineDto& cur, const KlineDto* prev)
 {
-    double c1 = high - low;
-    double c2 = std::fabs(high - prevClose);
-    double c3 = std::fabs(low - prevClose);
-    return std::max({ c1,c2,c3 });
-}
-
-double UTBotStrategy::rma_next(double prevAtr, double tr, int len, bool init, double sma)
-{
-    // Wilder�s RMA
-    if (!init) return sma;     // not used, kept for completeness
-    return (prevAtr * (len - 1) + tr) / static_cast<double>(len);
+    double pc = prev ? prev->ClosePrice : cur.OpenPrice;
+    return std::max({ cur.HighPrice - cur.LowPrice,
+                      std::fabs(cur.HighPrice - pc),
+                      std::fabs(cur.LowPrice - pc) });
 }

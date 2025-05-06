@@ -1,74 +1,55 @@
 ﻿#pragma once
-/**
- * UT‑Bot Alerts   (converted from TradingView Pine v4)
- *
- *  • Works on *1‑minute* source bars contained in
- *    QTrading::Dto::Market::Binance::MultiKlineDto.
- *  • Keeps an ATR(c) (default 10) and trailing‑stop logic identical to
- *    the Pine script.
- *
- *  The strategy:
- *    ▸ Long  : when price crosses *above* the trailing stop
- *    ▸ Short : when price crosses *below* the trailing stop
- *
- *  Order size is fixed (qty parameter, default = 1).
- */
 #include <unordered_map>
-#include <deque>
 #include "IStrategy.hpp"
-#include "Dto/Market/Binance/MultiKline.hpp"
+#include "Dto/AggregateKline.hpp"
 #include "Exanges/IExchange.h"
 
 namespace QTrading::Strategy {
 
+    /**
+     * UT‑Bot Alerts   – hourly variant
+     * --------------------------------
+     * • Consumes AggregateKline coming from a BinanceHourAggregator.
+     * • Computes ATR from the FINISHED hourly bars only.
+     * • Uses the still‑building bar (index 0 in deque) as the live price.
+     */
     class UTBotStrategy final
-        : public IStrategy<QTrading::Dto::Market::Binance::MultiKlineDto>
+        : public IStrategy<QTrading::DataPreprocess::Dto::AggregateKline>
     {
     public:
-        using MultiPtr =
-            std::shared_ptr<QTrading::Dto::Market::Binance::MultiKlineDto>;
+        using AggPtr = std::shared_ptr<QTrading::DataPreprocess::Dto::AggregateKline>;
+        using MultiPtr = std::shared_ptr<QTrading::Dto::Market::Binance::MultiKlineDto>;
         using ExchangePtr = std::shared_ptr<
             QTrading::Infra::Exanges::IExchange<MultiPtr>>;
 
-        UTBotStrategy(ExchangePtr     ex,
-            double          keyA = 1.0,   // Pine “a”
-            int             atrPeriod = 10,    // Pine “c”
-            double          qty = 1.0);
+        UTBotStrategy(ExchangePtr  ex,
+            double       key = 1.0,   // Pine “a”
+            double       quantity = 1.0,
+            bool         useHeikinAshi = false);  // fixed order size
 
     protected:
-        void on_data(const MultiPtr& dto) override;
+        void on_data(const AggPtr& dto) override;
 
     private:
-        struct SymbolState {
-            // Wilder ATR
-            std::deque<double> trBuf;
-            double  atr = 0.0;
-            bool    atrInit = false;
-
-            // trailing stop & signals
-            double  trailing = 0.0;
-            double  prevTrailing = 0.0;
-            double  prevSrc = 0.0;
-            int     pos = 0;          // -1 short, 0 flat, 1 long
+        struct SymState {
+            double trailing = 0.0;
+            double prevSrc  = 0.0;
+            int    pos = 0;     // -1 short, 0 flat, 1 long
+            bool   init = false;
         };
 
-        /* parameters */
-        const double  keyA;
-        const int     atrPeriod;
-        const double  orderQty;
+        /* ---- params & handles ---- */
+        ExchangePtr                                   ex;
+        const double                                  a;     // key value
+        const double                                  qty;
+        const bool                                    useHA;
+        std::unordered_map<std::string, SymState>     st;
 
-        /* state per symbol */
-        std::unordered_map<std::string, SymbolState> st;
-
-        /* typed exchange ptr for order placing */
-        ExchangePtr ex;
-
-        /* helpers */
-        static double calcTR(double high, double low, double prevClose);
-        static double rma_next(double prevAtr, double tr, int length, bool init, double sma);
-
-        void handle_symbol(const std::string& sym,
-            const QTrading::Dto::Market::Binance::KlineDto& k);
+        /* ---- helpers ---- */
+        static double true_range(const QTrading::Dto::Market::Binance::KlineDto& cur,
+            const QTrading::Dto::Market::Binance::KlineDto* prev);
+        static double ha_close(const QTrading::Dto::Market::Binance::KlineDto& k);
+        void process_symbol(const std::string& sym,
+            const std::deque<QTrading::Dto::Market::Binance::KlineDto>& bars);
     };
-
-} // namespace QTrading::Strategy
+}

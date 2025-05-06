@@ -36,8 +36,8 @@ FetchContent_MakeAvailable(googletest)
 project ("QTrading.Cpp")
 
 # 包含子專案。
-#add_subdirectory ("QTrading.Service")
 add_subdirectory ("QTrading.Infra")
 add_subdirectory ("QTrading.Utils")
 add_subdirectory ("QTrading.DataPreprocess")
 add_subdirectory ("QTrading.Strategy")
+add_subdirectory ("QTrading.Service")
