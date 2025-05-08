@@ -7,6 +7,7 @@
 #include <memory>
 #include <atomic>
 #include <boost/thread.hpp>
+#include <semaphore>
 #include "Queue/Channel.hpp"
 
 namespace QTrading::Strategy {
@@ -32,15 +33,19 @@ namespace QTrading::Strategy {
             worker = boost::thread(&IStrategy::run, this);
         }
         void stop() {
+            std::cout << "[Strategy Module] Stopping thread...\n";
             stop_flag.store(true);
             if (worker.joinable()) worker.join();
         }
-
+        void wait_for_done() {
+            sem.acquire();
+        }
     protected:
-        std::shared_ptr<QTrading::Utils::Queue::Channel<std::shared_ptr<TIn>>> in;
-        std::shared_ptr<void>                                                  exchange;   // cast in subclass
-        std::atomic<bool>                                                      stop_flag { false };
-        boost::thread                                                          worker;
+        std::shared_ptr<QTrading::Utils::Queue::Channel<std::shared_ptr<TIn>>>  in;
+        std::shared_ptr<void>                                                   exchange;   // cast in subclass
+        std::atomic<bool>                                                       stop_flag { false };
+        boost::thread                                                           worker;
+        std::binary_semaphore                                                   sem{ 0 };
 
         /** strategy must implement this – will be called each time a dto arrives */
         virtual void on_data(const std::shared_ptr<TIn>& dto) = 0;
@@ -51,8 +56,8 @@ namespace QTrading::Strategy {
                 if (in->IsClosed() && !in->TryReceive()) break;
                 auto v = in->Receive();
                 if (v) on_data(v.value());
+                sem.release();
             }
         }
     };
-
 }
