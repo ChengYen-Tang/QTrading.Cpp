@@ -13,17 +13,17 @@
 #include <vector>
 #include <optional>
 
-#include "Exanges/IExchange.h"
-#include "Exanges/BinanceSimulator/DataProvider/MarketData.hpp"
-#include "Exanges/BinanceSimulator/Futures/Account.hpp"
+#include "Exchanges/IExchange.h"
+#include "Exchanges/BinanceSimulator/DataProvider/MarketData.hpp"
+#include "Exchanges/BinanceSimulator/Futures/Account.hpp"
 #include "Dto/Market/Binance/MultiKline.hpp"
 #include "Queue/ChannelFactory.hpp"
 
-namespace QTrading::Infra::Exanges::BinanceSim {
+namespace QTrading::Infra::Exchanges::BinanceSim {
 
     using MultiKlinePtr = std::shared_ptr<QTrading::Dto::Market::Binance::MultiKlineDto>;
 
-    class BinanceExchange final : public QTrading::Infra::Exanges::IExchange<MultiKlinePtr> {
+    class BinanceExchange final : public QTrading::Infra::Exchanges::IExchange<MultiKlinePtr> {
     public:
         /// ctor –– symbolCsv = {{"BTCUSDT","btc.csv"}, ...}
         BinanceExchange(const std::vector<std::pair<std::string, std::string>>& symbolCsv,

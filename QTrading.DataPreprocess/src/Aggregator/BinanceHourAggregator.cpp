@@ -10,7 +10,7 @@ using namespace QTrading::Utils::Queue;
 /* ctor                                                               */
 /* ------------------------------------------------------------------ */
 BinanceHourAggregator::BinanceHourAggregator(
-    std::shared_ptr<Infra::Exanges::IExchange<MinutePtr>> ex,
+    std::shared_ptr<Infra::Exchanges::IExchange<MinutePtr>> ex,
     std::size_t hoursToKeep)
     : exchange(std::move(ex)),
     inCh(exchange->get_market_channel()),

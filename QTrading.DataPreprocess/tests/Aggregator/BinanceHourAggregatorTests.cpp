@@ -4,12 +4,12 @@
 #include <filesystem>
 #include <thread>
 
-#include "Exanges/BinanceSimulator/BinanceExchange.hpp"
+#include "Exchanges/BinanceSimulator/BinanceExchange.hpp"
 #include "Aggregator/BinanceHourAggregator.hpp"
 #include <boost/filesystem/fstream.hpp>
 
 using namespace QTrading;
-using namespace QTrading::Infra::Exanges::BinanceSim;
+using namespace QTrading::Infra::Exchanges::BinanceSim;
 using namespace QTrading::DataPreprocess::Aggregator;
 using namespace QTrading::Dto::Market::Binance;
 using AggPtr = std::shared_ptr<QTrading::DataPreprocess::Dto::AggregateKline>;

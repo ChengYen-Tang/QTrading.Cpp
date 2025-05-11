@@ -1,7 +1,7 @@
 ﻿#include <gtest/gtest.h>
 #include <boost/filesystem.hpp>
 #include <boost/filesystem/fstream.hpp>
-#include <Exanges/BinanceSimulator/DataProvider/MarketData.hpp>
+#include <Exchanges/BinanceSimulator/DataProvider/MarketData.hpp>
 
 static const char* test_csv_filename = "test_kline_data.csv";
 

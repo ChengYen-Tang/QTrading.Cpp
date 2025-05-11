@@ -7,6 +7,7 @@
 #include <memory>
 #include <atomic>
 #include <boost/thread.hpp>
+#include <iostream>
 #include <semaphore>
 #include "Queue/Channel.hpp"
 

@@ -9,9 +9,9 @@
 #include <fstream>
 #include <filesystem>
 
-#include "Exanges/BinanceSimulator/BinanceExchange.hpp"
+#include "Exchanges/BinanceSimulator/BinanceExchange.hpp"
 
-using namespace QTrading::Infra::Exanges::BinanceSim;
+using namespace QTrading::Infra::Exchanges::BinanceSim;
 using namespace QTrading::Dto::Market::Binance;
 using namespace QTrading::Utils::Queue;
 namespace fs = std::filesystem;

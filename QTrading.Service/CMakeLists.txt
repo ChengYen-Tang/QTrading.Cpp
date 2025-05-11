@@ -1,21 +1,27 @@
-﻿# CMakeList.txt: QTrading.Service 的 CMake 專案，在此包含來源及定義
-# 專案專屬邏輯。
-#
+﻿project(QTrading.Service LANGUAGES CXX)
 
-# 將來源新增到此專案的可執行檔。
-project ("QTrading.Service")
-add_executable (QTrading.Service "QTrading.Service.cpp" "QTrading.Service.h")
-target_include_directories(QTrading.Service PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/../QTrading.DataPreprocess/include", "${CMAKE_CURRENT_SOURCE_DIR}/../QTrading.Infra/include", "${CMAKE_CURRENT_SOURCE_DIR}/../QTrading.Strategy/include")
+find_package(Boost CONFIG REQUIRED COMPONENTS thread)
 
-target_link_libraries(QTrading.Service
-    PRIVATE
-        QTrading.Infra.Library
-        QTrading.DataPreprocess.Library         # 連結到剛剛建立的函式庫
-        QTrading.Strategy.Library
+add_executable(QTrading.Service
+  QTrading.Service.cpp
+  QTrading.Service.h
 )
 
-if (CMAKE_VERSION VERSION_GREATER 3.12)
-  set_property(TARGET QTrading.Service PROPERTY CXX_STANDARD 20)
-endif()
+target_include_directories(QTrading.Service PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/../QTrading.DataPreprocess/include
+  ${CMAKE_CURRENT_SOURCE_DIR}/../QTrading.Infra/include
+  ${CMAKE_CURRENT_SOURCE_DIR}/../QTrading.Strategy/include
+)
 
-# TODO: 新增測試，並視需要安裝目標。
+target_link_libraries(QTrading.Service
+  PRIVATE
+    QTrading.Infra.Library
+    QTrading.DataPreprocess.Library
+    QTrading.Strategy.Library
+    Boost::thread
+)
+
+set_target_properties(QTrading.Service PROPERTIES
+  CXX_STANDARD 20
+  CXX_STANDARD_REQUIRED ON
+)

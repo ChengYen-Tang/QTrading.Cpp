@@ -2,7 +2,7 @@
 #include <unordered_map>
 #include "IStrategy.hpp"
 #include "Dto/AggregateKline.hpp"
-#include "Exanges/IExchange.h"
+#include "Exchanges/IExchange.h"
 
 namespace QTrading::Strategy {
 
@@ -20,7 +20,7 @@ namespace QTrading::Strategy {
         using AggPtr = std::shared_ptr<QTrading::DataPreprocess::Dto::AggregateKline>;
         using MultiPtr = std::shared_ptr<QTrading::Dto::Market::Binance::MultiKlineDto>;
         using ExchangePtr = std::shared_ptr<
-            QTrading::Infra::Exanges::IExchange<MultiPtr>>;
+            QTrading::Infra::Exchanges::IExchange<MultiPtr>>;
 
         UTBotStrategy(ExchangePtr  ex,
             double       key = 1.0,   // Pine “a”

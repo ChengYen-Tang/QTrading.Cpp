@@ -1,7 +1,7 @@
-﻿#include "Exanges/BinanceSimulator/BinanceExchange.hpp"
+﻿#include "Exchanges/BinanceSimulator/BinanceExchange.hpp"
 
 using namespace QTrading;
-using namespace QTrading::Infra::Exanges::BinanceSim;
+using namespace QTrading::Infra::Exchanges::BinanceSim;
 using namespace QTrading::Dto::Market::Binance;
 using namespace QTrading::Utils::Queue;
 
@@ -48,6 +48,7 @@ bool BinanceExchange::step()
     }
 
     /* 1) build & push market data */
+	set_global_timestamp(ts);
     auto dto = std::make_shared<MultiKlineDto>();
     build_multikline(ts, *dto);
     market_channel->Send(dto);    // always emit market

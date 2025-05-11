@@ -6,12 +6,13 @@
 #include <string>
 #include "Dto/Order.hpp"
 #include "Dto/Position.hpp"
+#include "Global.hpp"
 #include "Queue/Channel.hpp"
 
 using namespace QTrading::dto;
 using namespace QTrading::Utils::Queue;
 
-namespace QTrading::Infra::Exanges {
+namespace QTrading::Infra::Exchanges {
     template<typename TMarket>
     //requires std::derived_from<T, BaseMarketDto>
     class IExchange {
@@ -42,5 +43,9 @@ namespace QTrading::Infra::Exanges {
 		std::shared_ptr<Channel<TMarket>>             market_channel;
 		std::shared_ptr<Channel<std::vector<Position>>> position_channel;
 		std::shared_ptr<Channel<std::vector<Order>>>    order_channel;
+
+		void set_global_timestamp(unsigned long long &ts) {
+			QTrading::Utils::GlobalTimestamp.store(ts, std::memory_order_release);
+		}
     };
 }

@@ -1,5 +1,5 @@
-﻿#include "Exanges/BinanceSimulator/Futures/Config.hpp"
-#include "Exanges/BinanceSimulator/Futures/Account.hpp"
+﻿#include "Exchanges/BinanceSimulator/Futures/Config.hpp"
+#include "Exchanges/BinanceSimulator/Futures/Account.hpp"
 #include <iostream>
 #include <stdexcept>
 #include <cmath>

@@ -2,10 +2,10 @@
 /**
  * BinanceHourAggregator
  * ---------------------
- *  • Inherits IDataPreprocess< shared_ptr<AggregateKline> >
- *  • Reads 1-minute MultiKline from BinanceExchange
- *  • Aggregates per-symbol 1-hour bars (using existing KlineDto)
- *  • Keeps a sliding window of N hours   (ctor parameter)
+ *  ï¿½ Inherits IDataPreprocess< shared_ptr<AggregateKline> >
+ *  ï¿½ Reads 1-minute MultiKline from BinanceExchange
+ *  ï¿½ Aggregates per-symbol 1-hour bars (using existing KlineDto)
+ *  ï¿½ Keeps a sliding window of N hours   (ctor parameter)
  */
 
 #include <unordered_map>
@@ -14,7 +14,7 @@
 
 #include "IDataPreprocess.hpp"
 #include "Dto/AggregateKline.hpp"
-#include "Exanges/IExchange.h"
+#include "Exchanges/IExchange.h"
 #include "Queue/ChannelFactory.hpp"
 
 namespace QTrading::DataPreprocess::Aggregator {
@@ -27,7 +27,7 @@ namespace QTrading::DataPreprocess::Aggregator {
             std::shared_ptr<QTrading::Dto::Market::Binance::MultiKlineDto>;
 
         BinanceHourAggregator(std::shared_ptr<
-            QTrading::Infra::Exanges::IExchange<MinutePtr>> ex,
+            QTrading::Infra::Exchanges::IExchange<MinutePtr>> ex,
             std::size_t hoursToKeep);
 
     private:
@@ -42,7 +42,7 @@ namespace QTrading::DataPreprocess::Aggregator {
         };
 
         /* ==== members ==== */
-        std::shared_ptr<QTrading::Infra::Exanges::IExchange<MinutePtr>>  exchange;
+        std::shared_ptr<QTrading::Infra::Exchanges::IExchange<MinutePtr>>  exchange;
         std::shared_ptr<QTrading::Utils::Queue::Channel<MinutePtr>>      inCh;
 
         const std::chrono::hours keepWindow;

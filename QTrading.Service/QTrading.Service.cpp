@@ -2,7 +2,7 @@
 //
 
 #include "QTrading.Service.h"
-#include "Exanges/BinanceSimulator/BinanceExchange.hpp"
+#include "Exchanges/BinanceSimulator/BinanceExchange.hpp"
 #include "Aggregator/BinanceHourAggregator.hpp"
 #include "Trend/UTBotStrategy.hpp"
 
@@ -20,7 +20,7 @@ int main()
         {"BTCUSDT", R"(\\Nas.kttw.xyz\docker\BinanceDataCollector\Data\Kline\UsdFutures\BTCUSDT.csv)"},
         //{"ETHUSDT", R"(\\Nas.kttw.xyz\docker\BinanceDataCollector\Data\Kline\UsdFutures\ETHUSDT.csv)"}
     };
-    auto exchange = std::make_shared<QTrading::Infra::Exanges::BinanceSim::BinanceExchange>(symbolCsv);
+    auto exchange = std::make_shared<QTrading::Infra::Exchanges::BinanceSim::BinanceExchange>(symbolCsv);
 
     auto aggregator = std::make_unique<QTrading::DataPreprocess::Aggregator::BinanceHourAggregator>(exchange, 10);
 

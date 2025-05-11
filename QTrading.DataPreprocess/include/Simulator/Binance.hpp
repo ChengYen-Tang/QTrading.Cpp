@@ -2,11 +2,11 @@
 
 #include "IDataPreprocess.hpp"
 #include <Dto/Market/Binance/Kline.hpp>
-#include <Exanges/IExchange.h>
+#include <Exchanges/IExchange.h>
 
 using namespace QTrading::DataPreprocess;
 using namespace QTrading::Dto::Market::Binance;
-using namespace QTrading::Infra::Exanges;
+using namespace QTrading::Infra::Exchanges;
 
 namespace QTrading::DataPreprocess::Simulator {
 	class Binance : public IDataPreprocess<std::shared_ptr<KlineDto>>
