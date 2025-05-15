@@ -1,7 +1,6 @@
 ﻿#include "FileLogger.hpp"
 #include <arrow/ipc/feather.h>         // for Feather metadata (optional)
-#include <arrow/io/api.h>
-#include <arrow/ipc/writer.h>
+#include "parquet/stream_writer.h"
 #include <filesystem>
 #include <stdexcept>
 
@@ -39,14 +38,16 @@ namespace QTrading::Log {
         auto out_res = arrow::io::FileOutputStream::Open(
             log_path.string(),
             /*truncate=*/true);
-        if (!out_res.ok()) throw std::runtime_error(out_res.status().ToString());
-        auto outfile = std::move(out_res).ValueUnsafe();
+        PARQUET_ASSIGN_OR_THROW(auto outfile, out_res);
+        s.outfile = std::move(outfile);
 
         // 建立 RecordBatchWriter (Feather-V2 ≡ IPC file) 
         arrow::ipc::IpcWriteOptions write_opts = arrow::ipc::IpcWriteOptions::Defaults();
-        auto w_res = arrow::ipc::MakeFileWriter(outfile.get(), s.schema, write_opts);
-        if (!w_res.ok()) throw std::runtime_error(w_res.status().ToString());
-        s.writer = *w_res;
+        PARQUET_ASSIGN_OR_THROW(auto w_res,
+            arrow::ipc::MakeFileWriter(s.outfile,       // 直接傳 shared_ptr
+                s.schema,
+                write_opts));
+        s.writer = w_res;
 
         slots_.emplace(module, std::move(s));
     }
@@ -96,14 +97,11 @@ namespace QTrading::Log {
 
             // 达到阈值就 Flush + Write
             if (++s->rows >= 8192) {
-                std::shared_ptr<arrow::RecordBatch> rb;
-                auto f_res = builder.Flush(&rb);
-                if (!f_res.ok())
-                    throw std::runtime_error(f_res.status().message());
+                auto rb_res = builder.Flush();
+                PARQUET_ASSIGN_OR_THROW(auto rb, rb_res);
 
                 auto w_res = s->writer->WriteRecordBatch(*rb);
-                if (!w_res.ok())
-                    throw std::runtime_error(w_res.message());
+                PARQUET_THROW_NOT_OK(w_res);
 
                 s->rows = 0;
             }
@@ -111,19 +109,18 @@ namespace QTrading::Log {
 
         // flush 剩余 batches 并 Close writer
         for (auto& [_, slot] : slots_) {
-            std::shared_ptr<arrow::RecordBatch> rb;
-            auto f_res = slot.builder->Flush(&rb);
-            if (!f_res.ok())
-                throw std::runtime_error(f_res.status().message());
+            auto rb_res = slot.builder->Flush();
+            PARQUET_ASSIGN_OR_THROW(auto rb, rb_res);
 
             if (rb && rb->num_rows() > 0) {
                 auto w_res = slot.writer->WriteRecordBatch(*rb);
-                if (!w_res.ok())
-                    throw std::runtime_error(w_res.message());
+                PARQUET_THROW_NOT_OK(w_res);
             }
             auto c_res = slot.writer->Close();
-            if (!c_res.ok())
-                throw std::runtime_error(c_res.message());
+            PARQUET_THROW_NOT_OK(c_res);
+
+            auto s_res = slot.outfile->Close();
+            PARQUET_THROW_NOT_OK(s_res);
         }
     }
 }

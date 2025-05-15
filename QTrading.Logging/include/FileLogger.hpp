@@ -1,5 +1,8 @@
-﻿#include <arrow/api.h>
+﻿#pragma once
+
+#include <arrow/api.h>
 #include <arrow/ipc/api.h>
+#include <arrow/io/api.h>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -73,8 +76,9 @@ namespace QTrading::Log {
         struct Slot {
             std::shared_ptr<arrow::Schema>                    schema;
             Serializer                                        serializer;
-            std::unique_ptr<arrow::RecordBatchBuilder>        builder;   // 
-            std::shared_ptr<arrow::ipc::RecordBatchWriter>    writer;    // 
+            std::unique_ptr<arrow::RecordBatchBuilder>        builder;
+            std::shared_ptr<arrow::ipc::RecordBatchWriter>    writer;
+            std::shared_ptr<arrow::io::OutputStream>          outfile;
             uint32_t                                          rows = 0;
         };
         std::unordered_map<std::string, Slot> slots_;

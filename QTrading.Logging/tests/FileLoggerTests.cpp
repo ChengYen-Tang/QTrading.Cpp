@@ -126,8 +126,10 @@ TEST_F(LoggerTest, SingleRecord) {
 }
 
 TEST_F(LoggerTest, DuplicateRegisterThrows) {
+    logger->Start();
     InitSimpleModule(logger);
     EXPECT_THROW(InitSimpleModule(logger), std::runtime_error);
+    logger->Stop();
 }
 
 TEST_F(LoggerTest, MultiThreadLogging) {
