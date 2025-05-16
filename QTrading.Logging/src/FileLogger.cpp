@@ -1,25 +1,21 @@
 ﻿#include "FileLogger.hpp"
 #include <arrow/ipc/feather.h>         // for Feather metadata (optional)
 #include "parquet/stream_writer.h"
-#include <filesystem>
 #include <stdexcept>
+#include <filesystem>
 
 namespace fs = std::filesystem;
-using QTrading::Utils::Queue::ChannelFactory;
 
 namespace QTrading::Log {
 	FileLogger::FileLogger(const std::string& dir)
-		: dir(dir)
-	{
-        fs::create_directories(dir);
-	}
+		: Logger(dir) { }
 
     /* 註冊模組 */
     void FileLogger::RegisterModule(const std::string& module,
         std::shared_ptr<arrow::Schema> schema,
         Serializer serializer)
     {
-        std::lock_guard lk(mtx_);
+        std::lock_guard lk(mtx);
         if (slots_.count(module))
             throw std::runtime_error("Module already registered: " + module);
 
@@ -52,39 +48,17 @@ namespace QTrading::Log {
         slots_.emplace(module, std::move(s));
     }
 
-    /* 啟動 Consumer */
-    void FileLogger::Start()
-    {
-        std::lock_guard lk(mtx_);
-        if (channel_) return;  // already started
-
-        channel_.reset(ChannelFactory::CreateUnboundedChannel<Row>());
-        consumer_ = boost::thread(&FileLogger::Consume, this);
-    }
-
-    /* 停止 Consumer */
-    void FileLogger::Stop()
-    {
-        {
-            std::lock_guard lk(mtx_);
-            if (!channel_) return;
-            channel_->Close();
-        }
-        consumer_.join();
-        channel_.reset();
-    }
-
     /* Consumer loop：將一筆筆 Row 寫入 Feather-V2 檔案 */
     void FileLogger::Consume()
     {
         while (true) {
-            auto opt = channel_->Receive();
+            auto opt = channel->Receive();
             if (!opt) break;  // Channel 关闭且空
 
             Row row = std::move(*opt);
             Slot* s;
             {
-                std::lock_guard lk(mtx_);
+                std::lock_guard lk(mtx);
                 s = &slots_.at(row.module);
             }
             auto& builder = *s->builder;

@@ -1,17 +1,22 @@
 ﻿#include "Exchanges/BinanceSimulator/BinanceExchange.hpp"
+#include "Enum/LogModule.hpp"
+#include "Dto/AccountLog.hpp"
 
 using namespace QTrading;
 using namespace QTrading::Infra::Exchanges::BinanceSim;
 using namespace QTrading::Dto::Market::Binance;
 using namespace QTrading::Utils::Queue;
+using namespace QTrading::Log;
 
 /* ------------------------------------------------------------------ */
 /* ctor                                                                */
 /* ------------------------------------------------------------------ */
 BinanceExchange::BinanceExchange(
     const std::vector<std::pair<std::string, std::string>>& symbolCsv,
+    std::shared_ptr<QTrading::Log::Logger> logger,
     double init_balance, int vip_level)
-    : account(init_balance, vip_level)
+    : account(init_balance, vip_level),
+	logger(logger)
 {
     /* preload CSV & initialise cursors */
     for (const auto& [sym, csv] : symbolCsv) {
@@ -39,6 +44,7 @@ void BinanceExchange::place_order(const std::string& sym, double q, double p,
 /* ------------------------------------------------------------------ */
 bool BinanceExchange::step()
 {
+    log_status();
     uint64_t ts;
     if (!next_timestamp(ts)) {       /* out of data –– close channels */
         market_channel->Close();
@@ -124,6 +130,21 @@ void BinanceExchange::build_multikline(uint64_t ts, MultiKlineDto& out)
     }
     if (!priceVol.empty())
         account.update_positions(priceVol);
+}
+
+void BinanceExchange::log_status() {
+    auto account_log = std::make_shared<AccountLog>(AccountLog{ account.get_balance(), account.total_unrealized_pnl(), account.get_equity() });
+	logger->Log(LogModuleToString(LogModule::Account), account_log);
+    const auto& curP = account.get_all_positions();
+    for (const auto& p : curP) {
+        auto pos_log = std::make_shared<Position>(p);
+        logger->Log(LogModuleToString(LogModule::Account), pos_log);
+	}
+    const auto& curO = account.get_all_open_orders();
+    for (const auto& o : curO) {
+        auto ord_log = std::make_shared<Order>(o);
+        logger->Log(LogModuleToString(LogModule::Account), ord_log);
+    }
 }
 
 template<typename T>

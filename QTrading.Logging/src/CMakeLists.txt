@@ -1,6 +1,6 @@
 ﻿add_library (QTrading.Logging.Library STATIC 
   FileLogger.cpp
-)
+ "Logger.cpp")
 
 target_include_directories(QTrading.Logging.Library
 	PUBLIC

@@ -18,6 +18,7 @@
 #include "Exchanges/BinanceSimulator/Futures/Account.hpp"
 #include "Dto/Market/Binance/MultiKline.hpp"
 #include "Queue/ChannelFactory.hpp"
+#include "Logger.hpp"
 
 namespace QTrading::Infra::Exchanges::BinanceSim {
 
@@ -27,6 +28,7 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
     public:
         /// ctor –– symbolCsv = {{"BTCUSDT","btc.csv"}, ...}
         BinanceExchange(const std::vector<std::pair<std::string, std::string>>& symbolCsv,
+            std::shared_ptr<QTrading::Log::Logger> logger,
             double  init_balance = 1'000'000.0,
             int     vip_level = 0);
 
@@ -39,6 +41,7 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
         const std::vector<dto::Order>& get_all_open_orders() const override;
 		void  close() override;
     private:
+		std::shared_ptr<QTrading::Log::Logger> logger;
         /* ------------- data members ------------- */
         std::unordered_map<std::string, MarketData> md;       // CSV cache
         std::unordered_map<std::string, size_t>     cursor;   // current index per symbol
@@ -51,6 +54,7 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
         bool     next_timestamp(uint64_t& ts) const;
         void     build_multikline(uint64_t ts,
             QTrading::Dto::Market::Binance::MultiKlineDto& out);
+        inline void log_status();
 
         static bool vec_equal(const std::vector<dto::Position>& a,
             const std::vector<dto::Position>& b);
