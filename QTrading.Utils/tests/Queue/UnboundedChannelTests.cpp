@@ -4,189 +4,155 @@
 
 using namespace QTrading::Utils::Queue;
 
-// 1. 測試基本 Send / Receive
-TEST(UnboundedChannelTest, BasicSendReceive) {
-    Channel<int> *channel = ChannelFactory::CreateUnboundedChannel<int>();
+/// \brief Basic Send()/Receive() under normal conditions (unbounded capacity).
+TEST(UnboundedChannelTest, BasicSendReceive)
+{
+    Channel<int>* channel = ChannelFactory::CreateUnboundedChannel<int>();
 
-    // 測試 Send()
     EXPECT_TRUE(channel->Send(42));
     EXPECT_TRUE(channel->Send(100));
 
-    // 測試 Receive()
-    auto val1 = channel->Receive();
-    ASSERT_TRUE(val1.has_value());
-    EXPECT_EQ(val1.value(), 42);
+    auto v1 = channel->Receive();
+    ASSERT_TRUE(v1.has_value());
+    EXPECT_EQ(v1.value(), 42);
 
-    auto val2 = channel->Receive();
-    ASSERT_TRUE(val2.has_value());
-    EXPECT_EQ(val2.value(), 100);
+    auto v2 = channel->Receive();
+    ASSERT_TRUE(v2.has_value());
+    EXPECT_EQ(v2.value(), 100);
 
-	delete channel;
+    delete channel;
 }
 
-// 2. 測試 TryReceive (在有資料的情況 / 沒資料的情況)
-TEST(UnboundedChannelTest, TryReceive) {
-    Channel<int> *channel = ChannelFactory::CreateUnboundedChannel<int>();
+/// \brief TryReceive returns nullopt when empty, then returns value when data is available.
+TEST(UnboundedChannelTest, TryReceive)
+{
+    Channel<int>* channel = ChannelFactory::CreateUnboundedChannel<int>();
 
-    // 起初沒資料，TryReceive() 應該回傳 nullopt
-    auto emptyVal = channel->TryReceive();
-    EXPECT_FALSE(emptyVal.has_value());
+    auto empty1 = channel->TryReceive();
+    EXPECT_FALSE(empty1.has_value());
 
-    // Send 資料
     EXPECT_TRUE(channel->Send(999));
-    // 立刻 TryReceive()，應該拿到 999
-    auto val = channel->TryReceive();
-    ASSERT_TRUE(val.has_value());
-    EXPECT_EQ(val.value(), 999);
+    auto v = channel->TryReceive();
+    ASSERT_TRUE(v.has_value());
+    EXPECT_EQ(v.value(), 999);
 
-    // 之後再拿應該拿不到資料
-    auto emptyVal2 = channel->TryReceive();
-    EXPECT_FALSE(emptyVal2.has_value());
+    auto empty2 = channel->TryReceive();
+    EXPECT_FALSE(empty2.has_value());
 
-	delete channel;
+    delete channel;
 }
 
-// 3. 測試 Close() 行為
-TEST(UnboundedChannelTest, CloseBehavior) {
-    Channel<int> *channel = ChannelFactory::CreateUnboundedChannel<int>();
+/// \brief After Close(), existing items are still readable; Send() fails; Receive() on empty returns nullopt.
+TEST(UnboundedChannelTest, CloseBehavior)
+{
+    Channel<int>* channel = ChannelFactory::CreateUnboundedChannel<int>();
 
-    // 先送一些資料
     EXPECT_TRUE(channel->Send(1));
     EXPECT_TRUE(channel->Send(2));
 
-    // 關閉
     channel->Close();
 
-    // 關閉後應該無法再送
-    EXPECT_FALSE(channel->Send(3));
+    EXPECT_FALSE(channel->Send(3));    ///< no new sends allowed
 
-    // 仍可繼續拿到先前已送的資料
-    auto val1 = channel->Receive();
-    ASSERT_TRUE(val1.has_value());
-    EXPECT_EQ(val1.value(), 1);
+    auto r1 = channel->Receive();
+    ASSERT_TRUE(r1.has_value());
+    EXPECT_EQ(r1.value(), 1);
 
-    auto val2 = channel->Receive();
-    ASSERT_TRUE(val2.has_value());
-    EXPECT_EQ(val2.value(), 2);
+    auto r2 = channel->Receive();
+    ASSERT_TRUE(r2.has_value());
+    EXPECT_EQ(r2.value(), 2);
 
-    // 已取完，佇列現在是空
-    // 因為 channel 已關閉，再呼叫 Receive() 應該回傳 nullopt
-    auto val3 = channel->Receive();
-    EXPECT_FALSE(val3.has_value());
+    auto r3 = channel->Receive();
+    EXPECT_FALSE(r3.has_value());
 
-    // TryReceive() 也應該是空
-    auto val4 = channel->TryReceive();
-    EXPECT_FALSE(val4.has_value());
+    auto tr = channel->TryReceive();
+    EXPECT_FALSE(tr.has_value());
 
     delete channel;
 }
 
-// 4. 測試：佇列為空時，Receive() 會阻塞直到有人 Send()
-TEST(UnboundedChannelTest, ReceiveBlocksWhenEmptyUntilSend) {
-    Channel<int> *channel = ChannelFactory::CreateUnboundedChannel<int>();
+/// \brief Receive() blocks when empty until a Send() arrives.
+TEST(UnboundedChannelTest, ReceiveBlocksWhenEmptyUntilSend)
+{
+    Channel<int>* channel = ChannelFactory::CreateUnboundedChannel<int>();
+    std::optional<int> received;
+    long long wait_ms = 0;
 
-    // consumerThread 在空佇列時呼叫 Receive()，理應被阻塞
-    std::optional<int> receivedVal;
-    std::thread consumerThread([&]() {
-        auto start = std::chrono::steady_clock::now();
-
-        // 這行會阻塞，直到有人 Send 或 channel 被 Close
-        receivedVal = channel->Receive();
-
-        auto end = std::chrono::steady_clock::now();
-        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
-
-        EXPECT_GE(elapsed, 50) << "Receive() did not block long enough!";
-        });
-
-    // 在這裡先等 500ms，再送資料 -> 讓 consumerThread 解阻塞
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    channel->Send(123);
-
-    consumerThread.join();
-
-    // 驗證確實拿到資料
-    ASSERT_TRUE(receivedVal.has_value());
-    EXPECT_EQ(receivedVal.value(), 123);
-
-    delete channel;
-}
-
-// 4-1. 如果呼叫 Close()，佇列空時 Receive() 應該回傳 nullopt 並解除阻塞
-TEST(UnboundedChannelTest, ReceiveBlocksWhenEmptyUntilClose) {
-    Channel<int> *channel = ChannelFactory::CreateUnboundedChannel<int>();
-
-    std::optional<int> receivedVal;
-    std::thread consumerThread([&]() {
-        auto start = std::chrono::steady_clock::now();
-
-        // 會阻塞，直到佇列不空 or close
-        receivedVal = channel->Receive();
-
-        auto end = std::chrono::steady_clock::now();
-        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
-
-        EXPECT_GE(elapsed, 50) << "Receive() did not block at least 50ms before Close() woke it!";
-        });
-
-    // 主執行緒等 500ms，然後 Close
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    channel->Close();
-
-    consumerThread.join();
-
-    // 因為 channel 被關，且之前沒送任何資料，所以結果應該是 nullopt
-    EXPECT_FALSE(receivedVal.has_value());
-
-    delete channel;
-}
-
-// 5. 測試多執行緒 Send/Receive (簡易測試)
-TEST(UnboundedChannelTest, MultiThreadSendReceive) {
-    Channel<int> *channel = ChannelFactory::CreateUnboundedChannel<int>();
-
-    constexpr int totalProducers = 3;
-    constexpr int totalItemsPerProducer = 5;
-
-    auto producerFunc = [&](int startVal) {
-        for (int i = 0; i < totalItemsPerProducer; ++i) {
-            // 每個生產者放入 startVal+i
-            channel->Send(startVal + i);
-        }
-        };
-
-    // 建立多個生產者執行緒
-    std::vector<std::thread> producers;
-    for (int p = 0; p < totalProducers; ++p) {
-        producers.emplace_back(producerFunc, p * 1000);
-    }
-
-    // 消費者執行緒來拿資料
-    // 預期總共會有 totalProducers * totalItemsPerProducer 筆資料
-    std::vector<int> receivedValues;
     std::thread consumer([&]() {
-        int count = 0;
-        while (count < totalProducers * totalItemsPerProducer) {
-            auto val = channel->Receive();
-            if (val.has_value()) {
-                receivedValues.push_back(val.value());
-                count++;
+        auto start = std::chrono::steady_clock::now();
+        received = channel->Receive();
+        auto end = std::chrono::steady_clock::now();
+        wait_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+        });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    EXPECT_TRUE(channel->Send(123));
+
+    consumer.join();
+    ASSERT_TRUE(received.has_value());
+    EXPECT_EQ(received.value(), 123);
+    EXPECT_GE(wait_ms, 50);
+
+    delete channel;
+}
+
+/// \brief Receive() unblocks with nullopt on Close() when empty.
+TEST(UnboundedChannelTest, ReceiveBlocksWhenEmptyUntilClose)
+{
+    Channel<int>* channel = ChannelFactory::CreateUnboundedChannel<int>();
+    std::optional<int> received;
+    long long wait_ms = 0;
+
+    std::thread consumer([&]() {
+        auto start = std::chrono::steady_clock::now();
+        received = channel->Receive();
+        auto end = std::chrono::steady_clock::now();
+        wait_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+        });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    channel->Close();
+
+    consumer.join();
+    EXPECT_FALSE(received.has_value());
+    EXPECT_GE(wait_ms, 50);
+
+    delete channel;
+}
+
+/// \brief Simple multi-producer / single-consumer test.
+TEST(UnboundedChannelTest, MultiThreadSendReceive)
+{
+    Channel<int>* channel = ChannelFactory::CreateUnboundedChannel<int>();
+
+    constexpr int producers = 3;
+    constexpr int itemsPer = 5;
+    std::vector<std::thread> threads;
+    std::vector<int> received;
+
+    // Producers
+    for (int p = 0; p < producers; ++p) {
+        threads.emplace_back([&, p]() {
+            for (int i = 0; i < itemsPer; ++i) {
+                channel->Send(p * 1000 + i);
             }
+            });
+    }
+
+    // Consumer
+    std::thread consumer([&]() {
+        int total = producers * itemsPer;
+        while ((int)received.size() < total) {
+            auto v = channel->Receive();
+            if (v) received.push_back(*v);
         }
         });
 
-    // 等所有生產者結束
-    for (auto& thr : producers) {
-        thr.join();
-    }
-    // producers 都送完之後，再關閉 channel (選擇性)
+    for (auto& t : threads) t.join();
     channel->Close();
-
-    // 等消費者結束
     consumer.join();
 
-    // 驗證共收到了 totalProducers * totalItemsPerProducer 筆資料
-    EXPECT_EQ(receivedValues.size(), totalProducers * totalItemsPerProducer);
+    EXPECT_EQ(received.size(), producers * itemsPer);
 
     delete channel;
 }
