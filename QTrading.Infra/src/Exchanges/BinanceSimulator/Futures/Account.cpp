@@ -50,8 +50,6 @@ void Account::set_position_mode(bool hedgeMode) {
         return;
     }
     hedge_mode_ = hedgeMode;
-    std::cout << "[set_position_mode] Now in "
-        << (hedge_mode_ ? "HEDGE (dual) mode.\n" : "ONE‑WAY mode.\n");
 }
 
 bool Account::is_hedge_mode() const {
@@ -76,12 +74,10 @@ void Account::set_symbol_leverage(const std::string& symbol, double newLeverage)
     }
     if (it == symbol_leverage_.end()) {
         symbol_leverage_[symbol] = newLeverage;
-        std::cout << "[set_symbol_leverage] " << symbol << " = " << newLeverage << "x\n";
     }
     else {
         if (adjust_position_leverage(symbol, oldLev, newLeverage)) {
             it->second = newLeverage;
-            std::cout << "[set_symbol_leverage] " << symbol << " changed from " << oldLev << "x -> " << newLeverage << "x\n";
         }
         else {
             std::cerr << "[set_symbol_leverage] Not enough equity to adjust.\n";
@@ -132,13 +128,6 @@ void Account::place_order(const std::string& symbol,
         -1
     };
     open_orders_.push_back(newOrd);
-
-    std::cout << "[place_order] Created Order ID=" << oid
-        << (is_long ? " LONG " : " SHORT ")
-        << ((price <= 0.0) ? "(Market)" : "(Limit)")
-        << " qty=" << quantity << " " << symbol
-        << (reduce_only ? " (reduceOnly)" : "")
-        << " @ " << price << "\n";
 }
 
 void Account::place_order(const std::string& symbol, double quantity, bool is_long, bool reduce_only) {
@@ -171,8 +160,6 @@ bool Account::handleOneWayReverseOrder(const std::string& symbol, double quantit
                     pos.id
                 };
                 open_orders_.push_back(closingOrd);
-                std::cout << "[handleOneWayReverseOrder] Auto reduce position by " << order_qty
-                    << " on pos_id=" << pos.id << "\n";
                 return true;
             }
             else if (order_qty == pos_qty) {
@@ -187,8 +174,6 @@ bool Account::handleOneWayReverseOrder(const std::string& symbol, double quantit
                     pos.id
                 };
                 open_orders_.push_back(closingOrd);
-                std::cout << "[handleOneWayReverseOrder] Auto close entire position (qty=" << order_qty
-                    << ") pos_id=" << pos.id << "\n";
                 return true;
             }
             else {
@@ -206,7 +191,6 @@ bool Account::handleOneWayReverseOrder(const std::string& symbol, double quantit
                         pos.id
                     };
                     open_orders_.push_back(closingOrd);
-                    std::cout << "[handleOneWayReverseOrder] Auto close entire position first.\n";
                 }
                 double newOpenQty = order_qty - closeQty;
                 int openOid = generate_order_id();
@@ -220,7 +204,6 @@ bool Account::handleOneWayReverseOrder(const std::string& symbol, double quantit
                     -1
                 };
                 open_orders_.push_back(newOpen);
-                std::cout << "[handleOneWayReverseOrder] Open new reversed position with qty=" << newOpenQty << "\n";
                 return true;
             }
         }
@@ -245,11 +228,6 @@ void Account::place_closing_order(int position_id, double quantity, double price
                 position_id
             };
             open_orders_.push_back(closingOrd);
-            std::cout << "[place_closing_order] Created closing order ID=" << oid
-                << " to close pos_id=" << position_id
-                << (!pos.is_long ? " (LONG)" : " (SHORT)")
-                << ((price <= 0.0) ? " (Market)" : " (Limit)")
-                << " qty=" << quantity << " " << pos.symbol << " @ " << price << "\n";
             return;
         }
     }
@@ -403,7 +381,12 @@ void Account::update_positions(const std::unordered_map<std::string, std::pair<d
         order_to_position_.clear();
     }
 
-    std::cout << "[update_positions] equity=" << equity << ", totalMaint=" << totalMaint << "\n";
+    std::cout << "[update_positions] equity=" << equity
+          << ", totalMaint=" << totalMaint;
+    for (const auto &kv : symbol_price_volume) {
+        std::cout << ", " << kv.first << "=" << kv.second.first;
+    }
+    std::cout << std::endl;
 }
 
 // --------------------------------------------
@@ -430,12 +413,6 @@ void Account::processClosingOrder(Order& ord, double fill_qty, double fill_price
             pos.maintenance_margin -= freed_maint;
             pos.fee -= freed_fee;
             pos.notional = pos.entry_price * pos.quantity;
-
-            std::cout << "[processClosingOrder] Closing fill: pos_id=" << pos.id
-                << ", closeQty=" << close_qty
-                << ", realizedPnL=" << realized_pnl
-                << ", closeFee=" << fee
-                << ", new balance=" << balance_ << "\n";
 
             ord.quantity -= close_qty;
             if (ord.quantity > 1e-8)
@@ -471,19 +448,12 @@ bool Account::processReduceOnlyOrder(Order& ord, double fill_qty, double fill_pr
             pos.maintenance_margin -= freed_maint;
             pos.fee -= freed_fee;
             pos.notional = pos.entry_price * pos.quantity;
-
-            std::cout << "[processReduceOnlyOrder] reduceOnly fill: reduced pos_id=" << pos.id
-                << ", closeQty=" << close_qty
-                << ", realizedPnL=" << realized_pnl
-                << ", fee=" << fee << "\n";
-
             ord.quantity -= close_qty;
             if (ord.quantity > 1e-8)
                 leftover.push_back(ord);
             return true;
         }
     }
-    std::cout << "[processReduceOnlyOrder] reduce_only order has no matching position to reduce. Ignored.\n";
     return false;
 }
 
@@ -618,8 +588,6 @@ void Account::cancel_order_by_id(int order_id) {
     for (auto it = open_orders_.begin(); it != open_orders_.end();) {
         if (it->id == order_id) {
             found = true;
-            std::cout << "[cancel_order_by_id] Canceling order ID=" << order_id
-                << ", leftover qty=" << it->quantity << "\n";
             it = open_orders_.erase(it);
         }
         else {

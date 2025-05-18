@@ -30,11 +30,12 @@ namespace QTrading::Strategy {
         /** spawn worker thread (non‑blocking) */
         void start() {
             if (worker.joinable()) return;
+            std::cout << "[Strategy Module] Thread starting...\n";
             stop_flag.store(false);
             worker = boost::thread(&IStrategy::run, this);
         }
         void stop() {
-            std::cout << "[Strategy Module] Stopping thread...\n";
+            std::cout << "[Strategy Module] Thread stopping...\n";
             stop_flag.store(true);
             if (worker.joinable()) worker.join();
         }
