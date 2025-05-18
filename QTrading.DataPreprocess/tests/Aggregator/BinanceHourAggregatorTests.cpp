@@ -15,11 +15,22 @@ using namespace QTrading::Dto::Market::Binance;
 using AggPtr = std::shared_ptr<QTrading::DataPreprocess::Dto::AggregateKline>;
 namespace fs = std::filesystem;
 
+class MockLogger : public QTrading::Log::Logger {
+public:
+    MockLogger(const std::string& dir) : QTrading::Log::Logger(dir) {}
+
+protected:
+    void Consume() override
+    {
+    }
+};
+
 class AggregatorFixture : public ::testing::Test {
 protected:
     fs::path tmpDir;
     std::shared_ptr<BinanceExchange>              ex;
     std::unique_ptr<BinanceHourAggregator>        agg;
+    std::shared_ptr<QTrading::Log::Logger> logger;
 
     /* ---------- helpers ------------------------------------------------ */
     void writeCsv(const std::string& path,
@@ -61,10 +72,13 @@ protected:
             (std::string("QTradingTest_") + ::testing::UnitTest::GetInstance()
                 ->current_test_info()->name());
         fs::create_directories(tmpDir);
+        logger = std::make_shared<MockLogger>(tmpDir.string());
+        logger->Start();
     }
 
     void TearDown() override
     {
+        logger->Stop();
         if (ex)  ex->close();   // ① unblock aggregator
         if (agg) agg->stop();   // ② join worker thread
         fs::remove_all(tmpDir);
@@ -80,7 +94,7 @@ TEST_F(AggregatorFixture, BasicAggregate)
 
     ex = std::make_shared<BinanceExchange>(
         std::vector<std::pair<std::string, std::string>>{
-            {"BTCUSDT", (tmpDir / "btc60.csv").string()}});
+            {"BTCUSDT", (tmpDir / "btc60.csv").string()}}, logger);
 
     agg = std::make_unique<BinanceHourAggregator>(ex, 1);
     agg->start();
@@ -115,7 +129,7 @@ TEST_F(AggregatorFixture, DriftTolerance)
 
     ex = std::make_shared<BinanceExchange>(
         std::vector<std::pair<std::string, std::string>>{
-            {"BTCUSDT", (tmpDir / "btcDrift.csv").string()}});
+            {"BTCUSDT", (tmpDir / "btcDrift.csv").string()}}, logger);
     agg = std::make_unique<BinanceHourAggregator>(ex, 2);
     agg->start();
     auto ch = agg->get_market_channel();
@@ -144,7 +158,7 @@ TEST_F(AggregatorFixture, WindowClipped)
 
     ex = std::make_shared<BinanceExchange>(
         std::vector<std::pair<std::string, std::string>>{
-            {"BTCUSDT", (tmpDir / "btc240.csv").string()}});
+            {"BTCUSDT", (tmpDir / "btc240.csv").string()}}, logger);
     agg = std::make_unique<BinanceHourAggregator>(ex, 3);        // keep 3 hours
     agg->start();
     auto ch = agg->get_market_channel();
@@ -175,7 +189,7 @@ TEST_F(AggregatorFixture, MultiSymbolOverlap)
     ex = std::make_shared<BinanceExchange>(std::vector<std::pair<std::string, std::string>>{
         {"BTCUSDT",(tmpDir / "btc.csv").string()},
         {"ETHUSDT",(tmpDir / "eth.csv").string()},
-        {"XRPUSDT",(tmpDir / "xrp.csv").string()} });
+        {"XRPUSDT",(tmpDir / "xrp.csv").string()} }, logger);
     agg = std::make_unique<BinanceHourAggregator>(ex, 2);
     agg->start();
     auto ch = agg->get_market_channel();
@@ -204,7 +218,7 @@ TEST_F(AggregatorFixture, LargeJumpRollover)
     writeCsv("jump.csv", 1, 0, 1.0, 10);
     writeCsv("jump.csv", 1, 180, 101.0, 20, 0, [](size_t i) {return 101.0; }); // append
 
-    ex = std::make_shared<BinanceExchange>(std::vector<std::pair<std::string, std::string>>{ {"JMP",(tmpDir / "jump.csv").string()} });
+    ex = std::make_shared<BinanceExchange>(std::vector<std::pair<std::string, std::string>>{ {"JMP",(tmpDir / "jump.csv").string()} }, logger);
     agg = std::make_unique<BinanceHourAggregator>(ex, 2);
     agg->start();
     auto ch = agg->get_market_channel();
@@ -234,7 +248,7 @@ TEST_F(AggregatorFixture, GapInsideHour)
     writeCsv("gap.csv", 25, 35, 75, 5, 0,        // 35‑59
         [](size_t i) { return 75 + i; });
 
-    ex = std::make_shared<BinanceExchange>(std::vector<std::pair<std::string, std::string>>{ {"GAP",(tmpDir / "gap.csv").string()} });
+    ex = std::make_shared<BinanceExchange>(std::vector<std::pair<std::string, std::string>>{ {"GAP",(tmpDir / "gap.csv").string()} }, logger);
     agg = std::make_unique<BinanceHourAggregator>(ex, 1);
     agg->start();
     auto ch = agg->get_market_channel();
@@ -266,7 +280,7 @@ TEST_F(AggregatorFixture, SlidingWindowMultiSymbol)
 
     ex = std::make_shared<BinanceExchange>(std::vector<std::pair<std::string, std::string>>{
         {"BTCUSDT",(tmpDir / "btc4h.csv").string()},
-        {"ETHUSDT",(tmpDir / "eth4h.csv").string()} });
+        {"ETHUSDT",(tmpDir / "eth4h.csv").string()} }, logger);
     agg = std::make_unique<BinanceHourAggregator>(ex, 2);
     agg->start();
     auto ch = agg->get_market_channel();

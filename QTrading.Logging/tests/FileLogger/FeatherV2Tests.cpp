@@ -1,4 +1,4 @@
-﻿#include "FileLogger.hpp"
+﻿#include "FileLogger/FeatherV2.hpp"
 #include <gtest/gtest.h>
 #include <arrow/io/api.h>
 #include <arrow/ipc/api.h>
@@ -50,7 +50,7 @@ struct SimpleLog {
     std::string b;
 };
 
-static void InitSimpleModule(std::unique_ptr<FileLogger> &logger) {
+static void InitSimpleModule(std::unique_ptr<FeatherV2> &logger) {
     auto schema = arrow::schema({
         arrow::field("ts", arrow::uint64()),
         arrow::field("a",  arrow::int32()),
@@ -68,7 +68,7 @@ struct OtherLog {
     double x;
 };
 
-static void InitOtherModule(std::unique_ptr<FileLogger> &logger) {
+static void InitOtherModule(std::unique_ptr<FeatherV2> &logger) {
     auto schema = arrow::schema({
         arrow::field("ts", arrow::uint64()),
         arrow::field("x",  arrow::float64())
@@ -84,10 +84,10 @@ static void InitOtherModule(std::unique_ptr<FileLogger> &logger) {
 
 class LoggerTest : public ::testing::Test {
 protected:
-	std::unique_ptr<FileLogger> logger;
+	std::unique_ptr<FeatherV2> logger;
 
     void SetUp() override {
-		logger = std::make_unique<FileLogger>("logs");
+		logger = std::make_unique<FeatherV2>("logs");
     }
 
     void TearDown() override {

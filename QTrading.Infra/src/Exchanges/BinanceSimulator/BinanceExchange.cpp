@@ -15,8 +15,13 @@ BinanceExchange::BinanceExchange(
     const std::vector<std::pair<std::string, std::string>>& symbolCsv,
     std::shared_ptr<QTrading::Log::Logger> logger,
     double init_balance, int vip_level)
-    : account(init_balance, vip_level),
-	logger(logger)
+    : BinanceExchange(symbolCsv, logger, std::make_shared<Account>(init_balance, vip_level)) { }
+
+BinanceExchange::BinanceExchange(
+    const std::vector<std::pair<std::string, std::string>>& symbolCsv,
+    std::shared_ptr<QTrading::Log::Logger> logger,
+    std::shared_ptr<Account> account)
+	: logger(logger), account(account)
 {
     /* preload CSV & initialise cursors */
     for (const auto& [sym, csv] : symbolCsv) {
@@ -36,7 +41,7 @@ BinanceExchange::BinanceExchange(
 void BinanceExchange::place_order(const std::string& sym, double q, double p,
     bool is_long, bool reduce_only)
 {
-    account.place_order(sym, q, p, is_long, reduce_only);
+    account->place_order(sym, q, p, is_long, reduce_only);
 }
 
 /* ------------------------------------------------------------------ */
@@ -60,12 +65,12 @@ bool BinanceExchange::step()
     market_channel->Send(dto);    // always emit market
 
     /* 2) debounce position / order updates */
-    const auto& curP = account.get_all_positions();
+    const auto& curP = account->get_all_positions();
     if (!vec_equal(curP, last_pos_snapshot)) {
         position_channel->Send(curP);
         last_pos_snapshot = curP;
     }
-    const auto& curO = account.get_all_open_orders();
+    const auto& curO = account->get_all_open_orders();
     if (!vec_equal(curO, last_ord_snapshot)) {
         order_channel->Send(curO);
         last_ord_snapshot = curO;
@@ -77,10 +82,10 @@ bool BinanceExchange::step()
 /* snapshots                                                           */
 /* ------------------------------------------------------------------ */
 const std::vector<dto::Position>& BinanceExchange::get_all_positions() const {
-    return account.get_all_positions();
+    return account->get_all_positions();
 }
 const std::vector<dto::Order>& BinanceExchange::get_all_open_orders() const {
-    return account.get_all_open_orders();
+    return account->get_all_open_orders();
 }
 
 void BinanceExchange::close()
@@ -129,21 +134,21 @@ void BinanceExchange::build_multikline(uint64_t ts, MultiKlineDto& out)
         }
     }
     if (!priceVol.empty())
-        account.update_positions(priceVol);
+        account->update_positions(priceVol);
 }
 
 void BinanceExchange::log_status() {
-    auto account_log = std::make_shared<AccountLog>(AccountLog{ account.get_balance(), account.total_unrealized_pnl(), account.get_equity() });
+    auto account_log = std::make_shared<AccountLog>(AccountLog{ account->get_balance(), account->total_unrealized_pnl(), account->get_equity() });
 	logger->Log(LogModuleToString(LogModule::Account), account_log);
-    const auto& curP = account.get_all_positions();
+    const auto& curP = account->get_all_positions();
     for (const auto& p : curP) {
         auto pos_log = std::make_shared<Position>(p);
-        logger->Log(LogModuleToString(LogModule::Account), pos_log);
+        logger->Log(LogModuleToString(LogModule::Position), pos_log);
 	}
-    const auto& curO = account.get_all_open_orders();
+    const auto& curO = account->get_all_open_orders();
     for (const auto& o : curO) {
         auto ord_log = std::make_shared<Order>(o);
-        logger->Log(LogModuleToString(LogModule::Account), ord_log);
+        logger->Log(LogModuleToString(LogModule::Order), ord_log);
     }
 }
 

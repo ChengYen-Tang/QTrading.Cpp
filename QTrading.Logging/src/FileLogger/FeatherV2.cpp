@@ -1,4 +1,4 @@
-﻿#include "FileLogger.hpp"
+﻿#include "FileLogger/FeatherV2.hpp"
 #include <arrow/ipc/feather.h>         // for Feather metadata (optional)
 #include "parquet/stream_writer.h"
 #include <stdexcept>
@@ -7,11 +7,11 @@
 namespace fs = std::filesystem;
 
 namespace QTrading::Log {
-	FileLogger::FileLogger(const std::string& dir)
+	FeatherV2::FeatherV2(const std::string& dir)
 		: Logger(dir) { }
 
     /* 註冊模組 */
-    void FileLogger::RegisterModule(const std::string& module,
+    void FeatherV2::RegisterModule(const std::string& module,
         std::shared_ptr<arrow::Schema> schema,
         Serializer serializer)
     {
@@ -49,7 +49,7 @@ namespace QTrading::Log {
     }
 
     /* Consumer loop：將一筆筆 Row 寫入 Feather-V2 檔案 */
-    void FileLogger::Consume()
+    void FeatherV2::Consume()
     {
         while (true) {
             auto opt = channel->Receive();

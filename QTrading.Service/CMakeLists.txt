@@ -8,6 +8,7 @@ add_executable(QTrading.Service
 )
 
 target_include_directories(QTrading.Service PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../QTrading.Logging/include
   ${CMAKE_CURRENT_SOURCE_DIR}/../QTrading.DataPreprocess/include
   ${CMAKE_CURRENT_SOURCE_DIR}/../QTrading.Infra/include
   ${CMAKE_CURRENT_SOURCE_DIR}/../QTrading.Strategy/include
@@ -15,6 +16,7 @@ target_include_directories(QTrading.Service PUBLIC
 
 target_link_libraries(QTrading.Service
   PRIVATE
+    QTrading.Logging.Library
     QTrading.Infra.Library
     QTrading.DataPreprocess.Library
     QTrading.Strategy.Library

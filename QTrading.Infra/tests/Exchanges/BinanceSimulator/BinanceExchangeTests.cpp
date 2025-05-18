@@ -16,12 +16,23 @@ using namespace QTrading::Dto::Market::Binance;
 using namespace QTrading::Utils::Queue;
 namespace fs = std::filesystem;
 
+class MockLogger : public QTrading::Log::Logger {
+    public:
+        MockLogger(const std::string &dir) : QTrading::Log::Logger(dir) {}
+
+    protected:
+        void Consume() override
+        {
+		}
+};
+
 /* ======================================================================= */
 /*  Base Fixture – provides tmpDir + helper to generate tiny CSV files     */
 /* ======================================================================= */
 class BinanceExchangeFixture : public ::testing::Test {
 protected:
     fs::path tmpDir;          // …/<gtest name>/ directory
+    std::shared_ptr<QTrading::Log::Logger> logger;
 
     /** helper – write minimal Binance 1-minute CSV  */
     void writeCsv(const std::string& fileName,
@@ -54,10 +65,13 @@ protected:
             (std::string("QTradingTest_") + ::testing::UnitTest::GetInstance()
                 ->current_test_info()->name());
         fs::create_directories(tmpDir);
+        logger = std::make_shared<MockLogger>(tmpDir.string());
+        logger->Start();
     }
 
     void TearDown() override
     {
+		logger->Stop();            // stop logger thread
         fs::remove_all(tmpDir);     // clean everything we created
     }
 };
@@ -81,7 +95,7 @@ TEST_F(BinanceExchangeFixture, SymbolsSynchronisedWithHoles)
         });
 
     BinanceExchange ex({ {"BTCUSDT",(tmpDir / "btc.csv").string()},
-                        {"ETHUSDT",(tmpDir / "eth.csv").string()} });
+                        {"ETHUSDT",(tmpDir / "eth.csv").string()} }, logger);
     auto mCh = ex.get_market_channel();
 
     // ---------- step #1  (t = 0) ----------
@@ -121,7 +135,7 @@ TEST_F(BinanceExchangeFixture, PushOnlyOnChange)
         {  90000,1,1,1,1,100, 90000,100,1,0,0 }
         });
 
-    BinanceExchange ex({ {"BTCUSDT",(tmpDir / "btc.csv").string()} }, /*balance*/ 1000.0);
+    BinanceExchange ex({ {"BTCUSDT",(tmpDir / "btc.csv").string()} }, logger, /*balance*/ 1000.0);
     auto mCh = ex.get_market_channel();
     auto oCh = ex.get_order_channel();
     auto pCh = ex.get_position_channel();
@@ -162,7 +176,7 @@ TEST_F(BinanceExchangeFixture, SnapshotConsistent)
         {0,1,1,1,1,10, 30000,10,1,0,0}
         });
 
-    BinanceExchange ex({ {"BTCUSDT",(tmpDir / "btc.csv").string()} }, /*balance*/ 500.0);
+    BinanceExchange ex({ {"BTCUSDT",(tmpDir / "btc.csv").string()} }, logger, /*balance*/ 500.0);
 
     // 1) No positions yet
     EXPECT_TRUE(ex.get_all_positions().empty());

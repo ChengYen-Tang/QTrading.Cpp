@@ -5,12 +5,14 @@
 target_include_directories(QTrading.DataPreprocess.Tests
   PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../QTrading.Logging/include
 )
 
 target_link_libraries(QTrading.DataPreprocess.Tests
   PRIVATE
     QTrading.DataPreprocess.Library
     QTrading.Infra.Library
+    QTrading.Logging.Library
     Boost::filesystem
     Boost::thread
     GTest::gtest

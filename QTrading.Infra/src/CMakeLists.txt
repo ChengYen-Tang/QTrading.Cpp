@@ -13,6 +13,7 @@ target_include_directories(QTrading.Infra.Library
 
 target_link_libraries(QTrading.Infra.Library
   PRIVATE
+    QTrading.Logging.Library
     Boost::filesystem
     Boost::system
 )

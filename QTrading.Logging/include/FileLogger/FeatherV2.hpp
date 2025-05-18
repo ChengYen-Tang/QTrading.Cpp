@@ -13,10 +13,10 @@ namespace QTrading::Log {
         arrow::RecordBatchBuilder& builder)>;
 
     /* Singleton Logger */
-    class FileLogger : public Logger
+    class FeatherV2 : public Logger
     {
     public:
-        FileLogger(const std::string &dir);
+        FeatherV2(const std::string &dir);
 
         /**
          * 註冊模組：一次性呼叫
@@ -30,8 +30,8 @@ namespace QTrading::Log {
     protected:
         void Consume() override;
     private:
-        FileLogger(const FileLogger&) = delete;
-        FileLogger& operator=(const FileLogger&) = delete;
+        FeatherV2(const FeatherV2&) = delete;
+        FeatherV2& operator=(const FeatherV2&) = delete;
 
         /* per-module 狀態 */
         struct Slot {

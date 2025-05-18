@@ -1,5 +1,5 @@
 ﻿add_executable(QTrading.Logging.Tests
-  FileLoggerTests.cpp
+  "FileLogger/FeatherV2Tests.cpp"
 )
 
 target_include_directories(QTrading.Logging.Tests

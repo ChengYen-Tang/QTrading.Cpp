@@ -31,6 +31,9 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
             std::shared_ptr<QTrading::Log::Logger> logger,
             double  init_balance = 1'000'000.0,
             int     vip_level = 0);
+        BinanceExchange(const std::vector<std::pair<std::string, std::string>>& symbolCsv,
+            std::shared_ptr<QTrading::Log::Logger> logger,
+            std::shared_ptr<Account> account);
 
         /* IExchange implementation -------------------------------------- */
         void  place_order(const std::string& symbol, double qty, double price,
@@ -45,7 +48,7 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
         /* ------------- data members ------------- */
         std::unordered_map<std::string, MarketData> md;       // CSV cache
         std::unordered_map<std::string, size_t>     cursor;   // current index per symbol
-        Account                           account;  // margin / matching engine
+        std::shared_ptr<Account>                    account;  // margin / matching engine
 
         std::vector<dto::Position> last_pos_snapshot;
         std::vector<dto::Order>    last_ord_snapshot;

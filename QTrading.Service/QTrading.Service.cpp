@@ -5,12 +5,18 @@
 #include "Exchanges/BinanceSimulator/BinanceExchange.hpp"
 #include "Aggregator/BinanceHourAggregator.hpp"
 #include "Trend/UTBotStrategy.hpp"
+#include "FileLogger/FeatherV2.hpp"
+#include "Enum/LogModule.hpp"
+#include "FileLogger/FeatherV2/AccountLog.hpp"
+#include "FileLogger/FeatherV2/Order.hpp"
+#include "FileLogger/FeatherV2/Position.hpp"
 
 #include <vector>
 #include <memory>
 #include <iostream>
 
 using namespace std;
+using namespace QTrading::Log;
 
 int main()
 {
@@ -20,7 +26,14 @@ int main()
         {"BTCUSDT", R"(\\Nas.kttw.xyz\docker\BinanceDataCollector\Data\Kline\UsdFutures\BTCUSDT.csv)"},
         //{"ETHUSDT", R"(\\Nas.kttw.xyz\docker\BinanceDataCollector\Data\Kline\UsdFutures\ETHUSDT.csv)"}
     };
-    auto exchange = std::make_shared<QTrading::Infra::Exchanges::BinanceSim::BinanceExchange>(symbolCsv);
+
+	std::shared_ptr<FeatherV2> logger = std::make_shared<FeatherV2>("logs");
+    logger->RegisterModule(LogModuleToString(LogModule::Account), FileLogger::FeatherV2::AccountLog::Schema, FileLogger::FeatherV2::AccountLog::Serializer);
+    logger->RegisterModule(LogModuleToString(LogModule::Position), FileLogger::FeatherV2::Position::Schema, FileLogger::FeatherV2::Position::Serializer);
+    logger->RegisterModule(LogModuleToString(LogModule::Order), FileLogger::FeatherV2::Order::Schema, FileLogger::FeatherV2::Order::Serializer);
+    logger->Start();
+
+    auto exchange = std::make_shared<QTrading::Infra::Exchanges::BinanceSim::BinanceExchange>(symbolCsv, logger);
 
     auto aggregator = std::make_unique<QTrading::DataPreprocess::Aggregator::BinanceHourAggregator>(exchange, 10);
 
@@ -43,6 +56,7 @@ int main()
     aggregator->stop();
     strategy->stop();
     exchange->close();
+    logger->Stop();
 
     std::cout << "Simulation completed." << std::endl;
     return 0;

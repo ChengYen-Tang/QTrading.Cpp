@@ -1,5 +1,5 @@
 ﻿add_library (QTrading.Logging.Library STATIC 
-  FileLogger.cpp
+  "FileLogger/FeatherV2.cpp"
  "Logger.cpp")
 
 target_include_directories(QTrading.Logging.Library
