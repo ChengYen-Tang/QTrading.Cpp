@@ -1,11 +1,4 @@
-﻿//  BinanceExchangeTest.cpp
-//  ---------------------------------------------------------------
-//  Test-suite for BinanceExchange (simulator)
-//  Uses Google-Test test-fixtures (TEST_F) so that every test has
-//  its own SetUp / TearDown for resource management.
-//  ---------------------------------------------------------------
-
-#include <gtest/gtest.h>
+﻿#include <gtest/gtest.h>
 #include <fstream>
 #include <filesystem>
 
@@ -16,25 +9,28 @@ using namespace QTrading::Dto::Market::Binance;
 using namespace QTrading::Utils::Queue;
 namespace fs = std::filesystem;
 
+/// @brief Mock logger that discards all consumed rows.
 class MockLogger : public QTrading::Log::Logger {
     public:
+        /// @brief Construct with output directory path.
         MockLogger(const std::string &dir) : QTrading::Log::Logger(dir) {}
 
     protected:
-        void Consume() override
-        {
-		}
+        /// @brief No-op consume to disable file output.
+        void Consume() override {}
 };
 
-/* ======================================================================= */
-/*  Base Fixture – provides tmpDir + helper to generate tiny CSV files     */
-/* ======================================================================= */
+/// @brief Test fixture – provides tmpDir + helper to generate minimal CSV files.
 class BinanceExchangeFixture : public ::testing::Test {
 protected:
     fs::path tmpDir;          // …/<gtest name>/ directory
     std::shared_ptr<QTrading::Log::Logger> logger;
 
-    /** helper – write minimal Binance 1-minute CSV  */
+    /// @brief Write a minimal Binance 1-minute CSV.
+    /// @param fileName     Name of CSV file to create under tmpDir.
+    /// @param rows         Vector of tuples: 
+    ///                     (openTime, open, high, low, close, volume,
+    ///                      closeTime, quoteVol, tradeCnt, takerBB, takerBQ)
     void writeCsv(const std::string& fileName,
         const std::vector<std::tuple<
         uint64_t, double, double, double, double, double,
@@ -57,7 +53,7 @@ protected:
             << std::get<10>(r) << '\n';// takerBQ
     }
 
-    /* ---------- lifecycle ---------- */
+    /// @brief Creates tmpDir and starts the mock logger.
     void SetUp() override
     {
         // Each test gets its own directory, eg. "tmp/BinanceExchangeFixture_StepOrdering"
@@ -69,6 +65,7 @@ protected:
         logger->Start();
     }
 
+    /// @brief Stops the logger and cleans up tmpDir.
     void TearDown() override
     {
 		logger->Stop();            // stop logger thread
@@ -76,9 +73,7 @@ protected:
     }
 };
 
-/* ======================================================================= */
-/*  Test-Case 1 : Multi-symbol sync + std::nullopt                         */
-/* ======================================================================= */
+/// @brief Test syncing of multiple symbols with missing‐data holes (std::nullopt).
 TEST_F(BinanceExchangeFixture, SymbolsSynchronisedWithHoles)
 {
     /* Prepare data:
@@ -124,9 +119,7 @@ TEST_F(BinanceExchangeFixture, SymbolsSynchronisedWithHoles)
     EXPECT_FALSE(ex.step());          // nothing left
 }
 
-/* ======================================================================= */
-/*  Test-Case 2 : Debounced position / order channels                      */
-/* ======================================================================= */
+/// @brief Test that position and order channels emit only on state change.
 TEST_F(BinanceExchangeFixture, PushOnlyOnChange)
 {
     writeCsv("btc.csv", {
@@ -167,9 +160,7 @@ TEST_F(BinanceExchangeFixture, PushOnlyOnChange)
     EXPECT_FALSE(pCh->TryReceive().has_value());
 }
 
-/* ======================================================================= */
-/*  Test-Case 3 : Snapshot getters                                         */
-/* ======================================================================= */
+/// @brief Test that snapshot getters return consistent data before/after fills.
 TEST_F(BinanceExchangeFixture, SnapshotConsistent)
 {
     writeCsv("btc.csv", {

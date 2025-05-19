@@ -6,16 +6,12 @@
 #include <iostream> // for CaptureStdout, CaptureStderr
 #include "Exchanges/BinanceSimulator/Futures/Account.hpp"
 
-/////////////////////////////////////////////////////////
-// Helper functions for creating mock market data
-/////////////////////////////////////////////////////////
-
-// Returns market data for BTCUSDT with specified available volume.
+/// @brief Helper: generate market data for BTCUSDT only.
 std::unordered_map<std::string, std::pair<double, double>> partialMarketDataBTC(double price, double available) {
     return { {"BTCUSDT", {price, available}} };
 }
 
-// Returns market data for two symbols (BTCUSDT and ETHUSDT) with given prices and volumes.
+/// @brief Helper: generate market data for BTCUSDT and ETHUSDT.
 std::unordered_map<std::string, std::pair<double, double>> twoSymbolMarketData(double btcPrice, double btcVol,
     double ethPrice, double ethVol)
 {
@@ -25,9 +21,7 @@ std::unordered_map<std::string, std::pair<double, double>> twoSymbolMarketData(d
     };
 }
 
-/**
- * 1) Constructor & Basic Getter
- */
+/// @brief Verifies constructor initializes balances and PnL to expected values.
 TEST(AccountTest, ConstructorAndGetters) {
     Account account(1000.0, 0);
     EXPECT_DOUBLE_EQ(account.get_balance(), 1000.0);
@@ -35,11 +29,7 @@ TEST(AccountTest, ConstructorAndGetters) {
     EXPECT_DOUBLE_EQ(account.get_equity(), 1000.0);
 }
 
-/**
- * 2) Set & Get Symbol Leverage
- *    - Normal set
- *    - Invalid leverage => throw
- */
+/// @brief Verifies setting and getting symbol leverage, and error on invalid.
 TEST(AccountTest, SetAndGetSymbolLeverage) {
     Account account(2000.0, 0);
     // Default => 1.0
@@ -54,10 +44,7 @@ TEST(AccountTest, SetAndGetSymbolLeverage) {
     EXPECT_THROW(account.set_symbol_leverage("BTCUSDT", -10.0), std::runtime_error);
 }
 
-/**
- * 3) place_order (opening) -> open_orders check
- *    We won't see margin deduction until update_positions.
- */
+/// @brief Verifies limit order placement appears in open_orders without immediate balance change.
 TEST(AccountTest, PlaceOrderSuccessCheckOpenOrders) {
     Account account(10000.0, 0);
 
@@ -85,11 +72,7 @@ TEST(AccountTest, PlaceOrderSuccessCheckOpenOrders) {
     // e.g., we can check some substring if needed
 }
 
-/**
- * 4) Update positions for partial fill
- *    - Only part of quantity matched => leftover in open_orders
- *    - The partial fill merges into same Position if from the same order
- */
+/// @brief Verifies partial fill creates position and leaves leftover order.
 TEST(AccountTest, UpdatePositionsPartialFillSameOrder) {
     Account account(5000.0, 0);
     account.set_symbol_leverage("BTCUSDT", 10.0);
@@ -124,12 +107,7 @@ TEST(AccountTest, UpdatePositionsPartialFillSameOrder) {
     EXPECT_DOUBLE_EQ(positionsAfter[0].quantity, 5.0);
 }
 
-/**
- * 5) close_position => internally creates "closing orders"
- *    - If we pass price <=0 => market close
- *    - If we pass price>0 => limit close
- *    Then update_positions => fill the closing order => realize PnL
- */
+/// @brief Verifies market-close order realizes PnL and clears position.
 TEST(AccountTest, ClosePositionBySymbol) {
     Account account(10000.0, 0);
     account.set_symbol_leverage("BTCUSDT", 10.0);
@@ -166,10 +144,7 @@ TEST(AccountTest, ClosePositionBySymbol) {
     // The key is that position is closed, no positions remain.
 }
 
-/**
- * 6) cancel_order_by_id => remove leftover portion
- *    - If partial fill already done, only leftover is removed
- */
+/// @brief Verifies cancel_order_by_id removes leftover but keeps filled position.
 TEST(AccountTest, CancelOrderByID) {
     Account account(5000.0, 0);
     // place a large order
@@ -195,11 +170,7 @@ TEST(AccountTest, CancelOrderByID) {
     EXPECT_FALSE(account.get_all_positions().empty());
 }
 
-/**
- * 7) Liquidation test:
- *    - Large position => negative equity => liquidation triggers
- *    - verify positions cleared, balance=0
- */
+/// @brief Verifies liquidation clears all positions and zeroes balance.
 TEST(AccountTest, Liquidation) {
     Account account(2000.0, 0);
     account.set_symbol_leverage("BTCUSDT", 10.0);
@@ -223,10 +194,7 @@ TEST(AccountTest, Liquidation) {
     EXPECT_DOUBLE_EQ(account.get_balance(), 0.0);
 }
 
-/**
- * 8) Hedge-mode: same symbol, different direction => separate positions
- *    - place two orders (one long, one short) => check both get filled => no offset
- */
+/// @brief Verifies hedge-mode allows separate long and short positions.
 TEST(AccountTest, HedgeModeSameSymbolOppositeDirection) {
     Account account(10000.0, 0);
     account.set_symbol_leverage("BTCUSDT", 10.0);

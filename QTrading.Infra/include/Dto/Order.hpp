@@ -1,15 +1,32 @@
-#pragma once
+﻿#pragma once
 
 #include <string>
 
 namespace QTrading::dto {
+
+    /// @brief Data Transfer Object describing an order on the exchange.
+    /// @details Contains order identity, symbol, quantity, price, direction, and related flags.
     struct Order {
-        int         id;               // Unique order ID
+        /// @brief Unique order identifier.
+        int id;
+
+        /// @brief Trading pair symbol (e.g., "BTCUSDT").
         std::string symbol;
-        double      quantity;         // Remaining quantity to be matched
-        double      price;            // <= 0 => market order, > 0 => limit order
-        bool        is_long;
-        bool        reduce_only;      // true means the order is for reducing positions only
-        int         closing_position_id; // >=0: specifies which position to close; -1: normal opening order
+
+        /// @brief Remaining quantity to be matched.
+        double quantity;
+
+        /// @brief Price: ≤ 0 ⇒ market order; > 0 ⇒ limit order.
+        double price;
+
+        /// @brief True if this is a long (buy) order; false if short (sell).
+        bool is_long;
+
+        /// @brief If true, this order only reduces existing positions.
+        bool reduce_only;
+
+        /// @brief For closing orders: ID of the position being closed; –1 if opening order.
+        int closing_position_id;
     };
-}
+
+}  // namespace QTrading::dto

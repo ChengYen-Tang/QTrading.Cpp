@@ -6,9 +6,8 @@
 #include <algorithm>
 #include <unordered_map>
 
-// --------------------------------------------
-//  Constructor
-// --------------------------------------------
+/// @brief Simulated Binance Futures Account implementation.
+/// @details Supports one-way and hedge modes, order matching, margin, fees, and auto-liquidation.
 Account::Account(double initial_balance, int vip_level)
     : balance_(initial_balance),
     used_margin_(0.0),
@@ -21,13 +20,14 @@ Account::Account(double initial_balance, int vip_level)
     positions_.reserve(1024);
 }
 
-// --------------------------------------------
-//  Basic account information functions
-// --------------------------------------------
+/// @brief Get the current available balance (not including unrealized PnL).
+/// @return Account balance.
 double Account::get_balance() const {
     return balance_;
 }
 
+/// @brief Sum unrealized PnL across all open positions.
+/// @return Total unrealized profit or loss.
 double Account::total_unrealized_pnl() const {
     double total = 0.0;
     for (const auto& pos : positions_) {
@@ -36,13 +36,15 @@ double Account::total_unrealized_pnl() const {
     return total;
 }
 
+/// @brief Get total account equity: balance + unrealized PnL.
+/// @return Account equity.
 double Account::get_equity() const {
     return balance_ + total_unrealized_pnl();
 }
 
-// --------------------------------------------
-//  One‑way / Hedge mode
-// --------------------------------------------
+/// @brief Switch between one-way mode and hedge mode.
+/// @param hedgeMode true to enable hedge mode (separate long/short), false for one-way.
+/// @details Fails if any positions are currently open.
 void Account::set_position_mode(bool hedgeMode) {
     // Disallow switching mode if there are open positions.
     if (!positions_.empty()) {
@@ -52,18 +54,25 @@ void Account::set_position_mode(bool hedgeMode) {
     hedge_mode_ = hedgeMode;
 }
 
+
+/// @brief Check whether hedge mode is enabled.
+/// @return True if hedge mode; false for one-way.
 bool Account::is_hedge_mode() const {
     return hedge_mode_;
 }
 
-// --------------------------------------------
-//  Leverage functions
-// --------------------------------------------
+/// @brief Get the current leverage for a symbol.
+/// @param symbol Trading symbol.
+/// @return Leverage multiplier (default 1.0).
 double Account::get_symbol_leverage(const std::string& symbol) const {
     auto it = symbol_leverage_.find(symbol);
     return (it != symbol_leverage_.end()) ? it->second : 1.0;
 }
 
+/// @brief Set leverage for a symbol, adjusting existing positions if needed.
+/// @param symbol       Trading symbol.
+/// @param newLeverage  Desired leverage (>0).
+/// @throws std::runtime_error if newLeverage <= 0.
 void Account::set_symbol_leverage(const std::string& symbol, double newLeverage) {
     if (newLeverage <= 0)
         throw std::runtime_error("Leverage must be > 0.");
@@ -85,20 +94,26 @@ void Account::set_symbol_leverage(const std::string& symbol, double newLeverage)
     }
 }
 
-// --------------------------------------------
-//  ID generators
-// --------------------------------------------
+/// @brief Generate a unique order ID.
+/// @return New order ID.
 int Account::generate_order_id() {
     return next_order_id_++;
 }
 
+
+/// @brief Generate a unique position ID.
+/// @return New position ID.
 int Account::generate_position_id() {
     return next_position_id_++;
 }
 
-// --------------------------------------------
-//  place_order: Entry point
-// --------------------------------------------
+
+/// @brief Place an order (limit or market) into the account.
+/// @param symbol       Trading symbol.
+/// @param quantity     Amount to trade (>0).
+/// @param price        Limit price (>0) or market (<=0).
+/// @param is_long      true = long; false = short.
+/// @param reduce_only  If true, only reduce existing positions.
 void Account::place_order(const std::string& symbol,
     double quantity,
     double price,
@@ -130,14 +145,21 @@ void Account::place_order(const std::string& symbol,
     open_orders_.push_back(newOrd);
 }
 
+/// @brief Convenience overload for market orders (price = 0).
+/// @param symbol       Trading symbol.
+/// @param quantity     Amount to trade.
+/// @param is_long      true = long; false = short.
+/// @param reduce_only  If true, only reduce existing positions.
 void Account::place_order(const std::string& symbol, double quantity, bool is_long, bool reduce_only) {
     place_order(symbol, quantity, 0.0, is_long, reduce_only);
 }
 
-// --------------------------------------------
-//  handleOneWayReverseOrder: Process reverse orders in one‑way mode.
-// Returns true if the reverse order was handled.
-// --------------------------------------------
+/// @brief Handle a reverse order in one-way mode (auto-reduce or reverse).
+/// @param symbol    Trading symbol.
+/// @param quantity  Order quantity.
+/// @param price     Order price.
+/// @param is_long   Direction of the new order.
+/// @return true if the order was converted into a closing/reverse order.
 bool Account::handleOneWayReverseOrder(const std::string& symbol, double quantity, double price, bool is_long) {
     for (auto& pos : positions_) {
         if (pos.symbol == symbol) {
@@ -211,9 +233,10 @@ bool Account::handleOneWayReverseOrder(const std::string& symbol, double quantit
     return false;
 }
 
-// --------------------------------------------
-//  place_closing_order: Generate a closing order for a given position.
-// --------------------------------------------
+/// @brief Create a closing order for a specific position.
+/// @param position_id  ID of the position to close.
+/// @param quantity     Amount to close.
+/// @param price        Close price (<=0 = market).
 void Account::place_closing_order(int position_id, double quantity, double price) {
     for (const auto& pos : positions_) {
         if (pos.id == position_id) {
@@ -234,9 +257,9 @@ void Account::place_closing_order(int position_id, double quantity, double price
     std::cerr << "[place_closing_order] position_id=" << position_id << " not found\n";
 }
 
-// --------------------------------------------
-//  merge_positions: Merge positions with the same symbol and direction.
-// --------------------------------------------
+
+/// @brief Merge positions of the same symbol & direction into one.
+/// @details Aggregates quantities and recalculates weighted entry price, margin, fees.
 void Account::merge_positions() {
     if (positions_.empty()) return;
 
@@ -287,9 +310,8 @@ void Account::merge_positions() {
     }
 }
 
-// --------------------------------------------
-//  update_positions: Main matching and settlement logic.
-// --------------------------------------------
+/// @brief Core matching and settlement logic.
+/// @param symbol_price_volume  Map of symbol→(market price, available volume).
 void Account::update_positions(const std::unordered_map<std::string, std::pair<double, double>>& symbol_price_volume) {
     double makerFee, takerFee;
     std::tie(makerFee, takerFee) = get_fee_rates();
@@ -389,9 +411,12 @@ void Account::update_positions(const std::unordered_map<std::string, std::pair<d
     std::cout << std::endl;
 }
 
-// --------------------------------------------
-//  processClosingOrder: Process a closing order fill.
-// --------------------------------------------
+/// @brief Process a closing order fill: update position, free margin, realize PnL.
+/// @param ord        The closing Order.
+/// @param fill_qty   Quantity filled.
+/// @param fill_price Execution price.
+/// @param fee        Fee charged.
+/// @param[out] leftover Orders still remaining.
 void Account::processClosingOrder(Order& ord, double fill_qty, double fill_price, double fee, std::vector<Order>& leftover) {
     bool foundPos = false;
     for (auto& pos : positions_) {
@@ -426,9 +451,13 @@ void Account::processClosingOrder(Order& ord, double fill_qty, double fill_price
     }
 }
 
-// --------------------------------------------
-//  processReduceOnlyOrder: Process a reduce_only opening order fill.
-// --------------------------------------------
+/// @brief Process a reduce_only opening order fill.
+/// @param ord       The reduce_only Order.
+/// @param fill_qty  Quantity filled.
+/// @param fill_price Execution price.
+/// @param fee        Fee charged.
+/// @param[out] leftover Orders still remaining.
+/// @return true if a matching position was found and reduced.
 bool Account::processReduceOnlyOrder(Order& ord, double fill_qty, double fill_price, double fee, std::vector<Order>& leftover) {
     for (auto& pos : positions_) {
         if (pos.symbol == ord.symbol && pos.is_long == ord.is_long) {
@@ -457,9 +486,14 @@ bool Account::processReduceOnlyOrder(Order& ord, double fill_qty, double fill_pr
     return false;
 }
 
-// --------------------------------------------
-//  processNormalOpeningOrder: Process a normal opening order fill.
-// --------------------------------------------
+/// @brief Process a normal opening order fill (non reduce_only).
+/// @param ord        The opening Order.
+/// @param fill_qty   Quantity filled.
+/// @param fill_price Execution price.
+/// @param notional   fill_qty * fill_price.
+/// @param fee        Fee charged.
+/// @param feeRate    Fee rate applied.
+/// @param[out] leftover Orders still remaining.
 void Account::processNormalOpeningOrder(Order& ord, double fill_qty, double fill_price, double notional,
     double fee, double feeRate, std::vector<Order>& leftover) {
     double lev = get_symbol_leverage(ord.symbol);
@@ -529,9 +563,9 @@ void Account::processNormalOpeningOrder(Order& ord, double fill_qty, double fill
     }
 }
 
-// --------------------------------------------
-//  processOpeningOrder: Process an opening order fill.
-// --------------------------------------------
+/// @brief Dispatch opening order processing.
+/// @param ord, fill_qty, fill_price, notional, fee, feeRate, leftover
+/// @details Calls reduce_only or normal processing accordingly.
 void Account::processOpeningOrder(Order& ord, double fill_qty, double fill_price, double notional,
     double fee, double feeRate, std::vector<Order>& leftover) {
     if (ord.reduce_only) {
@@ -544,9 +578,9 @@ void Account::processOpeningOrder(Order& ord, double fill_qty, double fill_price
     }
 }
 
-// --------------------------------------------
-//  close_position functions
-// --------------------------------------------
+/// @brief Close all positions for a symbol (one-way) or both sides (hedge).
+/// @param symbol Symbol to close.
+/// @param price  Close price (<=0 = market).
 void Account::close_position(const std::string& symbol, double price) {
     // In one‑way mode, close all positions for the symbol.
     // In hedge mode, this version can be customized to close both long and short positions.
@@ -562,10 +596,16 @@ void Account::close_position(const std::string& symbol, double price) {
     }
 }
 
+/// @brief Overload: Market close.
+/// @param symbol Symbol to close.
 void Account::close_position(const std::string& symbol) {
     close_position(symbol, 0.0);
 }
 
+/// @brief Close only one side in hedge mode.
+/// @param symbol  Symbol to close.
+/// @param is_long true = close long; false = close short.
+/// @param price   Close price.
 void Account::close_position(const std::string& symbol, bool is_long, double price) {
     bool found = false;
     for (const auto& pos : positions_) {
@@ -580,9 +620,8 @@ void Account::close_position(const std::string& symbol, bool is_long, double pri
     }
 }
 
-// --------------------------------------------
-//  cancel_order_by_id: Cancel an open order by its ID.
-// --------------------------------------------
+/// @brief Cancel any open order by its unique ID.
+/// @param order_id ID of the order to cancel.
 void Account::cancel_order_by_id(int order_id) {
     bool found = false;
     for (auto it = open_orders_.begin(); it != open_orders_.end();) {
@@ -599,20 +638,21 @@ void Account::cancel_order_by_id(int order_id) {
     }
 }
 
-// --------------------------------------------
-//  Get all open orders & positions
-// --------------------------------------------
+/// @brief Get a snapshot of all open orders.
+/// @return Const reference to open_orders_.
 const std::vector<Order>& Account::get_all_open_orders() const {
     return open_orders_;
 }
 
+/// @brief Get a snapshot of all positions.
+/// @return Const reference to positions_.
 const std::vector<Position>& Account::get_all_positions() const {
     return positions_;
 }
 
-// --------------------------------------------
-//  Fee and tier helper functions
-// --------------------------------------------
+/// @brief Find the maintenance margin rate and max leverage for a given notional.
+/// @param notional Position notional.
+/// @return Tuple(maintenance_margin_rate, max_leverage).
 std::tuple<double, double> Account::get_tier_info(double notional) const {
     for (const auto& tier : margin_tiers) {
         if (notional <= tier.notional_upper) {
@@ -622,6 +662,8 @@ std::tuple<double, double> Account::get_tier_info(double notional) const {
     return std::make_tuple(margin_tiers.front().maintenance_margin_rate, margin_tiers.front().max_leverage);
 }
 
+/// @brief Get maker and taker fee rates based on VIP level.
+/// @return Tuple(maker_fee_rate, taker_fee_rate).
 std::tuple<double, double> Account::get_fee_rates() const {
     auto it = vip_fee_rates.find(vip_level_);
     if (it != vip_fee_rates.end()) {
@@ -630,9 +672,11 @@ std::tuple<double, double> Account::get_fee_rates() const {
     return std::make_tuple(vip_fee_rates.at(0).maker_fee_rate, vip_fee_rates.at(0).taker_fee_rate);
 }
 
-// --------------------------------------------
-//  Adjust leverage for existing positions for a given symbol
-// --------------------------------------------
+/// @brief Adjust leverage on existing positions for a symbol.
+/// @param symbol Symbol whose positions to adjust.
+/// @param oldLev Previous leverage.
+/// @param newLev Desired new leverage.
+/// @return true if adjustment succeeded; false if insufficient equity or above max leverage.
 bool Account::adjust_position_leverage(const std::string& symbol, double oldLev, double newLev) {
     std::vector<std::reference_wrapper<Position>> related;
     for (auto& pos : positions_) {

@@ -4,38 +4,40 @@
 #include <limits>
 #include <vector>
 
-// Fee rate structure for maker/taker
+/// @brief Fee rates for maker and taker sides.
 struct FeeRate {
-    double maker_fee_rate;
-    double taker_fee_rate;
+    double maker_fee_rate;   ///< Rate applied to limit (maker) orders
+    double taker_fee_rate;   ///< Rate applied to market (taker) orders
 };
 
-// Mapping from VIP level to fee rates
+/// @brief Mapping from VIP level (0–9) to maker/taker fees.
 const std::map<int, FeeRate> vip_fee_rates = {
-    {0, {0.00020, 0.00050}}, // VIP 0
-    {1, {0.00016, 0.00040}}, // VIP 1
-    {2, {0.00014, 0.00035}}, // VIP 2
-    {3, {0.00012, 0.00032}}, // VIP 3
-    {4, {0.00010, 0.00030}}, // VIP 4
-    {5, {0.00008, 0.00027}}, // VIP 5
-    {6, {0.00006, 0.00025}}, // VIP 6
-    {7, {0.00004, 0.00022}}, // VIP 7
-    {8, {0.00002, 0.00020}}, // VIP 8
-    {9, {0.00000, 0.00017}}  // VIP 9
+    {0, {0.00020, 0.00050}},
+    {1, {0.00016, 0.00040}},
+    {2, {0.00014, 0.00035}},
+    {3, {0.00012, 0.00032}},
+    {4, {0.00010, 0.00030}},
+    {5, {0.00008, 0.00027}},
+    {6, {0.00006, 0.00025}},
+    {7, {0.00004, 0.00022}},
+    {8, {0.00002, 0.00020}},
+    {9, {0.00000, 0.00017}}
 };
 
-// Margin tier definition
+
+/// @brief Defines a maintenance margin tier based on notional size.
 struct MarginTier {
-    double notional_upper;          // Upper limit of notional value
-    double maintenance_margin_rate; // Maintenance margin rate
-    double max_leverage;            // Maximum leverage
+    double notional_upper;          ///< Upper bound of notional for this tier
+    double maintenance_margin_rate; ///< Maintenance margin % of notional
+    double max_leverage;            ///< Max leverage allowed
 };
 
-// Tier-based margin configuration
+
+/// @brief Tiered margin configuration for position sizing and maintenance.
 const std::vector<MarginTier> margin_tiers = {
-    {50000,      0.0040, 125},
-    {600000,     0.0050, 100},
-    {3000000,    0.0065,  75},
+    {   50000,   0.0040, 125},
+    {  600000,   0.0050, 100},
+    { 3000000,   0.0065,  75},
     {12000000,   0.0100,  50},
     {70000000,   0.0200,  25},
     {100000000,  0.0250,  20},

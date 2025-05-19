@@ -9,128 +9,169 @@
 
 using namespace QTrading::dto;
 
-/**
- * Simulated Binance Futures Account (supports one‑way / hedge mode)
- */
+/// @brief Simulated Binance Futures account supporting one-way and hedge modes.
+///        Manages balance, margin, orders, and positions.
 class Account {
 public:
+    /// @brief Construct an Account with initial balance and VIP level.
+    /// @param initial_balance Starting cash balance.
+    /// @param vip_level      VIP fee tier (0–9).
     Account(double initial_balance, int vip_level = 0);
 
-    // Basic account information
+    /// @brief Get current cash balance.
+    /// @return Available balance (after realized PnL minus margin).
     double get_balance() const;
+    /// @brief Compute total unrealized PnL across all positions.
+    /// @return Sum of unrealized PnL.
     double total_unrealized_pnl() const;
+    /// @brief Get total equity (balance + unrealized PnL).
+    /// @return Current account equity.
     double get_equity() const;
 
-    // Set/get trading mode (one‑way or hedge)
+    /// @brief Set trading mode: one-way (false) or hedge (true).
+    ///        Cannot switch if positions are open.
+    /// @param hedgeMode True for hedge mode, false for one-way mode.
     void set_position_mode(bool hedgeMode);
+    /// @brief Query if account is in hedge mode.
+    /// @return True if hedge mode, false if one-way.
     bool is_hedge_mode() const;
 
-    // Set and get leverage for a given symbol
+    /// @brief Set leverage factor for a specific symbol.
+    /// @param symbol      Trading symbol.
+    /// @param newLeverage Desired leverage (>0).
+    /// @throw std::runtime_error if newLeverage ≤ 0 or insufficient equity.
     void set_symbol_leverage(const std::string& symbol, double newLeverage);
+    /// @brief Get current leverage for a symbol.
+    /// @param symbol Trading symbol.
+    /// @return Leverage factor (≥1).
     double get_symbol_leverage(const std::string& symbol) const;
 
-    /**
-     * place_order:
-     *  - price > 0 => Limit Order
-     *  - price <= 0 => Market Order
-     *  - If reduce_only is true, this order is used for reducing positions only.
-     *    In one‑way mode, this parameter is rarely used since reverse orders automatically reduce positions;
-     *    In hedge mode, it clearly distinguishes whether the order is for increasing or reducing position.
-     */
+    /// @brief Place a new order.
+    /// @param symbol     Trading symbol.
+    /// @param quantity   Order quantity.
+    /// @param price      Limit price (>0) or market (≤0).
+    /// @param is_long    True for buy/long, false for sell/short.
+    /// @param reduce_only If true, only reduce an existing position.
     void place_order(const std::string& symbol,
         double quantity,
         double price,
         bool is_long,
         bool reduce_only = false);
 
-    // Overload: market order (price=0, reduce_only=false by default)
+    /// @brief Overload: market order (price=0).
+    /// @param symbol     Trading symbol.
+    /// @param quantity   Order quantity.
+    /// @param is_long    True for long, false for short.
+    /// @param reduce_only If true, reduce-only.
     void place_order(const std::string& symbol, double quantity, bool is_long, bool reduce_only = false);
 
-    /**
-     * update_positions:
-     * Core matching and position updating logic.
-     * symbol_price_volume: mapping from symbol to (market price, available volume)
-     */
+    /// @brief Core matching and position update logic.
+    /// @param symbol_price_volume Map from symbol to (market price, available volume).
     void update_positions(const std::unordered_map<std::string, std::pair<double, double>>& symbol_price_volume);
 
-    /**
-     * close_position:
-     *  - If price <= 0 => market close; if price > 0 => limit close.
-     *
-     *  In one‑way mode: close_position(symbol) directly closes all positions for that symbol.
-     *  In hedge mode:
-     *      - close_position(symbol, is_long) can close only long or short positions.
-     *      - The version without direction can be customized (e.g., close both long and short) per requirements.
-     */
+
+    /// @brief Close position(s) for a symbol at given price.
+    ///        In one-way mode: closes all. In hedge mode: customizable.
+    /// @param symbol Trading symbol.
+    /// @param price  Limit price (>0) or market (≤0).
     void close_position(const std::string& symbol, double price);
+    /// @brief Close all positions for a symbol at market price.
+    /// @param symbol Trading symbol.
     void close_position(const std::string& symbol);
 
-    // New: In hedge mode, specify whether to close long or short position.
+    /// @brief In hedge mode, close only one side (long/short) at price.
+    /// @param symbol Trading symbol.
+    /// @param is_long True to close long side, false to close short.
+    /// @param price   Limit price (>0) or market (≤0).
     void close_position(const std::string& symbol, bool is_long, double price = 0.0);
 
-    // Cancel an open order by its ID (cancels only the unfilled portion)
+
+    /// @brief Cancel an open order by its ID (removes unfilled remainder).
+    /// @param order_id Unique identifier of the order.
     void cancel_order_by_id(int order_id);
 
-    // Query functions returning const references to avoid copying.
+    /// @brief Get all open orders.
+    /// @return Const reference to vector of Order DTOs.
     const std::vector<Order>& get_all_open_orders() const;
+    /// @brief Get all active positions.
+    /// @return Const reference to vector of Position DTOs.
     const std::vector<Position>& get_all_positions() const;
 
 private:
-    // Account funds
+    ///< Available cash balance.
     double balance_;
+    ///< Margin currently in use.
     double used_margin_;
+    ///< VIP level for fee calculation.
     int vip_level_;
 
-    // One‑way / Hedge mode flag
+    ///< Hedge mode flag (true) or one-way (false).
     bool hedge_mode_;
 
-    // Mapping from symbol to leverage
+    ///< Per-symbol leverage.
     std::unordered_map<std::string, double> symbol_leverage_;
 
-    // ID counters
+    ///< Counter for generating unique order IDs.
     int next_order_id_;
+    ///< Counter for generating unique position IDs.
     int next_position_id_;
 
-    // All open orders
+    ///< Pending open orders.
     std::vector<Order> open_orders_;
-
-    // All active positions
+    ///< Active positions.
     std::vector<Position> positions_;
 
-    // Mapping from order_id to position_id for merging partial fills from the same order.
+    ///< Map from order ID to position ID.
     std::unordered_map<int, int> order_to_position_;
 
-    // ------------------- Internal Helpers -------------------
+    /// @brief Generate a new unique order ID.
     inline int generate_order_id();
+    /// @brief Generate a new unique position ID.
     inline int generate_position_id();
+
+    /// @brief Get maintenance margin rate and max leverage for a notional.
+    /// @param notional Total position notional.
+    /// @return Tuple of (maintenance_margin_rate, max_leverage).
     inline std::tuple<double, double> get_tier_info(double notional) const;
+    /// @brief Get current maker/taker fee rates based on VIP level.
+    /// @return Tuple of (maker_fee_rate, taker_fee_rate).
     inline std::tuple<double, double> get_fee_rates() const;
+    /// @brief Adjust existing positions' leverage for a symbol.
+    /// @param symbol  Trading symbol.
+    /// @param oldLev  Current leverage.
+    /// @param newLev  Desired leverage.
+    /// @return True if adjustment succeeded; false if insufficient equity.
     inline bool adjust_position_leverage(const std::string& symbol, double oldLev, double newLev);
 
-    // Helper for generating a closing order for a given position.
+    /// @brief Create a closing order for an existing position.
+    /// @param position_id ID of position to close.
+    /// @param quantity    Quantity to close.
+    /// @param price       Limit price (>0) or market (≤0).
     inline void place_closing_order(int position_id, double quantity, double price);
 
-    // Helper to merge positions with the same (symbol, is_long) into one.
+    /// @brief Merge positions of same symbol and direction into one.
     inline void merge_positions();
 
-    // --- New private helper functions for refactoring ---
-
-    // Process reverse orders in one‑way mode.
-    // Returns true if the reverse order was handled.
+    /// @brief Handle reverse orders in one-way mode (auto-reduce).
+    /// @param symbol   Trading symbol.
+    /// @param quantity Order quantity.
+    /// @param price    Order price.
+    /// @param is_long  Desired direction.
+    /// @return True if reverse logic consumed the order.
     inline bool handleOneWayReverseOrder(const std::string& symbol, double quantity, double price, bool is_long);
 
-    // Process a closing order fill: update the matching position based on the fill quantity
-    // and add any remaining order quantity to the leftover orders.
+    /// @brief Process a closing order fill and update PnL and margin.
     inline void processClosingOrder(Order& ord, double fill_qty, double fill_price, double fee, std::vector<Order>& leftover);
 
-    // Process a reduce_only opening order; returns true if processed.
+    /// @brief Process a reduce-only opening order fill.
+    /// @return True if it matched an existing position.
     inline bool processReduceOnlyOrder(Order& ord, double fill_qty, double fill_price, double fee, std::vector<Order>& leftover);
 
-    // Process a normal (non‑reduce_only) opening order fill.
+    /// @brief Process a normal opening order fill (new position or increase).
     inline void processNormalOpeningOrder(Order& ord, double fill_qty, double fill_price, double notional,
         double fee, double feeRate, std::vector<Order>& leftover);
 
-    // Process an opening order fill, calling either the reduce_only or normal order processing.
+    /// @brief Dispatch opening order fill to the appropriate handler.
     inline void processOpeningOrder(Order& ord, double fill_qty, double fill_price, double notional,
         double fee, double feeRate, std::vector<Order>& leftover);
 };
