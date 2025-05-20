@@ -15,24 +15,36 @@ using namespace QTrading::Dto::Market::Binance;
 using AggPtr = std::shared_ptr<QTrading::DataPreprocess::Dto::AggregateKline>;
 namespace fs = std::filesystem;
 
+/// @brief  Dummy logger that discards all log rows.
+/// @details Inherits Logger but overrides Consume() to no-op so tests do not write files.
 class MockLogger : public QTrading::Log::Logger {
 public:
+    /// @brief  Constructor.
+/// @param dir  Directory for logs (unused by this mock).
     MockLogger(const std::string& dir) : QTrading::Log::Logger(dir) {}
 
 protected:
-    void Consume() override
-    {
-    }
+    /// @brief  Override to disable actual log consumption.
+    void Consume() override {}
 };
 
+/// @brief  Test fixture for BinanceHourAggregator tests.
+/// @details Sets up a temporary CSV directory, mock logger, exchange simulator and aggregator.
 class AggregatorFixture : public ::testing::Test {
 protected:
-    fs::path tmpDir;
-    std::shared_ptr<BinanceExchange>              ex;
-    std::unique_ptr<BinanceHourAggregator>        agg;
-    std::shared_ptr<QTrading::Log::Logger> logger;
+    fs::path                                  tmpDir;   ///< Temporary directory for CSV files
+    std::shared_ptr<BinanceExchange>          ex;       ///< Exchange simulator
+    std::unique_ptr<BinanceHourAggregator>    agg;      ///< Aggregator under test
+    std::shared_ptr<QTrading::Log::Logger>    logger;   ///< MockLogger instance
 
-    /* ---------- helpers ------------------------------------------------ */
+    /// @brief  Write a minute‐level CSV for a symbol.
+    /// @param  path            Relative CSV filename under tmpDir.
+    /// @param  nMin            Number of minutes (rows) to write.
+    /// @param  startOffsetMin  Starting minute offset (for drift tests).
+    /// @param  priceBase       Base price for first minute.
+    /// @param  vol             Volume for each minute.
+    /// @param  driftMs         Additional milliseconds added to closeTime.
+    /// @param  priceFn         Optional function to compute price per row.
     void writeCsv(const std::string& path,
         std::size_t nMin,
         uint64_t   startOffsetMin = 0,
@@ -57,7 +69,7 @@ protected:
             std::size_t idx = i + startOffsetMin;
             uint64_t openTs = idx * 60'000ULL + 1'704'038'400'000ULL;
             uint64_t closeTs = openTs + 60'000ULL - 1000ULL + driftMs;
-            double   price = priceFn ? priceFn(idx) : priceBase + idx;
+            double price = priceFn ? priceFn(idx) : priceBase + idx;
 
             f << openTs << ',' << price << ',' << price << ',' << price << ','
                 << price << ',' << vol << ',' << closeTs << ','
@@ -65,6 +77,7 @@ protected:
         }
     }
 
+    /// @brief  Prepare test: create tmpDir and start mock logger.
     void SetUp() override
     {
         // Each test gets its own directory, eg. "tmp/BinanceExchangeFixture_StepOrdering"
@@ -76,6 +89,7 @@ protected:
         logger->Start();
     }
 
+    /// @brief  Cleanup: stop logger, close exchange & aggregator, remove tmpDir.
     void TearDown() override
     {
         logger->Stop();
@@ -85,9 +99,8 @@ protected:
     }
 };
 
-/* ================================================================== */
-/* 1. Continuous 120 minutes – volume / O/H/L/C correctness           */
-/* ================================================================== */
+/// @test  BasicAggregate
+/// @brief  Continuous 60 minutes – verify volume / O/H/L/C correctness.
 TEST_F(AggregatorFixture, BasicAggregate)
 {
     writeCsv("btc60.csv", 60);
@@ -120,9 +133,8 @@ TEST_F(AggregatorFixture, BasicAggregate)
     EXPECT_EQ(bar.Volume, 60 * 100);
 }
 
-/* ================================================================== */
-/* 2. Missing minutes (nullopt) handled                               */
-/* ================================================================== */
+/// @test  DriftTolerance
+/// @brief  Handle missing minutes (nullopt) correctly across a 2-hour window.
 TEST_F(AggregatorFixture, DriftTolerance)
 {
     writeCsv("btcDrift.csv", 120, 7);
@@ -149,9 +161,8 @@ TEST_F(AggregatorFixture, DriftTolerance)
     EXPECT_EQ(dq.back().Timestamp, 1704042000000ULL);
 }
 
-/* ================================================================== */
-/* 3. Sliding window size enforcement                                 */
-/* ================================================================== */
+/// @test  WindowClipped
+/// @brief  Enforce sliding window size: with 4 hours of data but keep 3.
 TEST_F(AggregatorFixture, WindowClipped)
 {
     writeCsv("btc240.csv", 240);       // 4 hours
@@ -174,9 +185,8 @@ TEST_F(AggregatorFixture, WindowClipped)
     EXPECT_EQ(dq.size(), 3u);                 // window trimmed to 3
 }
 
-/* ================================================================= */
-/* 4.  Multi‑symbol with different start offsets                      */
-/* ================================================================= */
+/// @test  MultiSymbolOverlap
+/// @brief  Multiple symbols with staggered start times overlap correctly.
 TEST_F(AggregatorFixture, MultiSymbolOverlap)
 {
     /* BTC: minute 0‑59 */
@@ -209,9 +219,8 @@ TEST_F(AggregatorFixture, MultiSymbolOverlap)
     EXPECT_EQ(last->HistoricalKlines.at("XRPUSDT").size(), 2u);
 }
 
-/* ================================================================= */
-/* 7.  Large time jump (> 1h) triggers immediate rollover            */
-/* ================================================================= */
+/// @test  LargeJumpRollover
+/// @brief  A time jump >1h forces immediate rollover of the previous hour.
 TEST_F(AggregatorFixture, LargeJumpRollover)
 {
     /* First minute at t=0, second minute at t=90min → jump 1.5h */
@@ -238,9 +247,8 @@ TEST_F(AggregatorFixture, LargeJumpRollover)
     EXPECT_EQ(bar0.CloseTime, 1704049259000ULL);
 }
 
-/* ================================================================= */
-/* 8.  Mid‑hour gap (symbol misses 10 minutes)                       */
-/* ================================================================= */
+/// @test  GapInsideHour
+/// @brief  Missing a mid-hour gap (symbol misses 10 minutes) still aggregates correctly.
 TEST_F(AggregatorFixture, GapInsideHour)
 {
     /* Generate minutes 0‑24 and 35‑59 (10‑minute gap) */
@@ -269,9 +277,8 @@ TEST_F(AggregatorFixture, GapInsideHour)
     EXPECT_EQ(bar.LowPrice, 50.0);
 }
 
-/* ================================================================= */
-/* 9.  Sliding window enforced per‑symbol                            */
-/* ================================================================= */
+/// @test  SlidingWindowMultiSymbol
+/// @brief  Sliding window size enforced separately per symbol.
 TEST_F(AggregatorFixture, SlidingWindowMultiSymbol)
 {
     /* 4 hours for each symbol */

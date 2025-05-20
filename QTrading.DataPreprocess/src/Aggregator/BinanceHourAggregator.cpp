@@ -6,9 +6,9 @@ using namespace QTrading::DataPreprocess;
 using namespace QTrading::DataPreprocess::Aggregator;
 using namespace QTrading::Utils::Queue;
 
-/* ------------------------------------------------------------------ */
-/* ctor                                                               */
-/* ------------------------------------------------------------------ */
+/// @brief  Initialize with exchange source and window size.
+/// @param  ex             Exchange producing minute‐level MultiKlineDto.
+/// @param  hoursToKeep    Number of past hours to retain.
 BinanceHourAggregator::BinanceHourAggregator(
     std::shared_ptr<Infra::Exchanges::IExchange<MinutePtr>> ex,
     std::size_t hoursToKeep)
@@ -23,9 +23,7 @@ BinanceHourAggregator::BinanceHourAggregator(
                 OverflowPolicy::DropOldest));
 }
 
-/* ------------------------------------------------------------------ */
-/* run – worker thread                                                */
-/* ------------------------------------------------------------------ */
+/// @brief  Main loop: receive minutes, aggregate, and emit hourly DTOs.
 void BinanceHourAggregator::run()
 {
     while (!stopFlag.load())
@@ -36,15 +34,16 @@ void BinanceHourAggregator::run()
         if (!minuteOpt) continue;
         const auto& minute = minuteOpt.value();
 
-        /* --- absorb each symbol’s minute bar --- */
+        // absorb each symbol’s minute bar
         for (const auto& [sym, optK] : minute->klines)
             if (optK) absorbMinute(sym, optK.value());
 
-        /* --- push downstream --- */
+        // push downstream
         auto out = std::make_shared<Dto::AggregateKline>();
         out->CurrentKlines = minute;
         out->HistoricalKlines = cache;
-        
+
+        // include in-progress bar at front if initialised
         for (const auto& [sym, st] : working)
             if (st.initialised)
                 out->HistoricalKlines[sym].push_front(st.bar);
@@ -53,9 +52,9 @@ void BinanceHourAggregator::run()
     }
 }
 
-/* ------------------------------------------------------------------ */
-/* absorb one 1‑minute bar for <symbol>                               */
-/* ------------------------------------------------------------------ */
+/// @brief  Merge a single minute bar into the hourly aggregate.
+/// @param  sym  Symbol.
+/// @param  k    Minute‐level KlineDto.
 void BinanceHourAggregator::absorbMinute(const std::string& sym,
     const KlineDto& k)
 {
@@ -64,14 +63,14 @@ void BinanceHourAggregator::absorbMinute(const std::string& sym,
 
     auto& ws = working[sym];
 
-    /* first minute ever OR hour rollover --------------------------- */
+    // first minute ever or hour rollover
     if (!ws.initialised || k.CloseDateTime >= ws.hourStart + oneHour)
     {
         if (ws.initialised) {
-            cache[sym].push_front(ws.bar);                 // push finished hour
+            cache[sym].push_front(ws.bar);
         }
 
-        // ---- start new working hour ----
+        // start new working hour
         ws.hourStart = floorToHour(k.CloseDateTime);
         ws.bar = k;
         ws.bar.Timestamp =
@@ -79,11 +78,11 @@ void BinanceHourAggregator::absorbMinute(const std::string& sym,
                 ws.hourStart.time_since_epoch()).count();
         ws.initialised = true;
 
-        pruneOld(sym, ws.hourStart);        // <<–  prune **after** push/start
+        pruneOld(sym, ws.hourStart);
         return;
     }
 
-    /* still inside the same hour – update running aggregates ------- */
+    // still inside the same hour – update running aggregates
     ws.bar.HighPrice = std::max(ws.bar.HighPrice, k.HighPrice);
     ws.bar.LowPrice = std::min(ws.bar.LowPrice, k.LowPrice);
     ws.bar.ClosePrice = k.ClosePrice;
@@ -94,9 +93,9 @@ void BinanceHourAggregator::absorbMinute(const std::string& sym,
     ws.bar.CloseDateTime = k.CloseDateTime;
 }
 
-/* ------------------------------------------------------------------ */
-/* remove bars older than keepWindow_                                 */
-/* ------------------------------------------------------------------ */
+/// @brief  Drop hours older than keepWindow.
+/// @param  sym  Symbol key.
+/// @param  now  Current hour start time.
 void BinanceHourAggregator::pruneOld(
     const std::string& sym,
     const std::chrono::system_clock::time_point& now)
@@ -112,9 +111,9 @@ void BinanceHourAggregator::pruneOld(
     }
 }
 
-/* ------------------------------------------------------------------ */
-/* helper – floor to the exact hour                                   */
-/* ------------------------------------------------------------------ */
+/// @brief  Truncate time_point to the nearest hour.
+/// @param  tp  Input time_point.
+/// @return     Hour-aligned time_point.
 std::chrono::system_clock::time_point
 BinanceHourAggregator::floorToHour(const std::chrono::system_clock::time_point& tp)
 {
