@@ -1,5 +1,5 @@
 ﻿#include "FileLogger/FeatherV2.hpp"
-#include <arrow/ipc/feather.h>         // for Feather metadata (optional)
+#include <arrow/ipc/feather.h>   ///< Feather metadata support.
 #include "parquet/stream_writer.h"
 #include <stdexcept>
 #include <filesystem>
@@ -7,94 +7,98 @@
 namespace fs = std::filesystem;
 
 namespace QTrading::Log {
-	FeatherV2::FeatherV2(const std::string& dir)
-		: Logger(dir) { }
 
-    /* 註冊模組 */
+    /// @brief Construct a FeatherV2 logger using the specified directory.
+    /// @param dir Directory for output files.
+    FeatherV2::FeatherV2(const std::string& dir)
+        : Logger(dir) {
+    }
+
+    /// @brief Register a module's Arrow schema and serializer.
+    /// Must be called once before any logs for that module.
+    /// @param module    Name matching Logger::Log.
+    /// @param schema    Arrow schema (col 0 = timestamp).
+    /// @param serializer Function to serialize payload into builder.
     void FeatherV2::RegisterModule(const std::string& module,
         std::shared_ptr<arrow::Schema> schema,
         Serializer serializer)
     {
-        std::lock_guard lk(mtx);
-        if (slots_.count(module))
+        std::lock_guard<std::mutex> lk(mtx);
+        if (slots_.count(module)) {
             throw std::runtime_error("Module already registered: " + module);
+        }
 
         Slot s;
         s.schema = std::move(schema);
         s.serializer = std::move(serializer);
 
-        // 構建 RecordBatchBuilder 
+        // Build the RecordBatchBuilder (capacity 8192 rows).
         auto res = arrow::RecordBatchBuilder::Make(
             s.schema, arrow::default_memory_pool(), /*capacity=*/8192);
-        if (!res.ok()) throw std::runtime_error(res.status().ToString());
+        if (!res.ok()) {
+            throw std::runtime_error(res.status().ToString());
+        }
         s.builder = std::move(*res);
 
-        // 準備 Feather-V2 (IPC) 檔案
-		fs::path log_path = fs::path(dir) / (module + ".arrow");
+        // Prepare the IPC output file.
+        fs::path log_path = fs::path(dir) / (module + ".arrow");
         auto out_res = arrow::io::FileOutputStream::Open(
-            log_path.string(),
-            /*truncate=*/true);
+            log_path.string(), /*truncate=*/true);
         PARQUET_ASSIGN_OR_THROW(auto outfile, out_res);
         s.outfile = std::move(outfile);
 
-        // 建立 RecordBatchWriter (Feather-V2 ≡ IPC file) 
+        // Create the IPC writer.
         arrow::ipc::IpcWriteOptions write_opts = arrow::ipc::IpcWriteOptions::Defaults();
         PARQUET_ASSIGN_OR_THROW(auto w_res,
-            arrow::ipc::MakeFileWriter(s.outfile,       // 直接傳 shared_ptr
-                s.schema,
-                write_opts));
+            arrow::ipc::MakeFileWriter(s.outfile, s.schema, write_opts));
         s.writer = w_res;
 
         slots_.emplace(module, std::move(s));
     }
 
-    /* Consumer loop：將一筆筆 Row 寫入 Feather-V2 檔案 */
+    /// @brief Background loop to write Rows into Feather files.
+    /// Exits when channel is closed and empty.
     void FeatherV2::Consume()
     {
+        // Read until no more Rows.
         while (true) {
             auto opt = channel->Receive();
-            if (!opt) break;  // Channel 关闭且空
+            if (!opt) {
+                break;  // Channel closed & drained.
+            }
 
             Row row = std::move(*opt);
             Slot* s;
             {
-                std::lock_guard lk(mtx);
+                std::lock_guard<std::mutex> lk(mtx);
                 s = &slots_.at(row.module);
             }
             auto& builder = *s->builder;
 
-            // 第 0 列：Timestamp
+            // Column 0: timestamp
             builder.GetFieldAs<arrow::UInt64Builder>(0)->Append(row.ts);
 
-            // 其余列由注册的 serializer 填充
+            // Remaining columns via serializer.
             s->serializer(row.payload.get(), builder);
 
-            // 达到阈值就 Flush + Write
+            // Flush when batch capacity reached.
             if (++s->rows >= 8192) {
                 auto rb_res = builder.Flush();
                 PARQUET_ASSIGN_OR_THROW(auto rb, rb_res);
-
-                auto w_res = s->writer->WriteRecordBatch(*rb);
-                PARQUET_THROW_NOT_OK(w_res);
-
+                PARQUET_THROW_NOT_OK(s->writer->WriteRecordBatch(*rb));
                 s->rows = 0;
             }
         }
 
-        // flush 剩余 batches 并 Close writer
+        // Final flush & close all writers.
         for (auto& [_, slot] : slots_) {
             auto rb_res = slot.builder->Flush();
             PARQUET_ASSIGN_OR_THROW(auto rb, rb_res);
-
             if (rb && rb->num_rows() > 0) {
-                auto w_res = slot.writer->WriteRecordBatch(*rb);
-                PARQUET_THROW_NOT_OK(w_res);
+                PARQUET_THROW_NOT_OK(slot.writer->WriteRecordBatch(*rb));
             }
-            auto c_res = slot.writer->Close();
-            PARQUET_THROW_NOT_OK(c_res);
-
-            auto s_res = slot.outfile->Close();
-            PARQUET_THROW_NOT_OK(s_res);
+            PARQUET_THROW_NOT_OK(slot.writer->Close());
+            PARQUET_THROW_NOT_OK(slot.outfile->Close());
         }
     }
 }

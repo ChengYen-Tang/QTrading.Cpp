@@ -1,31 +1,39 @@
 ﻿#pragma once
+
 #include <memory>
 #include <mutex>
 #include <string>
-
 #include <boost/thread.hpp>
-
 #include "Global.hpp"
 #include "Queue/ChannelFactory.hpp"
 
 namespace QTrading::Log {
-    /* 一筆要寫入的記錄 */
+    /// @struct Row
+    /// @brief Represents one log record for output.
     struct Row {
-        std::string           module;   // 模組名稱
-        unsigned long long    ts;       // GlobalTimestamp
-        std::shared_ptr<void> payload;  // 指向具體 LogData
+        std::string           module;   ///< Name of the logging module.
+        unsigned long long    ts;       ///< Timestamp from GlobalTimestamp.
+        std::shared_ptr<void> payload;  ///< Pointer to the log data object.
     };
 
-    /* Singleton Logger */
+    /// @class Logger
+    /// @brief Abstract base for a singleton logger with a background consumer thread.
     class Logger {
     public:
-        Logger(const std::string& dir);
-        /* 啟動 consumer thread & channel */
+        /// @brief Create a logger storing output in the given directory.
+        /// @param dir Directory path for log files.
+        explicit Logger(const std::string& dir);
+
+        /// @brief Start the consumer thread and channel.
         virtual void Start();
-        /* 停止，flush & join */
+
+        /// @brief Stop the consumer thread, flush pending logs, and join.
         virtual void Stop();
 
-        /** 產生端呼叫：非阻塞、無序列化開銷  */
+        /// @brief Send a log entry (non-blocking).
+        /// @tparam T   Payload type.
+        /// @param module Module name.
+        /// @param obj   Shared pointer to payload.
         template<typename T>
         inline void Log(const std::string& module,
             std::shared_ptr<T> obj) noexcept
@@ -39,13 +47,13 @@ namespace QTrading::Log {
         }
 
     protected:
-        std::string dir;
+        std::string dir;  ///< Output directory for log files.
 
+        /// @brief Called by the background thread to consume Rows.
         virtual void Consume() = 0;
 
-        /* 內部 Channel */
-        std::shared_ptr<QTrading::Utils::Queue::Channel<Row>> channel;
-        boost::thread                                         consumer;
-        std::mutex                                            mtx;
+        std::shared_ptr<QTrading::Utils::Queue::Channel<Row>> channel; ///< Internal channel.
+        boost::thread                                         consumer;///< Consumer thread.
+        std::mutex                                            mtx;     ///< Protects start/stop.
     };
 }

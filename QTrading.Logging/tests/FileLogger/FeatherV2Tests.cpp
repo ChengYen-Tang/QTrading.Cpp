@@ -10,15 +10,17 @@
 using namespace QTrading::Log;
 namespace bfs = boost::filesystem;
 
-// ———————— 共用 Helper ————————
-
+/// @brief Delete the "logs" directory and all its contents.
+/// @details Ensures a clean state before or after tests run.
 static void ClearLogs() {
-    // 刪除 logs 目錄及其所有內容
     bfs::remove_all("logs");
 }
 
+/// @brief Load an Arrow Table from an IPC file.
+/// @param path The filesystem path to the Arrow IPC file (e.g., "logs/Simple.arrow").
+/// @return A shared pointer to the loaded arrow::Table.
+/// @throws std::runtime_error if the file cannot be opened or parsed.
 static std::shared_ptr<arrow::Table> ReadTable(const std::string& path) {
-    // 直接檢查並拋例外
     auto infile_res = arrow::io::ReadableFile::Open(path);
     if (!infile_res.ok())
         throw std::runtime_error(infile_res.status().message());
@@ -43,13 +45,16 @@ static std::shared_ptr<arrow::Table> ReadTable(const std::string& path) {
     return tbl_res.ValueUnsafe();
 }
 
-// ———————— LogData 定義 & 註冊 ————————
-
+/// @brief Simple log payload with an integer and a string.
+/// @details Used for testing single-module logging.
 struct SimpleLog {
-    int a;
-    std::string b;
+    int a;              ///< Integer field to log.
+    std::string b;      ///< String field to log.
 };
 
+/// @brief Initialize and register the "Simple" module with the logger.
+/// @param logger Unique pointer to the FeatherV2 logger instance.
+/// @details Defines schema (timestamp, a, b) and serializer for SimpleLog.
 static void InitSimpleModule(std::unique_ptr<FeatherV2> &logger) {
     auto schema = arrow::schema({
         arrow::field("ts", arrow::uint64()),
@@ -64,10 +69,15 @@ static void InitSimpleModule(std::unique_ptr<FeatherV2> &logger) {
     logger->RegisterModule("Simple", schema, ser);
 }
 
+/// @brief Simple log payload with a single double field.
+/// @details Used for testing multi-module logging.
 struct OtherLog {
     double x;
 };
 
+/// @brief Initialize and register the "Other" module with the logger.
+/// @param logger Unique pointer to the FeatherV2 logger instance.
+/// @details Defines schema (timestamp, x) and serializer for OtherLog.
 static void InitOtherModule(std::unique_ptr<FeatherV2> &logger) {
     auto schema = arrow::schema({
         arrow::field("ts", arrow::uint64()),
@@ -80,24 +90,28 @@ static void InitOtherModule(std::unique_ptr<FeatherV2> &logger) {
     logger->RegisterModule("Other", schema, ser);
 }
 
-// ———————— Test Fixture ————————
 
+/// @brief Test fixture for FeatherV2 logger tests.
+/// @details Sets up and tears down a logger instance for each test.
 class LoggerTest : public ::testing::Test {
 protected:
 	std::unique_ptr<FeatherV2> logger;
 
+    /// @brief Create a new FeatherV2 logger before each test.
     void SetUp() override {
 		logger = std::make_unique<FeatherV2>("logs");
     }
 
+    /// @brief Stop the logger and clear logs after each test.
     void TearDown() override {
         logger->Stop();
         ClearLogs();
     }
 };
 
-// ———————— 測試案例 ————————
-
+/// @brief Verify that a single record is written correctly.
+/// @details Registers the "Simple" module, logs one SimpleLog, and
+/// checks that the resulting Arrow file has the correct schema and values.
 TEST_F(LoggerTest, SingleRecord) {
     logger->Start();
     InitSimpleModule(logger);
@@ -125,6 +139,8 @@ TEST_F(LoggerTest, SingleRecord) {
     EXPECT_EQ(b_arr->GetString(0), "foo");
 }
 
+/// @brief Ensure registering the same module twice throws an exception.
+/// @details Calls InitSimpleModule twice on the same logger.
 TEST_F(LoggerTest, DuplicateRegisterThrows) {
     logger->Start();
     InitSimpleModule(logger);
@@ -132,6 +148,9 @@ TEST_F(LoggerTest, DuplicateRegisterThrows) {
     logger->Stop();
 }
 
+/// @brief Test concurrent logging from multiple threads.
+/// @details Spawns several threads, each logging multiple SimpleLog entries,
+/// then verifies the total row count matches the expected number.
 TEST_F(LoggerTest, MultiThreadLogging) {
     logger->Start();
     InitSimpleModule(logger);
@@ -157,6 +176,9 @@ TEST_F(LoggerTest, MultiThreadLogging) {
     EXPECT_EQ(tbl->num_rows(), perThread * nThreads);
 }
 
+/// @brief Verify logging to multiple modules works correctly.
+/// @details Registers "Simple" and "Other", logs to each, and checks
+/// that both Arrow files exist with the correct timestamps.
 TEST_F(LoggerTest, MultiModule) {
     logger->Start();
     InitSimpleModule(logger);
