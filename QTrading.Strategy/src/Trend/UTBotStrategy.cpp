@@ -67,12 +67,13 @@ void UTBotStrategy::process_symbol(const std::string& sym,
 
     // long / short crossover
     int newPos = S.pos;
-    if (srcPrev < prevTrail && srcCur > trail) newPos = 1;
-    if (srcPrev > prevTrail && srcCur < trail) newPos = -1;
+    if (srcPrev < prevTrail && srcCur > prevTrail) newPos = 1;
+    if (srcPrev > prevTrail && srcCur < prevTrail) newPos = -1;
 
     if (newPos != S.pos) {
-        if (newPos == 1) ex->place_order(sym, qty, 0.0, true);  // LONG mkt
-        if (newPos == -1) ex->place_order(sym, qty, 0.0, false);  // SHORT mkt
+		ex->close_position(sym);  // close existing position
+        if (newPos == 1) ex->place_order(sym, qty, false);  // LONG mkt
+        if (newPos == -1) ex->place_order(sym, qty, false);  // SHORT mkt
         S.pos = newPos;
     }
 

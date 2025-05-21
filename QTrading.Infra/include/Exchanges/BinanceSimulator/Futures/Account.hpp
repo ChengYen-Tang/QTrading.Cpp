@@ -46,7 +46,7 @@ public:
     /// @return Leverage factor (≥1).
     double get_symbol_leverage(const std::string& symbol) const;
 
-    /// @brief Place a new order.
+    /// @brief Place a new order. (Limited Price)
     /// @param symbol     Trading symbol.
     /// @param quantity   Order quantity.
     /// @param price      Limit price (>0) or market (≤0).
@@ -58,7 +58,7 @@ public:
         bool is_long,
         bool reduce_only = false);
 
-    /// @brief Overload: market order (price=0).
+    /// @brief Place a new order. (Market Price)
     /// @param symbol     Trading symbol.
     /// @param quantity   Order quantity.
     /// @param is_long    True for long, false for short.
@@ -70,7 +70,7 @@ public:
     void update_positions(const std::unordered_map<std::string, std::pair<double, double>>& symbol_price_volume);
 
 
-    /// @brief Close position(s) for a symbol at given price.
+    /// @brief Close position(s) for a symbol at limited price.
     ///        In one-way mode: closes all. In hedge mode: customizable.
     /// @param symbol Trading symbol.
     /// @param price  Limit price (>0) or market (≤0).

@@ -42,18 +42,31 @@ BinanceExchange::BinanceExchange(
     order_channel.reset(ChannelFactory::CreateBoundedChannel<std::vector<dto::Order>>(4, OverflowPolicy::DropOldest));
 }
 
-/// @brief Place an order via the simulated Account.
-/// @param sym         Symbol to trade (e.g. "BTCUSDT").
-/// @param q           Quantity to trade.
-/// @param p           Limit price (>0) or market (<=0).
-/// @param is_long     True = long; false = short.
-/// @param reduce_only If true, order only reduces existing position.
-void BinanceExchange::place_order(const std::string& sym, double q, double p,
-    bool is_long, bool reduce_only)
+void BinanceExchange::place_order(const std::string& symbol,
+    double quantity, double price, bool is_long, bool reduce_only)
 {
-    account->place_order(sym, q, p, is_long, reduce_only);
+    account->place_order(symbol, quantity, price, is_long, reduce_only);
 }
 
+void BinanceExchange::place_order(const std::string& symbol, double quantity, bool is_long, bool reduce_only)
+{
+    account->place_order(symbol, quantity, is_long, reduce_only);
+}
+
+void BinanceExchange::close_position(const std::string& symbol, double price)
+{
+    account->close_position(symbol, price);
+}
+
+void BinanceExchange::close_position(const std::string& symbol)
+{
+    account->close_position(symbol);
+}
+
+void BinanceExchange::close_position(const std::string& symbol, bool is_long, double price)
+{
+    account->close_position(symbol, is_long, price);
+}
 
 /// @brief Advance one bar of simulation: emit market data & debounced updates.
 /// @return true if new data was emitted; false once all CSV data is exhausted.

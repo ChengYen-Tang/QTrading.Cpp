@@ -40,8 +40,21 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
             std::shared_ptr<Account> account);
 
         /// @copydoc IExchange::place_order
-        void  place_order(const std::string& symbol, double qty, double price,
-            bool is_long, bool reduce_only = false) override;
+        void place_order(const std::string& symbol,
+            double quantity,
+            double price,
+            bool is_long,
+            bool reduce_only = false);
+        /// @copydoc IExchange::place_order
+        void place_order(const std::string& symbol, double quantity, bool is_long, bool reduce_only = false);
+
+        /// @copydoc IExchange::close_position
+        void close_position(const std::string& symbol, double price);
+        /// @copydoc IExchange::close_position
+        void close_position(const std::string& symbol);
+        /// @copydoc IExchange::close_position
+        void close_position(const std::string& symbol, bool is_long, double price = 0.0);
+
         /// @copydoc IExchange::step
         bool  step() override;
 

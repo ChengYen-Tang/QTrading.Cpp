@@ -28,17 +28,39 @@ namespace QTrading::Infra::Exchanges {
 		/// @return Shared pointer to the order channel.
 		std::shared_ptr<Channel<std::vector<Order>>>              get_order_channel()    const { return order_channel; }
 
-		/// @brief Place a new order on the exchange.
-		/// @param symbol Trading symbol, e.g., "BTCUSDT".
-		/// @param quantity Amount to buy/sell.
-		/// @param price Limit price (>0) or market order (<=0).
-		/// @param is_long True for buy (long), false for sell (short).
-		/// @param reduce_only If true, only reduce existing positions.
+		/// @brief Place a new order. (Limited Price)
+		/// @param symbol     Trading symbol.
+		/// @param quantity   Order quantity.
+		/// @param price      Limit price (>0) or market (≤0).
+		/// @param is_long    True for buy/long, false for sell/short.
+		/// @param reduce_only If true, only reduce an existing position.
 		virtual void place_order(const std::string& symbol,
 			double quantity,
 			double price,
 			bool is_long,
 			bool reduce_only = false) = 0;
+
+		/// @brief Place a new order. (Market Price)
+		/// @param symbol     Trading symbol.
+		/// @param quantity   Order quantity.
+		/// @param is_long    True for long, false for short.
+		/// @param reduce_only If true, reduce-only.
+		virtual void place_order(const std::string& symbol, double quantity, bool is_long, bool reduce_only = false) = 0;
+
+		/// @brief Close position(s) for a symbol at limited price.
+		///        In one-way mode: closes all. In hedge mode: customizable.
+		/// @param symbol Trading symbol.
+		/// @param price  Limit price (>0) or market (≤0).
+		virtual void close_position(const std::string& symbol, double price) = 0;
+		/// @brief Close all positions for a symbol at market price.
+		/// @param symbol Trading symbol.
+		virtual void close_position(const std::string& symbol) = 0;
+
+		/// @brief In hedge mode, close only one side (long/short) at price.
+		/// @param symbol Trading symbol.
+		/// @param is_long True to close long side, false to close short.
+		/// @param price   Limit price (>0) or market (≤0).
+		virtual void close_position(const std::string& symbol, bool is_long, double price = 0.0) = 0;
 
 		/// @brief Advance the simulation by one step (e.g., one time tick).
 		/// @return True if new market data was emitted; false if data is exhausted.
