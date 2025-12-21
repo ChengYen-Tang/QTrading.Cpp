@@ -150,7 +150,7 @@ void BinanceExchange::build_multikline(uint64_t ts, MultiKlineDto& out)
     out.Timestamp = ts;
     out.klines.clear();
 
-    std::unordered_map<std::string, std::pair<double, double>> priceVol;
+    std::unordered_map<std::string, KlineDto> klineSnap;
 
     for (auto& [sym, data] : md) {
         size_t idx = cursor[sym];
@@ -159,15 +159,15 @@ void BinanceExchange::build_multikline(uint64_t ts, MultiKlineDto& out)
         {
             const auto& k = data.get_kline(idx);
             out.klines.emplace(sym, k);
-            priceVol.emplace(sym, std::make_pair(k.ClosePrice, k.Volume));
+            klineSnap.emplace(sym, k);
             ++cursor[sym];
         }
         else {
             out.klines.emplace(sym, std::nullopt);
         }
     }
-    if (!priceVol.empty())
-        account->update_positions(priceVol);
+    if (!klineSnap.empty())
+        account->update_positions(klineSnap);
 }
 
 /// @brief Log account balance, positions, and orders via the Logger.

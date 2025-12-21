@@ -6,6 +6,7 @@
 #include <tuple>
 #include "Dto/Order.hpp"
 #include "Dto/Position.hpp"
+#include "Dto/Market/Binance/Kline.hpp"
 
 using namespace QTrading::dto;
 
@@ -68,6 +69,10 @@ public:
     /// @brief Core matching and position update logic.
     /// @param symbol_price_volume Map from symbol to (market price, available volume).
     void update_positions(const std::unordered_map<std::string, std::pair<double, double>>& symbol_price_volume);
+
+    /// @brief Core matching and position update logic using OHLC for trigger checks.
+    /// @param symbol_kline Map from symbol to latest kline snapshot.
+    void update_positions(const std::unordered_map<std::string, QTrading::Dto::Market::Binance::KlineDto>& symbol_kline);
 
 
     /// @brief Close position(s) for a symbol at limited price.

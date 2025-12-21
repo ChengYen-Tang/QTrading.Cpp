@@ -6,6 +6,8 @@
 #include <algorithm>
 #include <unordered_map>
 
+using QTrading::Dto::Market::Binance::KlineDto;
+
 /// @brief Simulated Binance Futures Account implementation.
 /// @details Supports one-way and hedge modes, order matching, margin, fees, and auto-liquidation.
 Account::Account(double initial_balance, int vip_level)
@@ -310,65 +312,155 @@ void Account::merge_positions() {
     }
 }
 
-/// @brief Core matching and settlement logic.
-/// @param symbol_price_volume  Map of symbol→(market price, available volume).
 void Account::update_positions(const std::unordered_map<std::string, std::pair<double, double>>& symbol_price_volume) {
+    // Backward-compatible adapter: treat provided price as ClosePrice and use it also as High/Low.
+    std::unordered_map<std::string, KlineDto> kl;
+    kl.reserve(symbol_price_volume.size());
+    for (const auto& kv : symbol_price_volume) {
+        KlineDto k;
+        k.OpenPrice = kv.second.first;
+        k.HighPrice = kv.second.first;
+        k.LowPrice = kv.second.first;
+        k.ClosePrice = kv.second.first;
+        k.Volume = kv.second.second;
+        kl.emplace(kv.first, k);
+    }
+    update_positions(kl);
+}
+
+void Account::update_positions(const std::unordered_map<std::string, KlineDto>& symbol_kline) {
     double makerFee, takerFee;
     std::tie(makerFee, takerFee) = get_fee_rates();
 
-    std::vector<Order> leftover;
-    leftover.reserve(open_orders_.size());
+    // Track remaining volume per symbol for this tick.
+    std::unordered_map<std::string, double> remaining_vol;
+    remaining_vol.reserve(symbol_kline.size());
+    for (const auto& kv : symbol_kline) {
+        remaining_vol.emplace(kv.first, kv.second.Volume);
+    }
 
-    // Process each open order.
-    for (auto& ord : open_orders_) {
-        auto itPrice = symbol_price_volume.find(ord.symbol);
-        if (itPrice == symbol_price_volume.end()) {
-            leftover.push_back(ord);
-            continue;
-        }
-        double current_price = itPrice->second.first;
-        double available_vol = itPrice->second.second;
-        if (available_vol <= 0) {
-            leftover.push_back(ord);
-            continue;
-        }
-
-        bool is_market = (ord.price <= 0.0);
-        bool can_fill = false;
+    // Helper: decide whether an order can fill for this kline, and whether it's taker.
+    // Trigger logic (OHLC):
+    //  - Market: always fills, price uses ClosePrice
+    //  - Buy limit: triggers if LowPrice <= limit
+    //  - Sell limit: triggers if HighPrice >= limit
+    // Taker logic (simplified):
+    //  - Market is taker
+    //  - Limit that is immediately executable at the close is treated as taker
+    //    (keeps previous behavior while upgrading trigger to OHLC).
+    auto can_fill_and_taker = [](const Order& ord, const KlineDto& k) -> std::pair<bool, bool> {
+        const bool is_market = (ord.price <= 0.0);
         if (is_market) {
-            can_fill = true;
+            return { true, true };
         }
-        else {
-            if (ord.is_long && current_price <= ord.price)
-                can_fill = true;
-            else if (!ord.is_long && current_price >= ord.price)
-                can_fill = true;
+
+        const bool triggered = (ord.is_long ? (k.LowPrice <= ord.price) : (k.HighPrice >= ord.price));
+        if (!triggered) {
+            return { false, false };
         }
-        if (!can_fill) {
-            leftover.push_back(ord);
+
+        // For now, keep the same taker classification rule as before: marketable at close => taker.
+        const bool marketable_at_close = (ord.is_long ? (k.ClosePrice <= ord.price) : (k.ClosePrice >= ord.price));
+        return { true, marketable_at_close };
+    };
+
+    // Prepare indices grouped per symbol.
+    std::unordered_map<std::string, std::vector<size_t>> per_symbol;
+    per_symbol.reserve(symbol_kline.size());
+    for (size_t i = 0; i < open_orders_.size(); ++i) {
+        per_symbol[open_orders_[i].symbol].push_back(i);
+    }
+
+    std::vector<bool> keep(open_orders_.size(), true);
+
+    for (auto& symKv : per_symbol) {
+        const std::string& sym = symKv.first;
+        auto itK = symbol_kline.find(sym);
+        if (itK == symbol_kline.end()) {
+            continue;
+        }
+        const KlineDto& k = itK->second;
+
+        auto itVol = remaining_vol.find(sym);
+        if (itVol == remaining_vol.end() || itVol->second <= 0.0) {
             continue;
         }
 
-        double fill_qty = std::min(ord.quantity, available_vol);
-        if (fill_qty < 1e-8) {
-            leftover.push_back(ord);
-            continue;
+        auto& indices = symKv.second;
+
+        std::vector<size_t> fillable;
+        fillable.reserve(indices.size());
+        for (size_t idx : indices) {
+            const auto [can_fill, _] = can_fill_and_taker(open_orders_[idx], k);
+            if (can_fill) fillable.push_back(idx);
         }
 
-        double fill_price = current_price;
-        double notional = fill_qty * fill_price;
-        double feeRate = (is_market ? takerFee : makerFee);
-        double fee = notional * feeRate;
+        std::sort(fillable.begin(), fillable.end(), [&](size_t a, size_t b) {
+            const Order& A = open_orders_[a];
+            const Order& B = open_orders_[b];
 
-        if (ord.closing_position_id >= 0) {
-            processClosingOrder(ord, fill_qty, fill_price, fee, leftover);
-        }
-        else {
-            processOpeningOrder(ord, fill_qty, fill_price, notional, fee, feeRate, leftover);
+            const bool Am = (A.price <= 0.0);
+            const bool Bm = (B.price <= 0.0);
+            if (Am != Bm) return Am; // market first
+
+            if (!Am && A.is_long == B.is_long) {
+                if (A.is_long) {
+                    if (A.price != B.price) return A.price > B.price;
+                }
+                else {
+                    if (A.price != B.price) return A.price < B.price;
+                }
+            }
+
+            return A.id < B.id;
+        });
+
+        for (size_t idx : fillable) {
+            if (itVol->second <= 0.0) break;
+
+            Order& ord = open_orders_[idx];
+            const auto [can_fill, is_taker] = can_fill_and_taker(ord, k);
+            if (!can_fill) continue;
+
+            const double fill_qty = std::min(ord.quantity, itVol->second);
+            if (fill_qty < 1e-8) continue;
+
+            itVol->second -= fill_qty;
+
+            const bool is_market = (ord.price <= 0.0);
+            const double fill_price = is_market ? k.ClosePrice : ord.price;
+
+            const double notional = fill_qty * fill_price;
+            const double feeRate = (is_taker ? takerFee : makerFee);
+            const double fee = notional * feeRate;
+
+            keep[idx] = false;
+
+            std::vector<Order> single_leftover;
+            single_leftover.reserve(1);
+
+            if (ord.closing_position_id >= 0) {
+                processClosingOrder(ord, fill_qty, fill_price, fee, single_leftover);
+            }
+            else {
+                processOpeningOrder(ord, fill_qty, fill_price, notional, fee, feeRate, single_leftover);
+            }
+
+            // If partially filled, keep the remainder as open.
+            if (!single_leftover.empty()) {
+                ord = single_leftover.front();
+                keep[idx] = true;
+            }
         }
     }
 
-    open_orders_.swap(leftover);
+    // Rebuild open_orders_ preserving original time order for orders that remain.
+    std::vector<Order> next_open;
+    next_open.reserve(open_orders_.size());
+    for (size_t i = 0; i < open_orders_.size(); ++i) {
+        if (keep[i]) next_open.push_back(open_orders_[i]);
+    }
+    open_orders_.swap(next_open);
 
     // Remove positions with negligible quantity.
     positions_.erase(
@@ -381,9 +473,9 @@ void Account::update_positions(const std::unordered_map<std::string, std::pair<d
 
     // Recalculate unrealized PnL.
     for (auto& pos : positions_) {
-        auto itp = symbol_price_volume.find(pos.symbol);
-        if (itp != symbol_price_volume.end()) {
-            double cp = itp->second.first;
+        auto itp = symbol_kline.find(pos.symbol);
+        if (itp != symbol_kline.end()) {
+            double cp = itp->second.ClosePrice;
             pos.unrealized_pnl = (cp - pos.entry_price) * pos.quantity * (pos.is_long ? 1.0 : -1.0);
         }
     }
@@ -405,8 +497,8 @@ void Account::update_positions(const std::unordered_map<std::string, std::pair<d
 
     std::cout << "[update_positions] equity=" << equity
           << ", totalMaint=" << totalMaint;
-    for (const auto &kv : symbol_price_volume) {
-        std::cout << ", " << kv.first << "=" << kv.second.first;
+    for (const auto &kv : symbol_kline) {
+        std::cout << ", " << kv.first << "=" << kv.second.ClosePrice;
     }
     std::cout << std::endl;
 }
