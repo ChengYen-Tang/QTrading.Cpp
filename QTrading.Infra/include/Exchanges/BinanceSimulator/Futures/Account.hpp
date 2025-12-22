@@ -7,6 +7,7 @@
 #include "Dto/Order.hpp"
 #include "Dto/Position.hpp"
 #include "Dto/Market/Binance/Kline.hpp"
+#include "Dto/AccountLog.hpp"
 
 using namespace QTrading::dto;
 
@@ -19,13 +20,16 @@ public:
     /// @param vip_level      VIP fee tier (0–9).
     Account(double initial_balance, int vip_level = 0);
 
-    /// @brief Get current cash balance.
+    /// @brief Cross-margin account snapshot (Binance-like fields).
+    QTrading::Dto::Account::BalanceSnapshot get_balance_snapshot() const;
+
+    /// @brief Get wallet balance (realized PnL only). Legacy name kept for compatibility.
     /// @return Available balance (after realized PnL minus margin).
     double get_balance() const;
     /// @brief Compute total unrealized PnL across all positions.
     /// @return Sum of unrealized PnL.
     double total_unrealized_pnl() const;
-    /// @brief Get total equity (balance + unrealized PnL).
+    /// @brief Get margin balance (wallet + unrealized). Legacy name kept for compatibility.
     /// @return Current account equity.
     double get_equity() const;
 
@@ -105,6 +109,8 @@ public:
 private:
     ///< Available cash balance.
     double balance_;
+    ///< Wallet balance (realized PnL) for cross margin.
+    double wallet_balance_;
     ///< Margin currently in use.
     double used_margin_;
     ///< VIP level for fee calculation.

@@ -11,10 +11,11 @@ using QTrading::Dto::Market::Binance::KlineDto;
 /// @brief Simulated Binance Futures Account implementation.
 /// @details Supports one-way and hedge modes, order matching, margin, fees, and auto-liquidation.
 Account::Account(double initial_balance, int vip_level)
-    : balance_(initial_balance),
+    : wallet_balance_(initial_balance),
+    balance_(initial_balance),
     used_margin_(0.0),
     vip_level_(vip_level),
-    hedge_mode_(false),          // Default to one‑way mode
+    hedge_mode_(false),
     next_order_id_(1),
     next_position_id_(1)
 {
@@ -22,14 +23,45 @@ Account::Account(double initial_balance, int vip_level)
     positions_.reserve(1024);
 }
 
-/// @brief Get the current available balance (not including unrealized PnL).
-/// @return Account balance.
-double Account::get_balance() const {
-    return balance_;
+QTrading::Dto::Account::BalanceSnapshot Account::get_balance_snapshot() const {
+    QTrading::Dto::Account::BalanceSnapshot s;
+
+    s.WalletBalance = wallet_balance_;
+    s.UnrealizedPnl = total_unrealized_pnl();
+    s.MarginBalance = s.WalletBalance + s.UnrealizedPnl;
+
+    double posInit = 0.0;
+    double maint = 0.0;
+    for (const auto& p : positions_) {
+        posInit += p.initial_margin;
+        maint += p.maintenance_margin;
+    }
+    s.PositionInitialMargin = posInit;
+    s.MaintenanceMargin = maint;
+
+    // Open-order initial margin (simplified): sum of (qty*price/leverage) for opening orders.
+    // For market orders, we cannot know exact notional here; we treat as 0 until filled.
+    double openOrdInit = 0.0;
+    for (const auto& o : open_orders_) {
+        if (o.closing_position_id >= 0) continue; // closing orders don't require additional margin
+        if (o.price <= 0.0) continue;             // market: unknown notional until fill
+        double lev = get_symbol_leverage(o.symbol);
+        openOrdInit += (o.quantity * o.price) / std::max(1.0, lev);
+    }
+    s.OpenOrderInitialMargin = openOrdInit;
+
+    s.AvailableBalance = s.MarginBalance - s.PositionInitialMargin - s.OpenOrderInitialMargin;
+
+    // Equity is treated as margin balance in this simplified cross model.
+    s.Equity = s.MarginBalance;
+    return s;
 }
 
-/// @brief Sum unrealized PnL across all open positions.
-/// @return Total unrealized profit or loss.
+double Account::get_balance() const {
+    // Legacy: return wallet balance.
+    return wallet_balance_;
+}
+
 double Account::total_unrealized_pnl() const {
     double total = 0.0;
     for (const auto& pos : positions_) {
@@ -38,10 +70,10 @@ double Account::total_unrealized_pnl() const {
     return total;
 }
 
-/// @brief Get total account equity: balance + unrealized PnL.
-/// @return Account equity.
 double Account::get_equity() const {
-    return balance_ + total_unrealized_pnl();
+    // Legacy: return margin balance (wallet + unrealized).
+    const auto s = get_balance_snapshot();
+    return s.MarginBalance;
 }
 
 /// @brief Switch between one-way mode and hedge mode.
@@ -480,24 +512,22 @@ void Account::update_positions(const std::unordered_map<std::string, KlineDto>& 
         }
     }
 
-    double equity = get_equity();
-    double totalMaint = 0.0;
-    for (const auto& pos : positions_) {
-        totalMaint += pos.maintenance_margin;
-    }
-    if (equity < totalMaint) {
-        std::cerr << "[update_positions] Liquidation triggered! equity=" << equity
-            << ", totalMaint=" << totalMaint << "\n";
-        balance_ = 0.0;
+    // liquidation check
+    const auto snap = get_balance_snapshot();
+    if (snap.MarginBalance < snap.MaintenanceMargin) {
+        std::cerr << "[update_positions] Liquidation triggered! marginBalance=" << snap.MarginBalance
+            << ", maintenanceMargin=" << snap.MaintenanceMargin << "\n";
+        wallet_balance_ = 0.0;
         used_margin_ = 0.0;
         positions_.clear();
         open_orders_.clear();
         order_to_position_.clear();
     }
 
-    std::cout << "[update_positions] equity=" << equity
-          << ", totalMaint=" << totalMaint;
-    for (const auto &kv : symbol_kline) {
+    std::cout << "[update_positions] marginBalance=" << snap.MarginBalance
+        << ", maintenanceMargin=" << snap.MaintenanceMargin
+        << ", walletBalance=" << snap.WalletBalance;
+    for (const auto& kv : symbol_kline) {
         std::cout << ", " << kv.first << "=" << kv.second.ClosePrice;
     }
     std::cout << std::endl;
@@ -516,13 +546,16 @@ void Account::processClosingOrder(Order& ord, double fill_qty, double fill_price
             foundPos = true;
             double close_qty = std::min(fill_qty, pos.quantity);
             double realized_pnl = (fill_price - pos.entry_price) * close_qty * (pos.is_long ? 1.0 : -1.0);
+
             double ratio = close_qty / pos.quantity;
             double freed_margin = pos.initial_margin * ratio;
             double freed_maint = pos.maintenance_margin * ratio;
             double freed_fee = pos.fee * ratio;
-            double returned_amount = freed_margin + realized_pnl - fee;
 
-            balance_ += returned_amount;
+            // Cross margin: realized PnL affects wallet; margin is merely released (tracking only).
+            wallet_balance_ += realized_pnl;
+            wallet_balance_ -= fee;
+
             used_margin_ -= freed_margin;
 
             pos.quantity -= close_qty;
@@ -555,13 +588,15 @@ bool Account::processReduceOnlyOrder(Order& ord, double fill_qty, double fill_pr
         if (pos.symbol == ord.symbol && pos.is_long == ord.is_long) {
             double close_qty = std::min(fill_qty, pos.quantity);
             double realized_pnl = (fill_price - pos.entry_price) * close_qty * (pos.is_long ? 1.0 : -1.0);
+
             double ratio = close_qty / pos.quantity;
             double freed_margin = pos.initial_margin * ratio;
             double freed_maint = pos.maintenance_margin * ratio;
             double freed_fee = pos.fee * ratio;
-            double returned_amount = freed_margin + realized_pnl - fee;
 
-            balance_ += returned_amount;
+            wallet_balance_ += realized_pnl;
+            wallet_balance_ -= fee;
+
             used_margin_ -= freed_margin;
 
             pos.quantity -= close_qty;
@@ -569,6 +604,7 @@ bool Account::processReduceOnlyOrder(Order& ord, double fill_qty, double fill_pr
             pos.maintenance_margin -= freed_maint;
             pos.fee -= freed_fee;
             pos.notional = pos.entry_price * pos.quantity;
+
             ord.quantity -= close_qty;
             if (ord.quantity > 1e-8)
                 leftover.push_back(ord);
@@ -588,6 +624,7 @@ bool Account::processReduceOnlyOrder(Order& ord, double fill_qty, double fill_pr
 /// @param[out] leftover Orders still remaining.
 void Account::processNormalOpeningOrder(Order& ord, double fill_qty, double fill_price, double notional,
     double fee, double feeRate, std::vector<Order>& leftover) {
+
     double lev = get_symbol_leverage(ord.symbol);
     double mmr, maxLev;
     std::tie(mmr, maxLev) = get_tier_info(notional);
@@ -596,16 +633,21 @@ void Account::processNormalOpeningOrder(Order& ord, double fill_qty, double fill
         leftover.push_back(ord);
         return;
     }
-    double init_margin = notional / lev;
-    double maint_margin = notional * mmr;
-    double required = init_margin + fee;
-    double eq = get_equity();
-    if (eq < required) {
-        std::cerr << "[processNormalOpeningOrder] Not enough equity for order id=" << ord.id << "\n";
+
+    const double init_margin = notional / lev;
+    const double maint_margin = notional * mmr;
+
+    // Cross margin: require enough available balance for margin occupation + fee.
+    const auto snap = get_balance_snapshot();
+    const double required = init_margin + fee;
+    if (snap.AvailableBalance < required) {
+        std::cerr << "[processNormalOpeningOrder] Not enough available balance for order id=" << ord.id << "\n";
         leftover.push_back(ord);
         return;
     }
-    balance_ -= required;
+
+    // Fee is paid from wallet balance; margin is occupied via used_margin_.
+    wallet_balance_ -= fee;
     used_margin_ += init_margin;
 
     auto pm = order_to_position_.find(ord.id);
@@ -618,7 +660,7 @@ void Account::processNormalOpeningOrder(Order& ord, double fill_qty, double fill
             fill_qty,
             fill_price,
             ord.is_long,
-            0.0, // unrealized PnL will be recalculated
+            0.0,
             notional,
             init_margin,
             maint_margin,
@@ -648,6 +690,7 @@ void Account::processNormalOpeningOrder(Order& ord, double fill_qty, double fill
             }
         }
     }
+
     double leftoverQty = ord.quantity - fill_qty;
     if (leftoverQty > 1e-8) {
         ord.quantity = leftoverQty;
