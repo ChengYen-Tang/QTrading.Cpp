@@ -73,6 +73,15 @@ void BinanceExchange::close_position(const std::string& symbol, bool is_long, do
 bool BinanceExchange::step()
 {
     log_status();
+
+    // Terminate simulation (end backtest) once wallet balance is depleted.
+    if (account->get_balance().WalletBalance <= 0.0) {
+        market_channel->Close();
+        position_channel->Close();
+        order_channel->Close();
+        return false;
+    }
+
     uint64_t ts;
     /// @details Find the next minimum timestamp among all symbols.
     if (!next_timestamp(ts)) {
@@ -83,7 +92,7 @@ bool BinanceExchange::step()
     }
 
     /// @details Publish multi-symbol market data at timestamp `ts`.
-	set_global_timestamp(ts);
+    set_global_timestamp(ts);
     auto dto = std::make_shared<MultiKlineDto>();
     build_multikline(ts, *dto);
     market_channel->Send(dto);    // always emit market
@@ -173,7 +182,8 @@ void BinanceExchange::build_multikline(uint64_t ts, MultiKlineDto& out)
 /// @brief Log account balance, positions, and orders via the Logger.
 /// @details Uses Arrow Feather-V2 for efficient batch logging.
 void BinanceExchange::log_status() {
-    auto account_log = std::make_shared<AccountLog>(AccountLog{ account->get_balance(), account->total_unrealized_pnl(), account->get_equity() });
+    auto snap = account->get_balance();
+    auto account_log = std::make_shared<AccountLog>(AccountLog{ snap.WalletBalance, snap.UnrealizedPnl, snap.MarginBalance });
 	logger->Log(LogModuleToString(LogModule::Account), account_log);
     const auto& curP = account->get_all_positions();
     for (const auto& p : curP) {

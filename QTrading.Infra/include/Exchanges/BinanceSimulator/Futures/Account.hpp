@@ -7,7 +7,7 @@
 #include "Dto/Order.hpp"
 #include "Dto/Position.hpp"
 #include "Dto/Market/Binance/Kline.hpp"
-#include "Dto/AccountLog.hpp"
+#include "Dto/Account/BalanceSnapshot.hpp"
 
 using namespace QTrading::dto;
 
@@ -20,18 +20,20 @@ public:
     /// @param vip_level      VIP fee tier (0–9).
     Account(double initial_balance, int vip_level = 0);
 
-    /// @brief Cross-margin account snapshot (Binance-like fields).
-    QTrading::Dto::Account::BalanceSnapshot get_balance_snapshot() const;
+    /// @brief Get cross-margin account balance snapshot.
+    QTrading::Dto::Account::BalanceSnapshot get_balance() const;
 
-    /// @brief Get wallet balance (realized PnL only). Legacy name kept for compatibility.
-    /// @return Available balance (after realized PnL minus margin).
-    double get_balance() const;
     /// @brief Compute total unrealized PnL across all positions.
     /// @return Sum of unrealized PnL.
     double total_unrealized_pnl() const;
     /// @brief Get margin balance (wallet + unrealized). Legacy name kept for compatibility.
     /// @return Current account equity.
     double get_equity() const;
+
+    /// @brief Explicit getters to avoid ambiguity.
+    double get_wallet_balance() const;
+    double get_margin_balance() const;
+    double get_available_balance() const;
 
     /// @brief Set trading mode: one-way (false) or hedge (true).
     ///        Cannot switch if positions are open.
@@ -107,32 +109,26 @@ public:
     const std::vector<Position>& get_all_positions() const;
 
 private:
-    ///< Available cash balance.
+    ///< Legacy field (deprecated): kept to minimize internal refactor.
     double balance_;
+
     ///< Wallet balance (realized PnL) for cross margin.
     double wallet_balance_;
+
     ///< Margin currently in use.
     double used_margin_;
-    ///< VIP level for fee calculation.
-    int vip_level_;
 
-    ///< Hedge mode flag (true) or one-way (false).
+    int vip_level_;
     bool hedge_mode_;
 
-    ///< Per-symbol leverage.
     std::unordered_map<std::string, double> symbol_leverage_;
 
-    ///< Counter for generating unique order IDs.
     int next_order_id_;
-    ///< Counter for generating unique position IDs.
     int next_position_id_;
 
-    ///< Pending open orders.
     std::vector<Order> open_orders_;
-    ///< Active positions.
     std::vector<Position> positions_;
 
-    ///< Map from order ID to position ID.
     std::unordered_map<int, int> order_to_position_;
 
     /// @brief Generate a new unique order ID.
