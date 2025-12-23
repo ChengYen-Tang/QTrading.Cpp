@@ -8,6 +8,7 @@
 #include "Exchanges/BinanceSimulator/DataProvider/MarketData.hpp"
 #include "Exchanges/BinanceSimulator/Futures/Account.hpp"
 #include "Dto/Market/Binance/MultiKline.hpp"
+#include "Dto/Trading/Side.hpp"
 #include "Queue/ChannelFactory.hpp"
 #include "Logger.hpp"
 
@@ -31,6 +32,7 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
             std::shared_ptr<QTrading::Log::Logger> logger,
             double  init_balance = 1'000'000.0,
             int     vip_level = 0);
+
         /// @brief Construct with CSV mappings, logger, and existing Account.
         /// @param symbolCsv Vector of (symbol, csv_file) pairs.
         /// @param logger Shared pointer to a Logger instance.
@@ -40,20 +42,27 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
             std::shared_ptr<Account> account);
 
         /// @copydoc IExchange::place_order
-        void place_order(const std::string& symbol,
+        bool place_order(const std::string& symbol,
             double quantity,
             double price,
-            bool is_long,
-            bool reduce_only = false);
+            QTrading::Dto::Trading::OrderSide side,
+            QTrading::Dto::Trading::PositionSide position_side = QTrading::Dto::Trading::PositionSide::Both,
+            bool reduce_only = false) override;
         /// @copydoc IExchange::place_order
-        void place_order(const std::string& symbol, double quantity, bool is_long, bool reduce_only = false);
+        bool place_order(const std::string& symbol,
+            double quantity,
+            QTrading::Dto::Trading::OrderSide side,
+            QTrading::Dto::Trading::PositionSide position_side = QTrading::Dto::Trading::PositionSide::Both,
+            bool reduce_only = false) override;
 
         /// @copydoc IExchange::close_position
-        void close_position(const std::string& symbol, double price);
+        void close_position(const std::string& symbol, double price) override;
         /// @copydoc IExchange::close_position
-        void close_position(const std::string& symbol);
+        void close_position(const std::string& symbol) override;
         /// @copydoc IExchange::close_position
-        void close_position(const std::string& symbol, bool is_long, double price = 0.0);
+        void close_position(const std::string& symbol,
+            QTrading::Dto::Trading::PositionSide position_side,
+            double price = 0.0) override;
 
         /// @copydoc IExchange::step
         bool  step() override;

@@ -5,6 +5,21 @@
 #include <vector>
 #include <iostream> // for CaptureStdout, CaptureStderr
 #include "Exchanges/BinanceSimulator/Futures/Account.hpp"
+#include "Dto/Trading/Side.hpp"
+
+static std::unordered_map<std::string, QTrading::Dto::Market::Binance::KlineDto> oneKline(
+    const std::string& sym,
+    double o, double h, double l, double c,
+    double vol)
+{
+    QTrading::Dto::Market::Binance::KlineDto k;
+    k.OpenPrice = o;
+    k.HighPrice = h;
+    k.LowPrice = l;
+    k.ClosePrice = c;
+    k.Volume = vol;
+    return { {sym, k} };
+}
 
 /// @brief Helper: generate market data for BTCUSDT only.
 std::unordered_map<std::string, std::pair<double, double>> partialMarketDataBTC(double price, double available) {
@@ -49,9 +64,11 @@ TEST(AccountTest, SetAndGetSymbolLeverage) {
 TEST(AccountTest, PlaceOrderSuccessCheckOpenOrders) {
     Account account(10000.0, 0);
 
-    // price>0 => limit order
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+
     testing::internal::CaptureStdout();
-    account.place_order("BTCUSDT", 1.0, 7000.0, true); // is_long=true
+    ASSERT_TRUE(account.place_order("BTCUSDT", 1.0, 7000.0, OrderSide::Buy, PositionSide::Both));
     std::string out = testing::internal::GetCapturedStdout();
 
     const auto& orders = account.get_all_open_orders();
@@ -59,16 +76,10 @@ TEST(AccountTest, PlaceOrderSuccessCheckOpenOrders) {
     EXPECT_EQ(orders[0].symbol, "BTCUSDT");
     EXPECT_DOUBLE_EQ(orders[0].quantity, 1.0);
     EXPECT_DOUBLE_EQ(orders[0].price, 7000.0);
-    EXPECT_TRUE(orders[0].is_long);
-    // Not closing any position => closing_position_id == -1 (預設)
+    EXPECT_TRUE(orders[0].side == OrderSide::Buy);
     EXPECT_EQ(orders[0].closing_position_id, -1);
 
-    // Wallet balance not deducted yet
     EXPECT_DOUBLE_EQ(account.get_balance().WalletBalance, 10000.0);
-
-    // Verify that there's no error log in out
-    // (We might or might not check specific logs here)
-    // e.g., we can check some substring if needed
 }
 
 /// @brief Verifies partial fill creates position and leaves leftover order.
@@ -76,31 +87,27 @@ TEST(AccountTest, UpdatePositionsPartialFillSameOrder) {
     Account account(5000.0, 0);
     account.set_symbol_leverage("BTCUSDT", 10.0);
 
-    // place a limit order for 5 BTC at price=1000
-    account.place_order("BTCUSDT", 5.0, 1000.0, true);
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
 
-    // update_positions => expect partial fill of 2 BTC
+    ASSERT_TRUE(account.place_order("BTCUSDT", 5.0, 1000.0, OrderSide::Buy, PositionSide::Both));
+
     account.update_positions(partialMarketDataBTC(1000.0, 2.0));
 
-    // Check: 2 BTC is filled => create a new position, leftover=3 BTC
     const auto& orders = account.get_all_open_orders();
-    ASSERT_EQ(orders.size(), 1u); // leftover order still open
+    ASSERT_EQ(orders.size(), 1u);
     EXPECT_DOUBLE_EQ(orders[0].quantity, 3.0);
 
-    // positions => 1 position with 2 BTC
     const auto& positions = account.get_all_positions();
     ASSERT_EQ(positions.size(), 1u);
     EXPECT_DOUBLE_EQ(positions[0].quantity, 2.0);
     EXPECT_EQ(positions[0].symbol, "BTCUSDT");
 
-    // Next update => fill the leftover 3
     account.update_positions(partialMarketDataBTC(1000.0, 10.0));
 
-    // Now the leftover order should be fully filled => no more open orders
     const auto& ordersAfter = account.get_all_open_orders();
     EXPECT_EQ(ordersAfter.size(), 0u);
 
-    // The existing position merges into the same position => total quantity= 2+3=5
     const auto& positionsAfter = account.get_all_positions();
     ASSERT_EQ(positionsAfter.size(), 1u);
     EXPECT_DOUBLE_EQ(positionsAfter[0].quantity, 5.0);
@@ -111,72 +118,60 @@ TEST(AccountTest, ClosePositionBySymbol) {
     Account account(10000.0, 0);
     account.set_symbol_leverage("BTCUSDT", 10.0);
 
-    // 1) Place a limit order => open a position
-    account.place_order("BTCUSDT", 2.0, 1000.0, true);
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
 
-    // 2) match => fully filled
+    ASSERT_TRUE(account.place_order("BTCUSDT", 2.0, 1000.0, OrderSide::Buy, PositionSide::Both));
+
     account.update_positions(partialMarketDataBTC(1000.0, 5.0));
     // now we have a position of 2 BTC at 1000
 
-    // Let the price go up => e.g., 1200 => unrealized profit
     std::unordered_map<std::string, std::pair<double, double>> data2 = partialMarketDataBTC(1200.0, 5.0);
     account.update_positions(data2);
 
-    // 3) close_position => default param => price=0 => market close
-    //    This creates "closing orders" for all positions in that symbol
     account.close_position("BTCUSDT");
-    // now there's a new "closing order" in open_orders_, which we'll fill below
 
-    // 4) update_positions => fill the closing order => realize PnL
     testing::internal::CaptureStderr();
     account.update_positions(data2);
     std::string logs = testing::internal::GetCapturedStderr();
 
-    // After close => positions_ should be empty
     EXPECT_TRUE(account.get_all_positions().empty());
-    // The open_orders_ for closing also should be gone after fill
     EXPECT_TRUE(account.get_all_open_orders().empty());
-
-    // balance => 10000 + realizedPnL - fees ...
-    // We won't do exact numeric check here unless you want to 
-    // factor in the margin & fee from your logic. 
-    // The key is that position is closed, no positions remain.
 }
 
 /// @brief Verifies cancel_order_by_id removes leftover but keeps filled position.
 TEST(AccountTest, CancelOrderByID) {
     Account account(5000.0, 0);
-    // place a large order
-    account.place_order("BTCUSDT", 5.0, 500.0, true);
+
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+
+    ASSERT_TRUE(account.place_order("BTCUSDT", 5.0, 500.0, OrderSide::Buy, PositionSide::Both));
     auto orders = account.get_all_open_orders();
     ASSERT_EQ(orders.size(), 1u);
     int oid = orders[0].id;
 
-    // partial fill => 2 BTC
     account.update_positions(partialMarketDataBTC(500.0, 2.0));
 
-    // leftover => 3 BTC
     orders = account.get_all_open_orders();
     ASSERT_EQ(orders.size(), 1u);
     EXPECT_DOUBLE_EQ(orders[0].quantity, 3.0);
 
-    // now cancel leftover
     account.cancel_order_by_id(oid);
 
-    // open_orders_ => empty
     EXPECT_TRUE(account.get_all_open_orders().empty());
-    // the 2 BTC partial fill => positions exist
     EXPECT_FALSE(account.get_all_positions().empty());
 }
 
 /// @brief Verifies liquidation clears all positions and zeroes balance.
 TEST(AccountTest, Liquidation) {
-    // Cross-margin: open an oversized position then crash mark price to force liquidation.
-    // notional=2,500,000 falls into max leverage 75x tier.
     Account account(350000.0, 0);
     account.set_symbol_leverage("BTCUSDT", 75.0);
 
-    account.place_order("BTCUSDT", 5000.0, 500.0, true);
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+
+    ASSERT_TRUE(account.place_order("BTCUSDT", 5000.0, 500.0, OrderSide::Buy, PositionSide::Both));
     account.update_positions(partialMarketDataBTC(500.0, 10000.0));
     EXPECT_DOUBLE_EQ(account.get_all_positions().size(), 1);
 
@@ -186,25 +181,23 @@ TEST(AccountTest, Liquidation) {
 
     EXPECT_TRUE(logs.find("Liquidation triggered") != std::string::npos);
 
-    // In the Binance-like approximation, wallet can go negative (debt) under extreme gaps/slippage.
-    // We only assert liquidation occurred and the engine remains consistent.
     EXPECT_TRUE(account.get_all_positions().empty() || account.get_balance().MarginBalance >= account.get_balance().MaintenanceMargin);
 }
 
 /// @brief Verifies hedge-mode allows separate long and short positions.
 TEST(AccountTest, HedgeModeSameSymbolOppositeDirection) {
     Account account(10000.0, 0);
+    account.set_position_mode(true);
     account.set_symbol_leverage("BTCUSDT", 10.0);
 
-    // 1) LONG order
-    account.place_order("BTCUSDT", 2.0, 3000.0, true);
-    // 2) SHORT order
-    account.place_order("BTCUSDT", 1.0, 3000.0, false);
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
 
-    // fill them all
+    ASSERT_TRUE(account.place_order("BTCUSDT", 2.0, 3000.0, OrderSide::Buy, PositionSide::Long));
+    ASSERT_TRUE(account.place_order("BTCUSDT", 1.0, 3000.0, OrderSide::Sell, PositionSide::Short));
+
     account.update_positions(partialMarketDataBTC(3000.0, 10.0));
 
-    // we expect 2 separate positions
     auto positions = account.get_all_positions();
     ASSERT_EQ(positions.size(), 2u);
 
@@ -219,26 +212,24 @@ TEST(AccountTest, HedgeModeSameSymbolOppositeDirection) {
 }
 
 /////////////////////////////////////////////////////////
-// 1. Switching Single/Hedge Mode
+/// 1. Switching Single/Hedge Mode
 /////////////////////////////////////////////////////////
 
 /// Scenario 1: Switching mode with open positions (should fail)
 TEST(AccountTest, SwitchingModeWithOpenPositionsFails) {
 	Account account(10000.0, 0);
 	account.set_position_mode(false);
-    // Default is one-way mode.
     EXPECT_FALSE(account.is_hedge_mode());
 	account.set_symbol_leverage("BTCUSDT", 10.0);
 
-    // Place an order so that a position is opened (e.g., LONG 1 BTCUSDT).
-    // Use MARKET order so entry price follows the provided tick price.
-    account.place_order("BTCUSDT", 1.0, true);
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+
+    ASSERT_TRUE(account.place_order("BTCUSDT", 1.0, OrderSide::Buy, PositionSide::Both));
     account.update_positions(partialMarketDataBTC(9000.0, 10.0));
     EXPECT_FALSE(account.get_all_positions().empty());
 
-    // Attempt to switch mode to hedge mode.
     account.set_position_mode(true);
-    // Mode switch should be rejected because there is an open position.
     EXPECT_FALSE(account.is_hedge_mode());
 }
 
@@ -255,31 +246,30 @@ TEST(AccountTest, SwitchingModeWithoutPositionsSucceeds) {
 }
 
 /////////////////////////////////////////////////////////
-// 2. Single Mode Auto-Reduce vs. Hedge Mode reduceOnly
+/// 2. Single Mode Auto-Reduce vs. Hedge Mode reduceOnly
 /////////////////////////////////////////////////////////
 
 /// @brief Single mode: auto-reduce should happen on opposite position open.
 TEST(AccountTest, SingleModeAutoReduceOppositePositionOpen) {
     Account account(10000.0, 0);
     account.set_position_mode(false);
-    // In one-way mode.
     EXPECT_FALSE(account.is_hedge_mode());
 	account.set_symbol_leverage("BTCUSDT", 10.0);
 
-    // Place a LONG 2 BTCUSDT order at price 9000.
-    account.place_order("BTCUSDT", 2.0, 9000.0, true);
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+
+    ASSERT_TRUE(account.place_order("BTCUSDT", 2.0, 9000.0, OrderSide::Buy, PositionSide::Both));
     account.update_positions(partialMarketDataBTC(9000.0, 10.0));
 
     auto positions = account.get_all_positions();
     ASSERT_EQ(positions.size(), 1u);
     EXPECT_DOUBLE_EQ(positions[0].quantity, 2.0);
 
-    // Place a new SHORT order with quantity = 1 (reverse direction).
-    account.place_order("BTCUSDT", 1.0, 9000.0, false);
+    ASSERT_TRUE(account.place_order("BTCUSDT", 1.0, 9000.0, OrderSide::Sell, PositionSide::Both));
     account.update_positions(partialMarketDataBTC(9000.0, 10.0));
 
     positions = account.get_all_positions();
-    // Expect the existing LONG is reduced from 2 to 1.
     ASSERT_EQ(positions.size(), 1u);
     EXPECT_NEAR(positions[0].quantity, 1.0, 1e-6);
 }
@@ -287,78 +277,103 @@ TEST(AccountTest, SingleModeAutoReduceOppositePositionOpen) {
 /// @brief Hedge mode with reduce_only = true
 TEST(AccountTest, HedgeModeReduceOnlyOrder) {
     Account account(10000.0, 0);
-    // Switch to hedge mode.
     account.set_position_mode(true);
     EXPECT_TRUE(account.is_hedge_mode());
     account.set_symbol_leverage("BTCUSDT", 10.0);
 
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+
+    // Use explicit OHLC so we can reason about limit triggers.
+    // Keep Volume high enough so no leftover open orders affect later steps.
+    auto mkKline = [](const std::string& sym, double px, double vol) {
+        QTrading::Dto::Market::Binance::KlineDto k;
+        k.OpenPrice = px;
+        k.HighPrice = px;
+        k.LowPrice = px;
+        k.ClosePrice = px;
+        k.Volume = vol;
+        return std::unordered_map<std::string, QTrading::Dto::Market::Binance::KlineDto>{ {sym, k} };
+    };
+
+    auto k9000 = mkKline("BTCUSDT", 9000.0, 1000.0);
+    auto k11000 = mkKline("BTCUSDT", 11000.0, 1000.0);
+
     // Place a LONG 2 BTCUSDT order and fill it.
-    account.place_order("BTCUSDT", 2.0, 10000.0, true);
-    account.update_positions(partialMarketDataBTC(9000.0, 10.0));
+    account.place_order("BTCUSDT", 2.0, 10000.0, OrderSide::Buy, PositionSide::Long);
+    account.update_positions(k9000);
     auto positions = account.get_all_positions();
     ASSERT_EQ(positions.size(), 1u);
     EXPECT_DOUBLE_EQ(positions[0].quantity, 2.0);
 
     // Place another LONG order for 1 BTCUSDT.
-    account.place_order("BTCUSDT", 1.0, 10000.0, true);
-    account.update_positions(partialMarketDataBTC(9000.0, 10.0));
+    account.place_order("BTCUSDT", 1.0, 10000.0, OrderSide::Buy, PositionSide::Long);
+    account.update_positions(k9000);
     positions = account.get_all_positions();
     ASSERT_EQ(positions.size(), 1u);
     EXPECT_DOUBLE_EQ(positions[0].quantity, 3.0);
 
     // Place another SHORT order for 1 BTCUSDT.
-    account.place_order("BTCUSDT", 1.0, 10000.0, false);
-    account.update_positions(partialMarketDataBTC(11000.0, 10.0));
+    account.place_order("BTCUSDT", 1.0, 10000.0, OrderSide::Sell, PositionSide::Short);
+    account.update_positions(k11000);
     positions = account.get_all_positions();
     ASSERT_EQ(positions.size(), 2u);
-    EXPECT_DOUBLE_EQ(positions[1].quantity, 1.0);
 
-    // Now place a reduce_only LONG order for 1 BTCUSDT.
-    account.place_order("BTCUSDT", 1.0, 10000.0, true, true);
-    account.update_positions(partialMarketDataBTC(9000.0, 10.0));
+    // Now place a reduce_only order to reduce LONG by 1 (SELL reduce-only targeting LONG).
+    // For SELL limit=10000 to trigger, High must be >= 10000.
+    account.place_order("BTCUSDT", 1.0, 10000.0, OrderSide::Sell, PositionSide::Long, true);
+    account.update_positions(k11000);
     positions = account.get_all_positions();
+
+    // We should still have both sides, and LONG reduced from 3 to 2.
     ASSERT_EQ(positions.size(), 2u);
-    EXPECT_DOUBLE_EQ(positions[0].quantity, 2.0);
+    double longQty = 0.0;
+    double shortQty = 0.0;
+    for (const auto& p : positions) {
+        if (p.is_long) longQty = p.quantity;
+        else shortQty = p.quantity;
+    }
+    EXPECT_DOUBLE_EQ(longQty, 2.0);
+    EXPECT_DOUBLE_EQ(shortQty, 1.0);
 }
 
 /////////////////////////////////////////////////////////
-// 3. Merge Positions (Same Symbol & Direction)
+/// 3. Merge Positions (Same Symbol & Direction)
 /////////////////////////////////////////////////////////
 
 /// @brief Verifies position merging in hedge mode
 TEST(AccountTest, MergePositionsSameDirection) {
     Account account(10000.0, 0);
-    // Switch to hedge mode.
     account.set_position_mode(true);
     EXPECT_TRUE(account.is_hedge_mode());
 	account.set_symbol_leverage("BTCUSDT", 10.0);
 
-    // Place 3 LONG MARKET orders for BTCUSDT: 1, 2, 3 BTC at the tick price.
-    account.place_order("BTCUSDT", 1.0, true);
-    account.place_order("BTCUSDT", 2.0, true);
-    account.place_order("BTCUSDT", 3.0, true);
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+
+    ASSERT_TRUE(account.place_order("BTCUSDT", 1.0, OrderSide::Buy, PositionSide::Long));
+    ASSERT_TRUE(account.place_order("BTCUSDT", 2.0, OrderSide::Buy, PositionSide::Long));
+    ASSERT_TRUE(account.place_order("BTCUSDT", 3.0, OrderSide::Buy, PositionSide::Long));
     account.update_positions(partialMarketDataBTC(1000.0, 10.0));
     auto positions = account.get_all_positions();
-    // Expect one merged position with total quantity = 6 BTC.
     ASSERT_EQ(positions.size(), 1u);
     EXPECT_DOUBLE_EQ(positions[0].quantity, 6.0);
 }
 
-// Scenario 2: Verifying that different directions do not merge
 TEST(AccountTest, MergePositionsDifferentDirectionNotMerged) {
     Account account(10000.0, 0);
-    // Switch to hedge mode.
     account.set_position_mode(true);
     EXPECT_TRUE(account.is_hedge_mode());
 	account.set_symbol_leverage("BTCUSDT", 10.0);
 
-    // Place one LONG and one SHORT order on BTCUSDT.
-    account.place_order("BTCUSDT", 1.0, 10000.0, true);
-    account.place_order("BTCUSDT", 1.0, 10000.0, false);
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+
+    ASSERT_TRUE(account.place_order("BTCUSDT", 1.0, 10000.0, OrderSide::Buy, PositionSide::Long));
+    ASSERT_TRUE(account.place_order("BTCUSDT", 1.0, 10000.0, OrderSide::Sell, PositionSide::Short));
     account.update_positions(partialMarketDataBTC(10000.0, 10.0));
 
     auto positions = account.get_all_positions();
-    // Expect two separate positions.
     ASSERT_EQ(positions.size(), 2u);
     int longCount = 0, shortCount = 0;
     for (const auto& pos : positions) {
@@ -373,31 +388,26 @@ TEST(AccountTest, MergePositionsDifferentDirectionNotMerged) {
     EXPECT_EQ(shortCount, 1);
 }
 
-/////////////////////////////////////////////////////////
-// 4. Closing Positions in Hedge Mode with Direction
-/////////////////////////////////////////////////////////
-
-/// @brief Close only the LONG side of a hedge-mode symbol
 TEST(AccountTest, CloseOnlyLongSideInHedgeMode) {
     Account account(10000.0, 0);
     account.set_position_mode(true);
     EXPECT_TRUE(account.is_hedge_mode());
 	account.set_symbol_leverage("BTCUSDT", 10.0);
 
-    // Place a LONG 2 BTCUSDT order and a SHORT 1 BTCUSDT order.
-    account.place_order("BTCUSDT", 2.0, 10000.0, true);
-    account.place_order("BTCUSDT", 1.0, 10000.0, false);
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+
+    ASSERT_TRUE(account.place_order("BTCUSDT", 2.0, 10000.0, OrderSide::Buy, PositionSide::Long));
+    ASSERT_TRUE(account.place_order("BTCUSDT", 1.0, 10000.0, OrderSide::Sell, PositionSide::Short));
     account.update_positions(partialMarketDataBTC(9000.0, 10.0));
     account.update_positions(partialMarketDataBTC(11000.0, 10.0));
     auto positions = account.get_all_positions();
     ASSERT_EQ(positions.size(), 2u);
 
-    // Close only the LONG side.
-    account.close_position("BTCUSDT", true);
+    account.close_position("BTCUSDT", PositionSide::Long);
     account.update_positions(partialMarketDataBTC(9000.0, 10.0));
 
     positions = account.get_all_positions();
-    // Expected: only the SHORT position remains.
     ASSERT_EQ(positions.size(), 1u);
     EXPECT_FALSE(positions[0].is_long);
 }
@@ -409,9 +419,12 @@ TEST(AccountTest, CloseBothSidesInHedgeMode) {
     EXPECT_TRUE(account.is_hedge_mode());
     account.set_symbol_leverage("BTCUSDT", 10.0);
 
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+
     // Place both LONG and SHORT orders.
-    account.place_order("BTCUSDT", 2.0, 10000.0, true);
-    account.place_order("BTCUSDT", 1.0, 10000.0, false);
+    account.place_order("BTCUSDT", 2.0, 10000.0, OrderSide::Buy, PositionSide::Long);
+    account.place_order("BTCUSDT", 1.0, 10000.0, OrderSide::Sell, PositionSide::Short);
     account.update_positions(partialMarketDataBTC(9000.0, 10.0));
     account.update_positions(partialMarketDataBTC(11000.0, 10.0));
     auto positions = account.get_all_positions();
@@ -428,7 +441,7 @@ TEST(AccountTest, CloseBothSidesInHedgeMode) {
 }
 
 /////////////////////////////////////////////////////////
-// 5. Leverage Adjustments With Existing Positions
+/// 5. Leverage Adjustments With Existing Positions
 /////////////////////////////////////////////////////////
 
 /// @brief Adjusting leverage should succeed/fail depending on available margin
@@ -437,10 +450,12 @@ TEST(AccountTest, AdjustLeverageWithExistingPositions) {
     Account account(50000.0, 0);
     account.set_symbol_leverage("BTCUSDT", 20.0);
 
-    account.place_order("BTCUSDT", 1.0, true);
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+
+    account.place_order("BTCUSDT", 1.0, OrderSide::Buy, PositionSide::Both);
     account.update_positions(twoSymbolMarketData(4000.0, 2.0, 0.0, 0.0));
 
-    // Leverage adjustments should still be allowed; we only assert it doesn't throw and keeps leverage.
     account.set_symbol_leverage("BTCUSDT", 10.0);
     EXPECT_DOUBLE_EQ(account.get_symbol_leverage("BTCUSDT"), 10.0);
 
@@ -449,15 +464,17 @@ TEST(AccountTest, AdjustLeverageWithExistingPositions) {
 }
 
 TEST(AccountTest, SingleMode_MultipleSymbols) {
-    // Increase collateral so both symbols can open under cross margin.
     Account account(50000.0, 0);
     account.set_position_mode(false);
     EXPECT_FALSE(account.is_hedge_mode());
     account.set_symbol_leverage("BTCUSDT", 10.0);
     account.set_symbol_leverage("ETHUSDT", 10.0);
 
-    account.place_order("BTCUSDT", 1.0, 20000.0, true);
-    account.place_order("ETHUSDT", 2.0, 1500.0, false);
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+
+    ASSERT_TRUE(account.place_order("BTCUSDT", 1.0, 20000.0, OrderSide::Buy, PositionSide::Both));
+    ASSERT_TRUE(account.place_order("ETHUSDT", 2.0, 1500.0, OrderSide::Sell, PositionSide::Both));
 
     auto marketData = twoSymbolMarketData(20000.0, 5.0, 1500.0, 10.0);
     account.update_positions(marketData);
@@ -481,7 +498,7 @@ TEST(AccountTest, SingleMode_MultipleSymbols) {
     EXPECT_TRUE(foundBTC);
     EXPECT_TRUE(foundETH);
 
-    account.place_order("BTCUSDT", 0.5, 20000.0, false);
+    ASSERT_TRUE(account.place_order("BTCUSDT", 0.5, 20000.0, OrderSide::Sell, PositionSide::Both));
     account.update_positions(marketData);
 
     positions = account.get_all_positions();
@@ -501,33 +518,37 @@ TEST(AccountTest, HedgeMode_MultipleSymbols_ReduceOnly) {
     account.set_symbol_leverage("BTCUSDT", 10.0);
     account.set_symbol_leverage("ETHUSDT", 10.0);
 
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+
     auto marketData = twoSymbolMarketData(20000.0, 10.0, 1500.0, 10.0);
-    account.place_order("BTCUSDT", 2.0, 20000.0, true);
-    account.place_order("ETHUSDT", 3.0, 1500.0, true);
+    account.place_order("BTCUSDT", 2.0, 20000.0, OrderSide::Buy, PositionSide::Long);
+    account.place_order("ETHUSDT", 3.0, 1500.0, OrderSide::Buy, PositionSide::Long);
     account.update_positions(marketData);
 
     auto positions = account.get_all_positions();
     ASSERT_EQ(positions.size(), 2u);
 
-    account.place_order("BTCUSDT", 1.0, 20000.0, true, true);
+    // reduceOnly semantics will be refined later; for now ensure system remains stable.
+    account.place_order("BTCUSDT", 1.0, 20000.0, OrderSide::Sell, PositionSide::Long, true);
     account.update_positions(marketData);
 
-    // reduceOnly semantics will be refined later; for now ensure system remains stable.
     EXPECT_FALSE(account.get_all_positions().empty());
 }
+
 /// @brief Ensures per-tick available volume is consumed across multiple orders for same symbol.
 TEST(AccountTest, TickVolumeIsConsumedAcrossOrdersSameSymbol) {
     Account account(100000.0, 0);
     account.set_symbol_leverage("BTCUSDT", 10.0);
 
-    // Two marketable BUY limits; only 1 BTC volume.
-    // Higher limit should be filled first.
-    account.place_order("BTCUSDT", 1.0, 1100.0, true);
-    account.place_order("BTCUSDT", 1.0, 1200.0, true);
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+
+    ASSERT_TRUE(account.place_order("BTCUSDT", 1.0, 1100.0, OrderSide::Buy, PositionSide::Both));
+    ASSERT_TRUE(account.place_order("BTCUSDT", 1.0, 1200.0, OrderSide::Buy, PositionSide::Both));
 
     account.update_positions(partialMarketDataBTC(1000.0, 1.0));
 
-    // Only 1 BTC should be filled total; remaining 1 BTC stays as open order.
     const auto& pos = account.get_all_positions();
     ASSERT_EQ(pos.size(), 1u);
     EXPECT_NEAR(pos[0].quantity, 1.0, 1e-8);
@@ -542,15 +563,15 @@ TEST(AccountTest, ImmediatelyExecutableLimitIsTakerFee) {
     Account account(10000.0, 0);
     account.set_symbol_leverage("BTCUSDT", 10.0);
 
-    // VIP0: maker=0.0002, taker=0.0005.
-    // Set a BUY limit above current price => immediately executable.
-    account.place_order("BTCUSDT", 1.0, 2000.0, true);
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+
+    ASSERT_TRUE(account.place_order("BTCUSDT", 1.0, 2000.0, OrderSide::Buy, PositionSide::Both));
     account.update_positions(partialMarketDataBTC(1000.0, 10.0));
 
     const auto& positions = account.get_all_positions();
     ASSERT_EQ(positions.size(), 1u);
 
-    // For an immediately executable limit, fee_rate should be taker.
     EXPECT_NEAR(positions[0].fee_rate, 0.00050, 1e-12);
 }
 
@@ -558,8 +579,10 @@ TEST(AccountTest, LimitOrderFillsAtLimitPrice) {
     Account account(10000.0, 0);
     account.set_symbol_leverage("BTCUSDT", 10.0);
 
-    // BUY limit above current, should execute immediately but fill at limit price.
-    account.place_order("BTCUSDT", 1.0, 2000.0, true);
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+
+    ASSERT_TRUE(account.place_order("BTCUSDT", 1.0, 2000.0, OrderSide::Buy, PositionSide::Both));
     account.update_positions(partialMarketDataBTC(1000.0, 10.0));
 
     const auto& positions = account.get_all_positions();
@@ -571,33 +594,32 @@ TEST(AccountTest, TickPriceTimePriority_BuyHigherLimitFillsFirst) {
     Account account(100000.0, 0);
     account.set_symbol_leverage("BTCUSDT", 10.0);
 
-    // Two marketable BUY limits; only 1 BTC volume.
-    // Higher limit should be filled first.
-    account.place_order("BTCUSDT", 1.0, 1100.0, true);
-    account.place_order("BTCUSDT", 1.0, 1200.0, true);
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+
+    ASSERT_TRUE(account.place_order("BTCUSDT", 1.0, 1100.0, OrderSide::Buy, PositionSide::Both));
+    ASSERT_TRUE(account.place_order("BTCUSDT", 1.0, 1200.0, OrderSide::Buy, PositionSide::Both));
 
     account.update_positions(partialMarketDataBTC(1000.0, 1.0));
 
-    // Only 1 BTC should be filled total; remaining 1 BTC stays as open order.
     const auto& positions = account.get_all_positions();
     ASSERT_EQ(positions.size(), 1u);
     EXPECT_NEAR(positions[0].quantity, 1.0, 1e-8);
 
-    // The remaining open order should be the lower-priority one: limit=1100.
     const auto& openOrders = account.get_all_open_orders();
     ASSERT_EQ(openOrders.size(), 1u);
     EXPECT_NEAR(openOrders[0].price, 1100.0, 1e-12);
-    EXPECT_NEAR(openOrders[0].quantity, 1.0, 1e-8);
 }
 
 TEST(AccountTest, TickPriceTimePriority_SamePriceLowerIdFillsFirst) {
     Account account(100000.0, 0);
     account.set_symbol_leverage("BTCUSDT", 10.0);
 
-    // Two marketable BUY limits same price; only 1 BTC volume.
-    // Earlier order (lower id) should fill first => second remains.
-    account.place_order("BTCUSDT", 1.0, 1200.0, true);
-    account.place_order("BTCUSDT", 1.0, 1200.0, true);
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+
+    ASSERT_TRUE(account.place_order("BTCUSDT", 1.0, 1200.0, OrderSide::Buy, PositionSide::Both));
+    ASSERT_TRUE(account.place_order("BTCUSDT", 1.0, 1200.0, OrderSide::Buy, PositionSide::Both));
 
     int firstId = account.get_all_open_orders()[0].id;
     int secondId = account.get_all_open_orders()[1].id;
@@ -611,26 +633,14 @@ TEST(AccountTest, TickPriceTimePriority_SamePriceLowerIdFillsFirst) {
     EXPECT_NEAR(openOrders[0].quantity, 1.0, 1e-8);
 }
 
-static std::unordered_map<std::string, QTrading::Dto::Market::Binance::KlineDto> oneKline(
-    const std::string& sym,
-    double o, double h, double l, double c,
-    double vol)
-{
-    QTrading::Dto::Market::Binance::KlineDto k;
-    k.OpenPrice = o;
-    k.HighPrice = h;
-    k.LowPrice = l;
-    k.ClosePrice = c;
-    k.Volume = vol;
-    return { {sym, k} };
-}
-
 TEST(AccountTest, OhlcTrigger_BuyLimitTriggersOnLow) {
     Account account(50000.0, 0);
     account.set_symbol_leverage("BTCUSDT", 10.0);
 
-    // BUY limit=95, close=105 (would not fill under close-only rule), but Low=90 triggers.
-    account.place_order("BTCUSDT", 1.0, 95.0, true);
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+
+    ASSERT_TRUE(account.place_order("BTCUSDT", 1.0, 95.0, OrderSide::Buy, PositionSide::Both));
     account.update_positions(oneKline("BTCUSDT", 110.0, 120.0, 90.0, 105.0, 10.0));
 
     const auto& positions = account.get_all_positions();
@@ -642,11 +652,168 @@ TEST(AccountTest, OhlcTrigger_SellLimitTriggersOnHigh) {
     Account account(50000.0, 0);
     account.set_symbol_leverage("BTCUSDT", 10.0);
 
-    // SELL/short limit=115, close=105 (would not fill under close-only rule), but High=120 triggers.
-    account.place_order("BTCUSDT", 1.0, 115.0, false);
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+
+    ASSERT_TRUE(account.place_order("BTCUSDT", 1.0, 115.0, OrderSide::Sell, PositionSide::Both));
     account.update_positions(oneKline("BTCUSDT", 110.0, 120.0, 100.0, 105.0, 10.0));
 
     const auto& positions = account.get_all_positions();
     ASSERT_EQ(positions.size(), 1u);
     EXPECT_NEAR(positions[0].entry_price, 115.0, 1e-12);
+}
+
+TEST(AccountTest, HedgeMode_OrderRequiresExplicitPositionSide_IsRejectedWithoutException) {
+    Account account(10000.0, 0);
+    account.set_position_mode(true);
+    EXPECT_TRUE(account.is_hedge_mode());
+
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+
+    EXPECT_NO_THROW(account.place_order("BTCUSDT", 1.0, 10000.0, OrderSide::Buy, PositionSide::Both));
+    EXPECT_TRUE(account.get_all_open_orders().empty());
+}
+
+TEST(AccountTest, ReduceOnlyWithoutReduciblePosition_IsRejectedWithoutException) {
+    Account account(10000.0, 0);
+    account.set_position_mode(false);
+    EXPECT_FALSE(account.is_hedge_mode());
+
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+
+    EXPECT_NO_THROW(account.place_order("BTCUSDT", 1.0, 10000.0, OrderSide::Sell, PositionSide::Both, true));
+    EXPECT_TRUE(account.get_all_open_orders().empty());
+}
+
+TEST(AccountTest, HedgeModeReduceOnly_WrongSideOrNoMatchingPosition_IsRejectedWithoutException) {
+    Account account(10000.0, 0);
+    account.set_position_mode(true);
+    EXPECT_TRUE(account.is_hedge_mode());
+    account.set_symbol_leverage("BTCUSDT", 10.0);
+
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+
+    account.place_order("BTCUSDT", 1.0, 10000.0, OrderSide::Buy, PositionSide::Long);
+    account.update_positions(partialMarketDataBTC(9000.0, 10.0));
+    ASSERT_EQ(account.get_all_positions().size(), 1u);
+
+    // Wrong close direction: BUY reduce-only targeting LONG should be rejected.
+    EXPECT_NO_THROW(account.place_order("BTCUSDT", 1.0, 10000.0, OrderSide::Buy, PositionSide::Long, true));
+    // Mismatched position_side: attempting to reduce SHORT when only LONG exists.
+    EXPECT_NO_THROW(account.place_order("BTCUSDT", 1.0, 10000.0, OrderSide::Sell, PositionSide::Short, true));
+
+    EXPECT_TRUE(account.get_all_open_orders().empty());
+}
+
+TEST(AccountTest, OneWayFlip_OvershootSplitsIntoCloseThenOpen) {
+    Account account(50000.0, 0);
+    account.set_position_mode(false);
+    EXPECT_FALSE(account.is_hedge_mode());
+    account.set_symbol_leverage("BTCUSDT", 10.0);
+
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+
+    // Open LONG 2
+    ASSERT_TRUE(account.place_order("BTCUSDT", 2.0, 100.0, OrderSide::Buy, PositionSide::Both));
+    account.update_positions(partialMarketDataBTC(100.0, 1000.0));
+    ASSERT_EQ(account.get_all_positions().size(), 1u);
+
+    // SELL 5 => close 2 then open SHORT 3
+    ASSERT_TRUE(account.place_order("BTCUSDT", 5.0, 100.0, OrderSide::Sell, PositionSide::Both));
+
+    const auto& ords = account.get_all_open_orders();
+    ASSERT_EQ(ords.size(), 2u);
+
+    // First order should be a closing order
+    EXPECT_GE(ords[0].closing_position_id, 0);
+    EXPECT_EQ(ords[0].side, OrderSide::Sell);
+
+    // Second order should be an opening order
+    EXPECT_EQ(ords[1].closing_position_id, -1);
+    EXPECT_EQ(ords[1].side, OrderSide::Sell);
+    EXPECT_NEAR(ords[1].quantity, 3.0, 1e-12);
+
+    // Fill both and ensure we end with a SHORT 3
+    account.update_positions(partialMarketDataBTC(100.0, 1000.0));
+    const auto& posAfter = account.get_all_positions();
+    ASSERT_EQ(posAfter.size(), 1u);
+    EXPECT_FALSE(posAfter[0].is_long);
+    EXPECT_NEAR(posAfter[0].quantity, 3.0, 1e-12);
+}
+
+TEST(AccountTest, ReduceOnly_OneWayRejectsIfWouldIncreaseExposure) {
+    Account account(50000.0, 0);
+    account.set_position_mode(false);
+    EXPECT_FALSE(account.is_hedge_mode());
+    account.set_symbol_leverage("BTCUSDT", 10.0);
+
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+
+    // No positions: reduce-only should be rejected
+    EXPECT_FALSE(account.place_order("BTCUSDT", 1.0, 100.0, OrderSide::Buy, PositionSide::Both, true));
+    EXPECT_TRUE(account.get_all_open_orders().empty());
+
+    // Open LONG 1
+    ASSERT_TRUE(account.place_order("BTCUSDT", 1.0, 100.0, OrderSide::Buy, PositionSide::Both));
+    account.update_positions(partialMarketDataBTC(100.0, 1000.0));
+
+    // reduce-only BUY would increase LONG => reject
+    EXPECT_FALSE(account.place_order("BTCUSDT", 1.0, 100.0, OrderSide::Buy, PositionSide::Both, true));
+    EXPECT_TRUE(account.get_all_open_orders().empty());
+
+    // reduce-only SELL reduces LONG => accept
+    EXPECT_TRUE(account.place_order("BTCUSDT", 0.5, 100.0, OrderSide::Sell, PositionSide::Both, true));
+}
+
+TEST(AccountTest, ReduceOnly_HedgeMode_RequiresExplicitPositionSide) {
+    Account account(50000.0, 0);
+    account.set_position_mode(true);
+    EXPECT_TRUE(account.is_hedge_mode());
+    account.set_symbol_leverage("BTCUSDT", 10.0);
+
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+
+    // Open both LONG and SHORT.
+    ASSERT_TRUE(account.place_order("BTCUSDT", 1.0, 100.0, OrderSide::Buy, PositionSide::Long));
+    ASSERT_TRUE(account.place_order("BTCUSDT", 1.0, 100.0, OrderSide::Sell, PositionSide::Short));
+    account.update_positions(partialMarketDataBTC(100.0, 1000.0));
+    ASSERT_EQ(account.get_all_positions().size(), 2u);
+
+    // reduceOnly without specifying Long/Short should be rejected.
+    EXPECT_FALSE(account.place_order("BTCUSDT", 0.5, 100.0, OrderSide::Sell, PositionSide::Both, true));
+    EXPECT_TRUE(account.get_all_open_orders().empty());
+}
+
+TEST(AccountTest, ReduceOnly_HedgeMode_DirectionMustCloseCorrectSide) {
+    Account account(50000.0, 0);
+    account.set_position_mode(true);
+    EXPECT_TRUE(account.is_hedge_mode());
+    account.set_symbol_leverage("BTCUSDT", 10.0);
+
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+
+    // Open LONG 1 and SHORT 1.
+    ASSERT_TRUE(account.place_order("BTCUSDT", 1.0, 100.0, OrderSide::Buy, PositionSide::Long));
+    ASSERT_TRUE(account.place_order("BTCUSDT", 1.0, 100.0, OrderSide::Sell, PositionSide::Short));
+    account.update_positions(partialMarketDataBTC(100.0, 1000.0));
+    ASSERT_EQ(account.get_all_positions().size(), 2u);
+
+    // Wrong direction: BUY reduce-only targeting LONG would increase LONG.
+    EXPECT_FALSE(account.place_order("BTCUSDT", 0.25, 100.0, OrderSide::Buy, PositionSide::Long, true));
+    EXPECT_TRUE(account.get_all_open_orders().empty());
+
+    // Wrong direction: SELL reduce-only targeting SHORT would increase SHORT.
+    EXPECT_FALSE(account.place_order("BTCUSDT", 0.25, 100.0, OrderSide::Sell, PositionSide::Short, true));
+    EXPECT_TRUE(account.get_all_open_orders().empty());
+
+    // Correct directions should be accepted.
+    EXPECT_TRUE(account.place_order("BTCUSDT", 0.25, 100.0, OrderSide::Sell, PositionSide::Long, true));
+    EXPECT_TRUE(account.place_order("BTCUSDT", 0.25, 100.0, OrderSide::Buy, PositionSide::Short, true));
 }

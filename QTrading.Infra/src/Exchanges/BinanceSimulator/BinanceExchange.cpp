@@ -42,15 +42,23 @@ BinanceExchange::BinanceExchange(
     order_channel.reset(ChannelFactory::CreateBoundedChannel<std::vector<dto::Order>>(4, OverflowPolicy::DropOldest));
 }
 
-void BinanceExchange::place_order(const std::string& symbol,
-    double quantity, double price, bool is_long, bool reduce_only)
+bool BinanceExchange::place_order(const std::string& symbol,
+    double quantity,
+    double price,
+    QTrading::Dto::Trading::OrderSide side,
+    QTrading::Dto::Trading::PositionSide position_side,
+    bool reduce_only)
 {
-    account->place_order(symbol, quantity, price, is_long, reduce_only);
+    return account->place_order(symbol, quantity, price, side, position_side, reduce_only);
 }
 
-void BinanceExchange::place_order(const std::string& symbol, double quantity, bool is_long, bool reduce_only)
+bool BinanceExchange::place_order(const std::string& symbol,
+    double quantity,
+    QTrading::Dto::Trading::OrderSide side,
+    QTrading::Dto::Trading::PositionSide position_side,
+    bool reduce_only)
 {
-    account->place_order(symbol, quantity, is_long, reduce_only);
+    return account->place_order(symbol, quantity, side, position_side, reduce_only);
 }
 
 void BinanceExchange::close_position(const std::string& symbol, double price)
@@ -63,9 +71,11 @@ void BinanceExchange::close_position(const std::string& symbol)
     account->close_position(symbol);
 }
 
-void BinanceExchange::close_position(const std::string& symbol, bool is_long, double price)
+void BinanceExchange::close_position(const std::string& symbol,
+    QTrading::Dto::Trading::PositionSide position_side,
+    double price)
 {
-    account->close_position(symbol, is_long, price);
+    account->close_position(symbol, position_side, price);
 }
 
 /// @brief Advance one bar of simulation: emit market data & debounced updates.

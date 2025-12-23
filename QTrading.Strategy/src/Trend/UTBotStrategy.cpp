@@ -6,6 +6,9 @@ using namespace QTrading;
 using namespace QTrading::Dto::Market::Binance;
 using namespace QTrading::DataPreprocess::Dto;
 using namespace QTrading::Strategy;
+using QTrading::Dto::Trading::OrderSide;
+using QTrading::Dto::Trading::PositionSide;
+
 
 /// @brief Construct a UTBotStrategy instance.
 /// @param ex Exchange interface for order execution.
@@ -72,8 +75,8 @@ void UTBotStrategy::process_symbol(const std::string& sym,
 
     if (newPos != S.pos) {
 		ex->close_position(sym);  // close existing position
-        if (newPos == 1) ex->place_order(sym, qty, false);  // LONG mkt
-        if (newPos == -1) ex->place_order(sym, qty, false);  // SHORT mkt
+        if (newPos == 1) (void)ex->place_order(sym, qty, 0.0, OrderSide::Buy, PositionSide::Both, false);
+        if (newPos == -1) (void)ex->place_order(sym, qty, 0.0, OrderSide::Sell, PositionSide::Both, false);
         S.pos = newPos;
     }
 

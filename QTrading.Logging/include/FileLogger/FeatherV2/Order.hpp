@@ -2,6 +2,7 @@
 
 #include "FileLogger/FeatherV2.hpp"
 #include "Dto/Order.hpp"
+#include "Dto/Trading/Side.hpp"
 
 namespace QTrading::Log::FileLogger::FeatherV2::Order {
     /// @brief Arrow schema for order logs.
@@ -26,7 +27,7 @@ namespace QTrading::Log::FileLogger::FeatherV2::Order {
         b.GetFieldAs<arrow::StringBuilder>(2)->Append(o->symbol);
         b.GetFieldAs<arrow::DoubleBuilder>(3)->Append(o->quantity);
         b.GetFieldAs<arrow::DoubleBuilder>(4)->Append(o->price);
-        b.GetFieldAs<arrow::BooleanBuilder>(5)->Append(o->is_long);
+        b.GetFieldAs<arrow::BooleanBuilder>(5)->Append(o->side == QTrading::Dto::Trading::OrderSide::Buy);
         b.GetFieldAs<arrow::BooleanBuilder>(6)->Append(o->reduce_only);
         b.GetFieldAs<arrow::Int32Builder>(7)->Append(o->closing_position_id);
         };

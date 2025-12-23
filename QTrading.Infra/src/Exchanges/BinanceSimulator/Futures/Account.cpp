@@ -7,6 +7,39 @@
 #include <unordered_map>
 
 using QTrading::Dto::Market::Binance::KlineDto;
+using QTrading::Dto::Trading::OrderSide;
+using QTrading::Dto::Trading::PositionSide;
+
+namespace {
+
+static bool order_closes_position(const Order& ord, const Position& pos, bool hedge_mode)
+{
+    if (pos.symbol != ord.symbol) return false;
+
+    const bool is_buy = (ord.side == OrderSide::Buy);
+    const bool close_dir_ok = (pos.is_long && !is_buy) || (!pos.is_long && is_buy);
+    if (!close_dir_ok) return false;
+
+    if (!hedge_mode) {
+        // One-way: only one net position, any opposite-side action reduces.
+        return true;
+    }
+
+    // Hedge: must target correct side.
+    if (ord.position_side == PositionSide::Both) return false;
+    const bool target_long = (ord.position_side == PositionSide::Long);
+    return target_long == pos.is_long;
+}
+
+static bool has_reducible_position(const std::vector<Position>& positions, const Order& ord, bool hedge_mode)
+{
+    for (const auto& p : positions) {
+        if (order_closes_position(ord, p, hedge_mode)) return true;
+    }
+    return false;
+}
+
+} // namespace
 
 /// @brief Simulated Binance Futures Account implementation.
 /// @details Supports one-way and hedge modes, order matching, margin, fees, and auto-liquidation.
@@ -159,44 +192,76 @@ int Account::generate_position_id() {
 /// @param price        Limit price (>0) or market (<=0).
 /// @param is_long      true = long; false = short.
 /// @param reduce_only  If true, only reduce existing positions.
-void Account::place_order(const std::string& symbol,
+bool Account::place_order(const std::string& symbol,
     double quantity,
     double price,
-    bool is_long,
+    OrderSide side,
+    PositionSide position_side,
     bool reduce_only)
 {
     if (quantity <= 0) {
         std::cerr << "[place_order] Invalid quantity <= 0\n";
-        return;
+        return false;
     }
 
-    // In one‑way mode, attempt to process reverse orders.
+    if (!hedge_mode_ && position_side != PositionSide::Both) {
+        position_side = PositionSide::Both;
+    }
+
+    // Binance-like: in hedge mode the caller must specify Long/Short (no inference).
+    if (hedge_mode_ && position_side == PositionSide::Both) {
+        std::cerr << "[place_order] Hedge-mode order must specify position_side (Long/Short).\n";
+        return false;
+    }
+
+    // In one-way mode, attempt to process reverse (flip) orders.
     if (!hedge_mode_) {
-        if (handleOneWayReverseOrder(symbol, quantity, price, is_long))
-            return; // Reverse order processed.
+        if (handleOneWayReverseOrder(symbol, quantity, price, side))
+            return true;
     }
 
-    // Otherwise, create a new order.
+    // A: reduceOnly reject policy on placement (do not add to open_orders_).
+    // C: no exceptions; just return.
+    if (reduce_only) {
+        Order check{
+            -1,
+            symbol,
+            quantity,
+            price,
+            side,
+            position_side,
+            true,
+            -1
+        };
+
+        if (!has_reducible_position(positions_, check, hedge_mode_)) {
+            std::cerr << "[place_order] reduce_only rejected: no reducible position.\n";
+            return false;
+        }
+    }
+
     int oid = generate_order_id();
     Order newOrd{
         oid,
         symbol,
         quantity,
         price,
-        is_long,
+        side,
+        position_side,
         reduce_only,
         -1
     };
     open_orders_.push_back(newOrd);
+    return true;
 }
 
-/// @brief Convenience overload for market orders (price = 0).
-/// @param symbol       Trading symbol.
-/// @param quantity     Amount to trade.
-/// @param is_long      true = long; false = short.
-/// @param reduce_only  If true, only reduce existing positions.
-void Account::place_order(const std::string& symbol, double quantity, bool is_long, bool reduce_only) {
-    place_order(symbol, quantity, 0.0, is_long, reduce_only);
+bool Account::place_order(const std::string& symbol,
+    double quantity,
+    OrderSide side,
+    PositionSide position_side,
+    bool reduce_only)
+{
+    return place_order(symbol, quantity, 0.0, side, position_side, reduce_only);
 }
 
 /// @brief Handle a reverse order in one-way mode (auto-reduce or reverse).
@@ -205,75 +270,76 @@ void Account::place_order(const std::string& symbol, double quantity, bool is_lo
 /// @param price     Order price.
 /// @param is_long   Direction of the new order.
 /// @return true if the order was converted into a closing/reverse order.
-bool Account::handleOneWayReverseOrder(const std::string& symbol, double quantity, double price, bool is_long) {
+bool Account::handleOneWayReverseOrder(const std::string& symbol, double quantity, double price, OrderSide side) {
+    // In one-way mode we maintain at most one net position per symbol.
     for (auto& pos : positions_) {
-        if (pos.symbol == symbol) {
-            if (pos.is_long == is_long) {
-                // Same direction: treat as adding to position.
-                return false;
-            }
-            // Reverse order: process reduction.
-            double pos_qty = pos.quantity;
-            double order_qty = quantity;
-            if (order_qty < pos_qty) {
-                int oid = generate_order_id();
-                Order closingOrd{
-                    oid,
-                    symbol,
-                    order_qty,
-                    price,
-                    pos.is_long,
-                    false,
-                    pos.id
-                };
-                open_orders_.push_back(closingOrd);
-                return true;
-            }
-            else if (order_qty == pos_qty) {
-                int oid = generate_order_id();
-                Order closingOrd{
-                    oid,
-                    symbol,
-                    order_qty,
-                    price,
-                    pos.is_long,
-                    false,
-                    pos.id
-                };
-                open_orders_.push_back(closingOrd);
-                return true;
-            }
-            else {
-                // order_qty > pos_qty: first close the existing position, then open a new reverse position.
-                double closeQty = pos_qty;
-                {
-                    int oid = generate_order_id();
-                    Order closingOrd{
-                        oid,
-                        symbol,
-                        closeQty,
-                        price,
-                        pos.is_long,
-                        false,
-                        pos.id
-                    };
-                    open_orders_.push_back(closingOrd);
-                }
-                double newOpenQty = order_qty - closeQty;
-                int openOid = generate_order_id();
-                Order newOpen{
-                    openOid,
-                    symbol,
-                    newOpenQty,
-                    price,
-                    is_long,   // New position direction
-                    false,
-                    -1
-                };
-                open_orders_.push_back(newOpen);
-                return true;
-            }
+        if (pos.symbol != symbol) continue;
+
+        const bool posIsLong = pos.is_long;
+        const bool orderIsBuy = (side == OrderSide::Buy);
+
+        // Same-direction add: BUY with long position, or SELL with short position.
+        if ((posIsLong && orderIsBuy) || (!posIsLong && !orderIsBuy)) {
+            return false;
         }
+
+        // Reverse-direction: this is a reduce/flip.
+        double pos_qty = pos.quantity;
+        double order_qty = quantity;
+
+        // This is a closing action, so create a closing order targeting the existing position id.
+        // Closing direction is opposite the position: long closes via SELL, short closes via BUY.
+        const OrderSide closeSide = posIsLong ? OrderSide::Sell : OrderSide::Buy;
+
+        if (order_qty <= pos_qty) {
+            int oid = generate_order_id();
+            Order closingOrd{
+                oid,
+                symbol,
+                order_qty,
+                price,
+                closeSide,
+                PositionSide::Both,
+                false,
+                pos.id
+            };
+            open_orders_.push_back(closingOrd);
+            return true;
+        }
+
+        // order_qty > pos_qty: first close the existing position, then open a new reverse position.
+        {
+            int oid = generate_order_id();
+            Order closingOrd{
+                oid,
+                symbol,
+                pos_qty,
+                price,
+                closeSide,
+                PositionSide::Both,
+                false,
+                pos.id
+            };
+            open_orders_.push_back(closingOrd);
+        }
+
+        const double newOpenQty = order_qty - pos_qty;
+        const OrderSide openSide = side;
+        {
+            int openOid = generate_order_id();
+            Order newOpen{
+                openOid,
+                symbol,
+                newOpenQty,
+                price,
+                openSide,
+                PositionSide::Both,
+                false,
+                -1
+            };
+            open_orders_.push_back(newOpen);
+        }
+        return true;
     }
     return false;
 }
@@ -286,13 +352,15 @@ void Account::place_closing_order(int position_id, double quantity, double price
     for (const auto& pos : positions_) {
         if (pos.id == position_id) {
             int oid = generate_order_id();
+            const OrderSide closeSide = pos.is_long ? OrderSide::Sell : OrderSide::Buy;
             Order closingOrd{
                 oid,
                 pos.symbol,
                 quantity,
                 price,
-                !pos.is_long,
-                false,  // reduce_only is false for closing orders.
+                closeSide,
+                hedge_mode_ ? (pos.is_long ? PositionSide::Long : PositionSide::Short) : PositionSide::Both,
+                false,
                 position_id
             };
             open_orders_.push_back(closingOrd);
@@ -375,39 +443,28 @@ void Account::update_positions(const std::unordered_map<std::string, KlineDto>& 
     double makerFee, takerFee;
     std::tie(makerFee, takerFee) = get_fee_rates();
 
-    // Track remaining volume per symbol for this tick.
     std::unordered_map<std::string, double> remaining_vol;
     remaining_vol.reserve(symbol_kline.size());
     for (const auto& kv : symbol_kline) {
         remaining_vol.emplace(kv.first, kv.second.Volume);
     }
 
-    // Helper: decide whether an order can fill for this kline, and whether it's taker.
-    // Trigger logic (OHLC):
-    //  - Market: always fills, price uses ClosePrice
-    //  - Buy limit: triggers if LowPrice <= limit
-    //  - Sell limit: triggers if HighPrice >= limit
-    // Taker logic (simplified):
-    //  - Market is taker
-    //  - Limit that is immediately executable at the close is treated as taker
-    //    (keeps previous behavior while upgrading trigger to OHLC).
     auto can_fill_and_taker = [](const Order& ord, const KlineDto& k) -> std::pair<bool, bool> {
         const bool is_market = (ord.price <= 0.0);
         if (is_market) {
             return { true, true };
         }
 
-        const bool triggered = (ord.is_long ? (k.LowPrice <= ord.price) : (k.HighPrice >= ord.price));
+        const bool is_buy = (ord.side == OrderSide::Buy);
+        const bool triggered = (is_buy ? (k.LowPrice <= ord.price) : (k.HighPrice >= ord.price));
         if (!triggered) {
             return { false, false };
         }
 
-        // For now, keep the same taker classification rule as before: marketable at close => taker.
-        const bool marketable_at_close = (ord.is_long ? (k.ClosePrice <= ord.price) : (k.ClosePrice >= ord.price));
+        const bool marketable_at_close = (is_buy ? (k.ClosePrice <= ord.price) : (k.ClosePrice >= ord.price));
         return { true, marketable_at_close };
     };
 
-    // Prepare indices grouped per symbol.
     std::unordered_map<std::string, std::vector<size_t>> per_symbol;
     per_symbol.reserve(symbol_kline.size());
     for (size_t i = 0; i < open_orders_.size(); ++i) {
@@ -444,10 +501,13 @@ void Account::update_positions(const std::unordered_map<std::string, KlineDto>& 
 
             const bool Am = (A.price <= 0.0);
             const bool Bm = (B.price <= 0.0);
-            if (Am != Bm) return Am; // market first
+            if (Am != Bm) return Am;
 
-            if (!Am && A.is_long == B.is_long) {
-                if (A.is_long) {
+            const bool A_is_buy = (A.side == OrderSide::Buy);
+            const bool B_is_buy = (B.side == OrderSide::Buy);
+
+            if (!Am && A_is_buy == B_is_buy) {
+                if (A_is_buy) {
                     if (A.price != B.price) return A.price > B.price;
                 }
                 else {
@@ -547,7 +607,7 @@ void Account::update_positions(const std::unordered_map<std::string, KlineDto>& 
             snapshot = get_balance();
             if (positions_.empty()) break;
             if (snapshot.MarginBalance >= snapshot.MaintenanceMargin) break;
-            if (wallet_balance_ <= 0.0) break;
+            // Do not stop liquidation based on wallet being <= 0; wallet may go negative in extreme cases.
 
             // Find most losing position (minimum unrealized PnL)
             int worst_idx = -1;
@@ -609,12 +669,14 @@ void Account::update_positions(const std::unordered_map<std::string, KlineDto>& 
             remaining_vol[pos.symbol] = volAvail - close_qty;
 
             // Build a synthetic closing order against this position.
+            const OrderSide liqSide = pos.is_long ? OrderSide::Sell : OrderSide::Buy;
             Order liqOrd{
                 -999999, // synthetic
                 pos.symbol,
                 close_qty,
                 liq_price,
-                !pos.is_long, // closing direction
+                liqSide,
+                PositionSide::Both,
                 false,
                 pos.id
             };
@@ -716,33 +778,34 @@ void Account::processClosingOrder(Order& ord, double fill_qty, double fill_price
 
 /// @brief Process a reduce_only opening order fill.
 bool Account::processReduceOnlyOrder(Order& ord, double fill_qty, double fill_price, double fee, std::vector<Order>& leftover) {
-    for (auto& pos : positions_) {
-        if (pos.symbol == ord.symbol && pos.is_long == ord.is_long) {
-            double close_qty = std::min(fill_qty, pos.quantity);
-            double realized_pnl = (fill_price - pos.entry_price) * close_qty * (pos.is_long ? 1.0 : -1.0);
-
-            double ratio = close_qty / pos.quantity;
-            double freed_margin = pos.initial_margin * ratio;
-            double freed_maint = pos.maintenance_margin * ratio;
-            double freed_fee = pos.fee * ratio;
-
-            wallet_balance_ += realized_pnl;
-            wallet_balance_ -= fee;
-
-            used_margin_ -= freed_margin;
-
-            pos.quantity -= close_qty;
-            pos.initial_margin -= freed_margin;
-            pos.maintenance_margin -= freed_maint;
-            pos.fee -= freed_fee;
-            pos.notional = pos.entry_price * pos.quantity;
-
-            ord.quantity -= close_qty;
-            if (ord.quantity > 1e-8)
-                leftover.push_back(ord);
-            return true;
-        }
+    // Use the same eligibility predicate as placement-time to keep semantics consistent.
+    if (!has_reducible_position(positions_, ord, hedge_mode_)) {
+        return false;
     }
+
+    for (auto& pos : positions_) {
+        if (!order_closes_position(ord, pos, hedge_mode_)) continue;
+
+        Order closeOrd{
+            ord.id,
+            ord.symbol,
+            ord.quantity,
+            ord.price,
+            ord.side,
+            hedge_mode_ ? ord.position_side : PositionSide::Both,
+            ord.reduce_only,
+            pos.id
+        };
+
+        std::vector<Order> tmp;
+        tmp.reserve(1);
+        processClosingOrder(closeOrd, fill_qty, fill_price, fee, tmp);
+
+        ord.quantity = closeOrd.quantity;
+        if (ord.quantity > 1e-8) leftover.push_back(ord);
+        return true;
+    }
+
     return false;
 }
 
@@ -769,19 +832,29 @@ void Account::processNormalOpeningOrder(Order& ord, double fill_qty, double fill
         return;
     }
 
+    // Hedge-mode requires explicit position side to disambiguate intent.
+    if (hedge_mode_ && ord.position_side == PositionSide::Both) {
+        std::cerr << "[processNormalOpeningOrder] Hedge-mode order must specify position_side (Long/Short). id=" << ord.id << "\n";
+        leftover.push_back(ord);
+        return;
+    }
+
     wallet_balance_ -= fee;
     used_margin_ += init_margin;
 
     auto pm = order_to_position_.find(ord.id);
     if (pm == order_to_position_.end()) {
         int pid = generate_position_id();
+        const bool pos_is_long = hedge_mode_
+            ? (ord.position_side == PositionSide::Long)
+            : (ord.side == OrderSide::Buy);
         positions_.push_back(Position{
             pid,
             ord.id,
             ord.symbol,
             fill_qty,
             fill_price,
-            ord.is_long,
+            pos_is_long,
             0.0,
             notional,
             init_margin,
@@ -857,16 +930,32 @@ void Account::close_position(const std::string& symbol) {
 }
 
 /// @brief Close only one side in hedge mode.
-void Account::close_position(const std::string& symbol, bool is_long, double price) {
+void Account::close_position(const std::string& symbol, QTrading::Dto::Trading::PositionSide position_side, double price) {
+    if (!hedge_mode_) {
+        // One-way: only Both is valid.
+        if (position_side != PositionSide::Both) {
+            std::cerr << "[close_position] One-way mode requires position_side=Both\n";
+            return;
+        }
+        close_position(symbol, price);
+        return;
+    }
+
+    if (position_side == PositionSide::Both) {
+        close_position(symbol, price);
+        return;
+    }
+
+    const bool want_long = (position_side == PositionSide::Long);
     bool found = false;
     for (const auto& pos : positions_) {
-        if (pos.symbol == symbol && pos.is_long == is_long) {
+        if (pos.symbol == symbol && pos.is_long == want_long) {
             found = true;
             place_closing_order(pos.id, pos.quantity, price);
         }
     }
     if (!found) {
-        std::cerr << "[close_position] No " << (is_long ? "LONG" : "SHORT")
+        std::cerr << "[close_position] No " << (want_long ? "LONG" : "SHORT")
             << " position found for symbol=" << symbol << "\n";
     }
 }
@@ -962,7 +1051,7 @@ bool Account::adjust_position_leverage(const std::string& symbol, double oldLev,
         balance_ += std::fabs(totalDiff);
         used_margin_ -= std::fabs(totalDiff);
     }
-    for (size_t i = 0; i < related.size(); ++i) {
+    for (size_t i = 0; i < related.size(); i++) {
         Position& p = related[i].get();
         p.initial_margin = p.notional / newLev;
         p.leverage = newLev;

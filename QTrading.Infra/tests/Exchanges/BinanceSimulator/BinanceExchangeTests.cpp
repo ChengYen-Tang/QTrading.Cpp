@@ -138,8 +138,11 @@ TEST_F(BinanceExchangeFixture, PushOnlyOnChange)
     EXPECT_FALSE(oCh->TryReceive().has_value());
     EXPECT_FALSE(pCh->TryReceive().has_value());
 
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+
     /* ---- create an order -> should appear next step -- */
-    ex.place_order("BTCUSDT", 1.0, 1.0, true);
+    ASSERT_TRUE(ex.place_order("BTCUSDT", 1.0, 1.0, OrderSide::Buy, PositionSide::Both, false));
 
     ex.step();     mCh->Receive();
     auto ordSnap = oCh->Receive();
@@ -172,9 +175,12 @@ TEST_F(BinanceExchangeFixture, SnapshotConsistent)
     // 1) No positions yet
     EXPECT_TRUE(ex.get_all_positions().empty());
 
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+
     // 2) Place market order 0.5 BTC long
-    ex.place_order("BTCUSDT", 0.5, 0.0, true);
-    ex.step();                    // fills immediately
+    ASSERT_TRUE(ex.place_order("BTCUSDT", 0.5, 0.0, OrderSide::Buy, PositionSide::Both, false));
+    ex.step();
 
     EXPECT_EQ(ex.get_all_positions().size(), 1u);
     EXPECT_TRUE(ex.get_all_open_orders().empty());
