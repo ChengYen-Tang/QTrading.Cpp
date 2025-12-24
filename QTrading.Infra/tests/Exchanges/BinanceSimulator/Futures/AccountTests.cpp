@@ -805,15 +805,81 @@ TEST(AccountTest, ReduceOnly_HedgeMode_DirectionMustCloseCorrectSide) {
     account.update_positions(partialMarketDataBTC(100.0, 1000.0));
     ASSERT_EQ(account.get_all_positions().size(), 2u);
 
-    // Wrong direction: BUY reduce-only targeting LONG would increase LONG.
+    // Wrong direction: BUY reduce-only targeting LONG should be rejected.
     EXPECT_FALSE(account.place_order("BTCUSDT", 0.25, 100.0, OrderSide::Buy, PositionSide::Long, true));
     EXPECT_TRUE(account.get_all_open_orders().empty());
 
-    // Wrong direction: SELL reduce-only targeting SHORT would increase SHORT.
+    // Wrong direction: SELL reduce-only targeting SHORT should be rejected.
     EXPECT_FALSE(account.place_order("BTCUSDT", 0.25, 100.0, OrderSide::Sell, PositionSide::Short, true));
     EXPECT_TRUE(account.get_all_open_orders().empty());
 
     // Correct directions should be accepted.
     EXPECT_TRUE(account.place_order("BTCUSDT", 0.25, 100.0, OrderSide::Sell, PositionSide::Long, true));
     EXPECT_TRUE(account.place_order("BTCUSDT", 0.25, 100.0, OrderSide::Buy, PositionSide::Short, true));
+}
+
+TEST(AccountTest, OpenOrderInitialMargin_MarketOrderUsesLastMarkWithBuffer) {
+    Account account(10000.0, 0);
+    account.set_position_mode(false);
+    account.set_symbol_leverage("BTCUSDT", 10.0);
+    account.set_market_slippage_buffer(0.0); // deterministic
+
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+
+    // Establish last mark=100
+    account.update_positions(oneKline("BTCUSDT", 100.0, 100.0, 100.0, 100.0, 1000.0));
+
+    ASSERT_TRUE(account.place_order("BTCUSDT", 2.0, 0.0, OrderSide::Buy, PositionSide::Both));
+
+    auto bal = account.get_balance();
+    // notional = 2*100, lev=10 => 20
+    EXPECT_NEAR(bal.OpenOrderInitialMargin, 20.0, 1e-12);
+}
+
+TEST(AccountTest, OpenOrderInitialMargin_OneWayClosingDirectionDoesNotReserveMargin) {
+    Account account(50000.0, 0);
+    account.set_position_mode(false);
+    account.set_symbol_leverage("BTCUSDT", 10.0);
+    account.set_market_slippage_buffer(0.0);
+
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+
+    // mark=100
+    account.update_positions(oneKline("BTCUSDT", 100.0, 100.0, 100.0, 100.0, 1000.0));
+
+    // Open LONG 1 and fill.
+    ASSERT_TRUE(account.place_order("BTCUSDT", 1.0, 100.0, OrderSide::Buy, PositionSide::Both));
+    account.update_positions(oneKline("BTCUSDT", 100.0, 100.0, 100.0, 100.0, 1000.0));
+
+    // Place SELL limit (closing direction) qty<=pos => will be a closing order w/ closing_position_id
+    ASSERT_TRUE(account.place_order("BTCUSDT", 0.5, 100.0, OrderSide::Sell, PositionSide::Both));
+
+    auto bal = account.get_balance();
+    EXPECT_NEAR(bal.OpenOrderInitialMargin, 0.0, 1e-12);
+}
+
+TEST(AccountTest, OpenOrderInitialMargin_OneWayFlipReservesOnlyForOpeningOvershoot) {
+    Account account(50000.0, 0);
+    account.set_position_mode(false);
+    account.set_symbol_leverage("BTCUSDT", 10.0);
+    account.set_market_slippage_buffer(0.0);
+
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+
+    // mark=100
+    account.update_positions(oneKline("BTCUSDT", 100.0, 100.0, 100.0, 100.0, 1000.0));
+
+    // Open LONG 2 and fill.
+    ASSERT_TRUE(account.place_order("BTCUSDT", 2.0, 100.0, OrderSide::Buy, PositionSide::Both));
+    account.update_positions(oneKline("BTCUSDT", 100.0, 100.0, 100.0, 100.0, 1000.0));
+
+    // SELL 5 => split into close 2 + open short 3
+    ASSERT_TRUE(account.place_order("BTCUSDT", 5.0, 100.0, OrderSide::Sell, PositionSide::Both));
+
+    auto bal = account.get_balance();
+    // Only overshoot 3 should reserve: 3*100/10 = 30
+    EXPECT_NEAR(bal.OpenOrderInitialMargin, 30.0, 1e-12);
 }

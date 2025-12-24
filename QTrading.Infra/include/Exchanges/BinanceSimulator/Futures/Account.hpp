@@ -9,6 +9,7 @@
 #include "Dto/Market/Binance/Kline.hpp"
 #include "Dto/Account/BalanceSnapshot.hpp"
 #include "Dto/Trading/Side.hpp"
+#include <optional>
 
 using namespace QTrading::dto;
 
@@ -61,6 +62,8 @@ public:
     const std::vector<Order>& get_all_open_orders() const;
     const std::vector<Position>& get_all_positions() const;
 
+    void set_market_slippage_buffer(double pct);
+
 private:
     double balance_;
     double wallet_balance_;
@@ -78,6 +81,12 @@ private:
     std::vector<Position> positions_;
 
     std::unordered_map<int, int> order_to_position_;
+
+    // Last known mark/close price per symbol (from kline ClosePrice). Used for market-order notional estimation.
+    std::unordered_map<std::string, double> last_mark_price_;
+
+    // For market orders, notional is estimated as qty * mark * (1 + buffer).
+    double market_slippage_buffer_{ 0.005 };
 
     inline int generate_order_id();
     inline int generate_position_id();

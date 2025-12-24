@@ -39,6 +39,33 @@ static bool has_reducible_position(const std::vector<Position>& positions, const
     return false;
 }
 
+static bool order_opens_in_hedge_mode(const Order& o)
+{
+    const bool is_buy = (o.side == OrderSide::Buy);
+    // Long opens with BUY, Short opens with SELL.
+    if ((o.position_side == PositionSide::Long && is_buy) ||
+        (o.position_side == PositionSide::Short && !is_buy)) {
+        return true;
+    }
+    return false;
+}
+
+static bool order_reserves_open_margin(const Order& o)
+{
+    // Do not reserve for explicit closing orders or reduce-only orders.
+    if (o.closing_position_id >= 0) return false;
+    if (o.reduce_only) return false;
+
+    // One-way orders use PositionSide::Both.
+    if (o.position_side == PositionSide::Both) {
+        // With flip splitting, any remaining opening order can increase exposure.
+        return true;
+    }
+
+    // Hedge: reserve only for opening-direction orders.
+    return order_opens_in_hedge_mode(o);
+}
+
 } // namespace
 
 /// @brief Simulated Binance Futures Account implementation.
@@ -60,7 +87,9 @@ static QTrading::Dto::Account::BalanceSnapshot build_snapshot(
     double wallet_balance,
     const std::vector<Position>& positions,
     const std::vector<Order>& open_orders,
-    const std::unordered_map<std::string, double>& symbol_leverage)
+    const std::unordered_map<std::string, double>& symbol_leverage,
+    const std::unordered_map<std::string, double>& last_mark_price,
+    double market_slippage_buffer)
 {
     QTrading::Dto::Account::BalanceSnapshot s;
     s.WalletBalance = wallet_balance;
@@ -80,15 +109,34 @@ static QTrading::Dto::Account::BalanceSnapshot build_snapshot(
     s.PositionInitialMargin = posInit;
     s.MaintenanceMargin = maint;
 
-    double openOrdInit = 0.0;
-    for (const auto& o : open_orders) {
-        if (o.closing_position_id >= 0) continue;
-        if (o.price <= 0.0) continue;
+    auto estimate_notional = [&](const Order& o) -> double {
+        if (o.quantity <= 0.0) return 0.0;
+        if (o.price > 0.0) return o.quantity * o.price;
+        auto it = last_mark_price.find(o.symbol);
+        if (it == last_mark_price.end()) return 0.0;
+        return o.quantity * it->second * (1.0 + std::max(0.0, market_slippage_buffer));
+    };
 
+    auto get_lev = [&](const Order& o) -> double {
         auto it = symbol_leverage.find(o.symbol);
         double lev = (it != symbol_leverage.end()) ? it->second : 1.0;
-        openOrdInit += (o.quantity * o.price) / std::max(1.0, lev);
+        return std::max(1.0, lev);
+    };
+
+    // Exposure-based open order initial margin:
+    // - closing orders: no
+    // - reduce_only: no (can't increase exposure)
+    // - one-way: only orders that would increase exposure reserve margin
+    // - hedge: only opening-direction orders reserve margin
+    double openOrdInit = 0.0;
+    for (const auto& o : open_orders) {
+        if (!order_reserves_open_margin(o)) continue;
+
+        const double notional = estimate_notional(o);
+        if (notional <= 0.0) continue;
+        openOrdInit += notional / get_lev(o);
     }
+
     s.OpenOrderInitialMargin = openOrdInit;
 
     s.AvailableBalance = s.MarginBalance - s.PositionInitialMargin - s.OpenOrderInitialMargin;
@@ -97,7 +145,12 @@ static QTrading::Dto::Account::BalanceSnapshot build_snapshot(
 }
 
 QTrading::Dto::Account::BalanceSnapshot Account::get_balance() const {
-    return build_snapshot(wallet_balance_, positions_, open_orders_, symbol_leverage_);
+    return build_snapshot(wallet_balance_, positions_, open_orders_, symbol_leverage_, last_mark_price_, market_slippage_buffer_);
+}
+
+void Account::set_market_slippage_buffer(double pct)
+{
+    market_slippage_buffer_ = pct;
 }
 
 double Account::get_wallet_balance() const {
@@ -440,6 +493,11 @@ void Account::update_positions(const std::unordered_map<std::string, std::pair<d
 }
 
 void Account::update_positions(const std::unordered_map<std::string, KlineDto>& symbol_kline) {
+    // Cache mark prices for margin estimation.
+    for (const auto& kv : symbol_kline) {
+        last_mark_price_[kv.first] = kv.second.ClosePrice;
+    }
+
     double makerFee, takerFee;
     std::tie(makerFee, takerFee) = get_fee_rates();
 
