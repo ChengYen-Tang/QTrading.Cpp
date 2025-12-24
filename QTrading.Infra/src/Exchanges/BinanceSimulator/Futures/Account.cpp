@@ -153,6 +153,21 @@ void Account::set_market_slippage_buffer(double pct)
     market_slippage_buffer_ = pct;
 }
 
+void Account::set_market_execution_slippage(double pct)
+{
+    market_execution_slippage_ = pct;
+}
+
+void Account::set_limit_execution_slippage(double pct)
+{
+    limit_execution_slippage_ = pct;
+}
+
+void Account::set_kline_volume_split_mode(KlineVolumeSplitMode mode)
+{
+    kline_volume_split_mode_ = mode;
+}
+
 double Account::get_wallet_balance() const {
     return wallet_balance_;
 }
@@ -507,6 +522,52 @@ void Account::update_positions(const std::unordered_map<std::string, KlineDto>& 
         remaining_vol.emplace(kv.first, kv.second.Volume);
     }
 
+    // Split kline volume into directional liquidity pools.
+    // Modes:
+    // - LegacyTotalOnly: do not apply directional caps.
+    // - TakerBuyOnly: enable directional caps only if taker-buy volume is present.
+    // - TakerBuyOrHeuristic: if taker-buy volume is absent, estimate using candle close location.
+    std::unordered_map<std::string, std::pair<double, double>> remaining_liq;
+    remaining_liq.reserve(symbol_kline.size());
+    std::unordered_map<std::string, bool> has_dir_liq;
+    has_dir_liq.reserve(symbol_kline.size());
+
+    for (const auto& kv : symbol_kline) {
+        const auto& k = kv.second;
+        const double vol = std::max(0.0, k.Volume);
+
+        bool has = false;
+        double buy_liq = 0.0;
+        double sell_liq = 0.0;
+
+        if (kline_volume_split_mode_ != KlineVolumeSplitMode::LegacyTotalOnly && vol > 0.0) {
+            if (k.TakerBuyBaseVolume > 0.0) {
+                has = true;
+                buy_liq = std::clamp(k.TakerBuyBaseVolume, 0.0, vol);
+                sell_liq = vol - buy_liq;
+            }
+            else if (kline_volume_split_mode_ == KlineVolumeSplitMode::TakerBuyOrHeuristic) {
+                // Heuristic: use close location in [low, high] as proxy for aggressor imbalance.
+                const double range_raw = k.HighPrice - k.LowPrice;
+                if (std::abs(range_raw) < 1e-12) {
+                    // No directional info.
+                    buy_liq = vol * 0.5;
+                }
+                else {
+                    const double range = std::max(1e-12, range_raw);
+                    double close_loc = (k.ClosePrice - k.LowPrice) / range;
+                    close_loc = std::clamp(close_loc, 0.0, 1.0);
+                    buy_liq = vol * close_loc;
+                }
+                sell_liq = vol - buy_liq;
+                has = true;
+            }
+        }
+
+        has_dir_liq.emplace(kv.first, has);
+        remaining_liq.emplace(kv.first, std::make_pair(buy_liq, sell_liq));
+    }
+
     auto can_fill_and_taker = [](const Order& ord, const KlineDto& k) -> std::pair<bool, bool> {
         const bool is_market = (ord.price <= 0.0);
         if (is_market) {
@@ -539,8 +600,29 @@ void Account::update_positions(const std::unordered_map<std::string, KlineDto>& 
         }
         const KlineDto& k = itK->second;
 
-        auto itVol = remaining_vol.find(sym);
-        if (itVol == remaining_vol.end() || itVol->second <= 0.0) {
+        auto itLiq = remaining_liq.find(sym);
+        if (itLiq == remaining_liq.end()) {
+            continue;
+        }
+
+        auto& liq = itLiq->second;
+        double& buy_liq = liq.first;
+        double& sell_liq = liq.second;
+
+        auto itTot = remaining_vol.find(sym);
+        if (itTot == remaining_vol.end() || itTot->second <= 0.0) {
+            continue;
+        }
+        double& total_vol = itTot->second;
+
+        // Determine whether directional liquidity is enabled for this symbol.
+        // Legacy: if taker-buy volume is not provided, do not apply directional caps.
+        const bool use_dir = (has_dir_liq.find(sym) != has_dir_liq.end() && has_dir_liq[sym]);
+
+        if (total_vol <= 0.0) {
+            continue;
+        }
+        if (use_dir && buy_liq <= 0.0 && sell_liq <= 0.0) {
             continue;
         }
 
@@ -577,19 +659,57 @@ void Account::update_positions(const std::unordered_map<std::string, KlineDto>& 
         });
 
         for (size_t idx : fillable) {
-            if (itVol->second <= 0.0) break;
+            if (total_vol <= 0.0) break;
 
             Order& ord = open_orders_[idx];
             const auto [can_fill, is_taker] = can_fill_and_taker(ord, k);
             if (!can_fill) continue;
 
-            const double fill_qty = std::min(ord.quantity, itVol->second);
-            if (fill_qty < 1e-8) continue;
+            const bool use_dir = (has_dir_liq.find(sym) != has_dir_liq.end() && has_dir_liq[sym]);
 
-            itVol->second -= fill_qty;
+            double fill_qty = 0.0;
+            if (use_dir) {
+                const bool order_is_buy = (ord.side == OrderSide::Buy);
+                double& dir_liq = order_is_buy ? sell_liq : buy_liq;
+                if (dir_liq <= 0.0) continue;
+                fill_qty = std::min({ ord.quantity, total_vol, dir_liq });
+                if (fill_qty < 1e-8) continue;
+                total_vol -= fill_qty;
+                dir_liq -= fill_qty;
+            }
+            else {
+                fill_qty = std::min(ord.quantity, total_vol);
+                if (fill_qty < 1e-8) continue;
+                total_vol -= fill_qty;
+            }
 
             const bool is_market = (ord.price <= 0.0);
-            const double fill_price = is_market ? k.ClosePrice : ord.price;
+            double fill_price = is_market ? k.ClosePrice : ord.price;
+
+            if (is_market) {
+                const double slip = std::max(0.0, market_execution_slippage_);
+                if (slip > 0.0) {
+                    if (ord.side == OrderSide::Buy) {
+                        fill_price = std::min(k.HighPrice, k.ClosePrice * (1.0 + slip));
+                    }
+                    else {
+                        fill_price = std::max(k.LowPrice, k.ClosePrice * (1.0 - slip));
+                    }
+                }
+            }
+            else {
+                const double slip = std::max(0.0, limit_execution_slippage_);
+                if (slip > 0.0) {
+                    if (ord.side == OrderSide::Buy) {
+                        const double worse = std::min(k.HighPrice, k.ClosePrice * (1.0 + slip));
+                        fill_price = std::min(ord.price, worse);
+                    }
+                    else {
+                        const double worse = std::max(k.LowPrice, k.ClosePrice * (1.0 - slip));
+                        fill_price = std::max(ord.price, worse);
+                    }
+                }
+            }
 
             const double notional = fill_qty * fill_price;
             const double feeRate = (is_taker ? takerFee : makerFee);
@@ -607,7 +727,6 @@ void Account::update_positions(const std::unordered_map<std::string, KlineDto>& 
                 processOpeningOrder(ord, fill_qty, fill_price, notional, fee, feeRate, single_leftover);
             }
 
-            // If partially filled, keep the remainder as open.
             if (!single_leftover.empty()) {
                 ord = single_leftover.front();
                 keep[idx] = true;

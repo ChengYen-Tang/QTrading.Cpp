@@ -64,6 +64,22 @@ public:
 
     void set_market_slippage_buffer(double pct);
 
+    // Kline-based market execution slippage (fraction of price, e.g. 0.001 = 0.1%).
+    // Applied to market fills in update_positions.
+    void set_market_execution_slippage(double pct);
+
+    // Kline-based limit execution slippage (fraction of price).
+    // Applied to triggered limit fills to model worse price within the candle while preserving limit protection.
+    void set_limit_execution_slippage(double pct);
+
+    enum class KlineVolumeSplitMode {
+        LegacyTotalOnly = 0,
+        TakerBuyOnly = 1,
+        TakerBuyOrHeuristic = 2,
+    };
+
+    void set_kline_volume_split_mode(KlineVolumeSplitMode mode);
+
 private:
     double balance_;
     double wallet_balance_;
@@ -87,6 +103,17 @@ private:
 
     // For market orders, notional is estimated as qty * mark * (1 + buffer).
     double market_slippage_buffer_{ 0.005 };
+
+    // For market orders, fill price is pessimistically adjusted using kline OHLC.
+    // buy: min(High, Close*(1+slip)), sell: max(Low, Close*(1-slip))
+    double market_execution_slippage_{ 0.0 };
+
+    // For limit orders that trigger, optionally fill at a worse price within OHLC.
+    // buy limit: fill = min(limit, close*(1+slip), high)
+    // sell limit: fill = max(limit, close*(1-slip), low)
+    double limit_execution_slippage_{ 0.0 };
+
+    KlineVolumeSplitMode kline_volume_split_mode_{ KlineVolumeSplitMode::TakerBuyOnly };
 
     inline int generate_order_id();
     inline int generate_position_id();

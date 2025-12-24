@@ -883,3 +883,181 @@ TEST(AccountTest, OpenOrderInitialMargin_OneWayFlipReservesOnlyForOpeningOversho
     // Only overshoot 3 should reserve: 3*100/10 = 30
     EXPECT_NEAR(bal.OpenOrderInitialMargin, 30.0, 1e-12);
 }
+
+TEST(AccountTest, MarketOrderFill_UsesExecutionSlippageBoundedByOHLC) {
+    Account account(10000.0, 0);
+    account.set_position_mode(false);
+    account.set_symbol_leverage("BTCUSDT", 10.0);
+    account.set_market_execution_slippage(0.10); // 10%
+
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+
+    // BUY market: expected worse-than-close, but capped by High.
+    ASSERT_TRUE(account.place_order("BTCUSDT", 1.0, 0.0, OrderSide::Buy, PositionSide::Both));
+
+    // close=100, high=105 => 100*(1+0.1)=110 => capped to 105
+    account.update_positions(oneKline("BTCUSDT", 100.0, 105.0, 95.0, 100.0, 1000.0));
+
+    const auto& pos = account.get_all_positions();
+    ASSERT_EQ(pos.size(), 1u);
+    EXPECT_TRUE(pos[0].is_long);
+    EXPECT_NEAR(pos[0].entry_price, 105.0, 1e-12);
+}
+
+TEST(AccountTest, LimitOrderFill_UsesExecutionSlippageButRespectsLimit) {
+    Account account(50000.0, 0);
+    account.set_symbol_leverage("BTCUSDT", 10.0);
+    account.set_limit_execution_slippage(0.10); // 10%
+
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+
+    // Buy limit at 100 triggers when Low <= 100.
+    ASSERT_TRUE(account.place_order("BTCUSDT", 1.0, 100.0, OrderSide::Buy, PositionSide::Both));
+
+    // close=95, high=110, low=90 => worse=95*(1.1)=104.5, capped by high=110 -> 104.5
+    // but must not exceed limit=100 => fill=100
+    account.update_positions(oneKline("BTCUSDT", 95.0, 110.0, 90.0, 95.0, 1000.0));
+
+    const auto& pos = account.get_all_positions();
+    ASSERT_EQ(pos.size(), 1u);
+    EXPECT_TRUE(pos[0].is_long);
+    EXPECT_NEAR(pos[0].entry_price, 100.0, 1e-12);
+}
+
+TEST(AccountTest, LimitOrderFill_ExecutionSlippageCanWorsenPriceWithinLimit) {
+    Account account(50000.0, 0);
+    account.set_symbol_leverage("BTCUSDT", 10.0);
+    account.set_limit_execution_slippage(0.10); // 10%
+
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+
+    // Buy limit at 110 triggers, and the pessimistic fill (based on close) stays below the limit.
+    ASSERT_TRUE(account.place_order("BTCUSDT", 1.0, 110.0, OrderSide::Buy, PositionSide::Both));
+
+    // close=95, high=110, low=90 => worse=95*(1.1)=104.5 (<= limit 110)
+    account.update_positions(oneKline("BTCUSDT", 95.0, 110.0, 90.0, 95.0, 1000.0));
+
+    const auto& pos = account.get_all_positions();
+    ASSERT_EQ(pos.size(), 1u);
+    EXPECT_TRUE(pos[0].is_long);
+    EXPECT_NEAR(pos[0].entry_price, 104.5, 1e-12);
+}
+
+TEST(AccountTest, TickVolumeSplit_UsesTakerBuyBaseVolumePools) {
+    Account account(100000.0, 0);
+    account.set_symbol_leverage("BTCUSDT", 10.0);
+
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+
+    // Two market orders, one BUY and one SELL, each qty=6.
+    ASSERT_TRUE(account.place_order("BTCUSDT", 6.0, 0.0, OrderSide::Buy, PositionSide::Both));
+    ASSERT_TRUE(account.place_order("BTCUSDT", 6.0, 0.0, OrderSide::Sell, PositionSide::Both));
+
+    // Build kline with Volume=10 and TakerBuyBaseVolume=8
+    // => buy_liq=8 (SELL orders can consume), sell_liq=2 (BUY orders can consume)
+    QTrading::Dto::Market::Binance::KlineDto k;
+    k.OpenPrice = 100.0;
+    k.HighPrice = 110.0;
+    k.LowPrice = 90.0;
+    k.ClosePrice = 100.0;
+    k.Volume = 10.0;
+    k.TakerBuyBaseVolume = 8.0;
+
+    account.update_positions(std::unordered_map<std::string, QTrading::Dto::Market::Binance::KlineDto>{ {"BTCUSDT", k} });
+
+    const auto& pos = account.get_all_positions();
+    ASSERT_EQ(pos.size(), 2u);
+
+    double longQty = 0.0;
+    double shortQty = 0.0;
+    for (const auto& p : pos) {
+        if (p.is_long) longQty += p.quantity;
+        else shortQty += p.quantity;
+    }
+
+    // BUY consumes sell_liq=2, SELL consumes buy_liq=8 but order qty is 6.
+    EXPECT_NEAR(longQty, 2.0, 1e-12);
+    EXPECT_NEAR(shortQty, 6.0, 1e-12);
+
+    const auto& ords = account.get_all_open_orders();
+    ASSERT_EQ(ords.size(), 1u);
+    EXPECT_EQ(ords[0].side, OrderSide::Buy);
+    EXPECT_NEAR(ords[0].quantity, 4.0, 1e-12);
+}
+
+TEST(AccountTest, TickVolumeSplit_Heuristic_CloseNearHighBiasesSellOrders) {
+    Account account(100000.0, 0);
+    account.set_symbol_leverage("BTCUSDT", 10.0);
+    account.set_kline_volume_split_mode(Account::KlineVolumeSplitMode::TakerBuyOrHeuristic);
+
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+
+    ASSERT_TRUE(account.place_order("BTCUSDT", 6.0, 0.0, OrderSide::Buy, PositionSide::Both));
+    ASSERT_TRUE(account.place_order("BTCUSDT", 6.0, 0.0, OrderSide::Sell, PositionSide::Both));
+
+    // Volume=10, close near high => buy_liq ~ 9, sell_liq ~ 1.
+    // BUY consumes sell_liq => ~1, SELL consumes buy_liq => 6.
+    QTrading::Dto::Market::Binance::KlineDto k;
+    k.OpenPrice = 100.0;
+    k.HighPrice = 110.0;
+    k.LowPrice = 90.0;
+    k.ClosePrice = 108.0;
+    k.Volume = 10.0;
+    // TakerBuyBaseVolume absent => 0
+
+    account.update_positions(std::unordered_map<std::string, QTrading::Dto::Market::Binance::KlineDto>{ {"BTCUSDT", k} });
+
+    const auto& pos = account.get_all_positions();
+    ASSERT_EQ(pos.size(), 2u);
+
+    double longQty = 0.0;
+    double shortQty = 0.0;
+    for (const auto& p : pos) {
+        if (p.is_long) longQty += p.quantity;
+        else shortQty += p.quantity;
+    }
+
+    EXPECT_NEAR(longQty, 1.0, 1e-12);
+    EXPECT_NEAR(shortQty, 6.0, 1e-12);
+}
+
+TEST(AccountTest, TickVolumeSplit_Heuristic_CloseNearLowBiasesBuyOrders) {
+    Account account(100000.0, 0);
+    account.set_symbol_leverage("BTCUSDT", 10.0);
+    account.set_kline_volume_split_mode(Account::KlineVolumeSplitMode::TakerBuyOrHeuristic);
+
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+
+    ASSERT_TRUE(account.place_order("BTCUSDT", 6.0, 0.0, OrderSide::Buy, PositionSide::Both));
+    ASSERT_TRUE(account.place_order("BTCUSDT", 6.0, 0.0, OrderSide::Sell, PositionSide::Both));
+
+    // Volume=10, close near low => buy_liq ~ 1, sell_liq ~ 9.
+    // SELL consumes buy_liq => ~1, BUY consumes sell_liq => 6.
+    QTrading::Dto::Market::Binance::KlineDto k;
+    k.OpenPrice = 100.0;
+    k.HighPrice = 110.0;
+    k.LowPrice = 90.0;
+    k.ClosePrice = 92.0;
+    k.Volume = 10.0;
+
+    account.update_positions(std::unordered_map<std::string, QTrading::Dto::Market::Binance::KlineDto>{ {"BTCUSDT", k} });
+
+    const auto& pos = account.get_all_positions();
+    ASSERT_EQ(pos.size(), 2u);
+
+    double longQty = 0.0;
+    double shortQty = 0.0;
+    for (const auto& p : pos) {
+        if (p.is_long) longQty += p.quantity;
+        else shortQty += p.quantity;
+    }
+
+    EXPECT_NEAR(longQty, 6.0, 1e-12);
+    EXPECT_NEAR(shortQty, 1.0, 1e-12);
+}
