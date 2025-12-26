@@ -1,9 +1,11 @@
 #pragma once
 
-#include <queue>
-#include <mutex>
 #include <condition_variable>
+#include <mutex>
+#include <vector>
+
 #include "Channel.hpp"
+#include "RingBuffer.hpp"
 
 namespace QTrading::Utils::Queue {
 
@@ -24,76 +26,131 @@ namespace QTrading::Utils::Queue {
         /// \param capacity Maximum number of messages.
         /// \param policy Overflow behavior when full.
         explicit BoundedChannel(size_t capacity, OverflowPolicy policy = OverflowPolicy::Block)
-            : capacity_(capacity), policy_(policy) {
+            : buffer_(capacity), policy_(policy) {
         }
 
         /// \copydoc Channel::Send
         bool Send(T value) override {
             std::unique_lock<std::mutex> lock(mtx_);
-            if (this->closed_) return false;
-            if (queue_.size() < capacity_) {
-                queue_.push(std::move(value));
+            if (this->closed_.load(std::memory_order_acquire)) return false;
+
+            if (!buffer_.full()) {
+                buffer_.push(std::move(value));
+                lock.unlock();
                 cv_not_empty_.notify_one();
                 return true;
             }
+
             switch (policy_) {
             case OverflowPolicy::Reject:
                 return false;
             case OverflowPolicy::DropOldest:
-                if (!queue_.empty()) queue_.pop();
-                queue_.push(std::move(value));
+                buffer_.drop_oldest();
+                buffer_.push(std::move(value));
+                lock.unlock();
                 cv_not_empty_.notify_one();
                 return true;
             case OverflowPolicy::Block:
             default:
-                while (!this->closed_ && queue_.size() == capacity_) {
-                    cv_not_full_.wait(lock);
-                }
-                if (this->closed_) return false;
-                queue_.push(std::move(value));
+                cv_not_full_.wait(lock, [&] {
+                    return this->closed_.load(std::memory_order_acquire) || !buffer_.full();
+                    });
+                if (this->closed_.load(std::memory_order_acquire)) return false;
+                buffer_.push(std::move(value));
+                lock.unlock();
                 cv_not_empty_.notify_one();
                 return true;
+            }
+        }
+
+        /// \copydoc Channel::TrySend
+        bool TrySend(T value) override {
+            std::unique_lock<std::mutex> lock(mtx_);
+            if (this->closed_.load(std::memory_order_acquire)) return false;
+
+            if (!buffer_.full()) {
+                buffer_.push(std::move(value));
+                lock.unlock();
+                cv_not_empty_.notify_one();
+                return true;
+            }
+
+            switch (policy_) {
+            case OverflowPolicy::Reject:
+                return false;
+            case OverflowPolicy::DropOldest:
+                buffer_.drop_oldest();
+                buffer_.push(std::move(value));
+                lock.unlock();
+                cv_not_empty_.notify_one();
+                return true;
+            case OverflowPolicy::Block:
+            default:
+                return false; // would block
             }
         }
 
         /// \copydoc Channel::Receive
         std::optional<T> Receive() override {
             std::unique_lock<std::mutex> lock(mtx_);
-            while (queue_.empty() && !this->closed_) {
-                cv_not_empty_.wait(lock);
-            }
-            if (queue_.empty()) return std::nullopt;
-            T front = std::move(queue_.front());
-            queue_.pop();
+            cv_not_empty_.wait(lock, [&] {
+                return !buffer_.empty() || this->closed_.load(std::memory_order_acquire);
+                });
+
+            if (buffer_.empty()) return std::nullopt;
+
+            auto v = buffer_.pop();
+            lock.unlock();
             cv_not_full_.notify_one();
-            return front;
+            return v;
         }
 
         /// \copydoc Channel::TryReceive
         std::optional<T> TryReceive() override {
-            std::lock_guard<std::mutex> lock(mtx_);
-            if (queue_.empty()) return std::nullopt;
-            T front = std::move(queue_.front());
-            queue_.pop();
+            std::unique_lock<std::mutex> lock(mtx_);
+            if (buffer_.empty()) return std::nullopt;
+            auto v = buffer_.pop();
+            lock.unlock();
             cv_not_full_.notify_one();
-            return front;
+            return v;
+        }
+
+        /// \copydoc Channel::ReceiveMany
+        std::vector<T> ReceiveMany(size_t max_items) override {
+            std::vector<T> out;
+            out.reserve(max_items);
+
+            std::unique_lock<std::mutex> lock(mtx_);
+            const auto n = (std::min)(max_items, buffer_.size());
+            for (size_t i = 0; i < n; ++i) {
+                auto v = buffer_.pop();
+                if (!v) break;
+                out.push_back(std::move(*v));
+            }
+            lock.unlock();
+
+            if (!out.empty()) {
+                cv_not_full_.notify_all();
+            }
+            return out;
         }
 
         /// \copydoc Channel::Close
         void Close() override {
-            std::unique_lock<std::mutex> lock(mtx_);
-            this->closed_ = true;
+            {
+                std::lock_guard<std::mutex> lock(mtx_);
+                this->closed_.store(true, std::memory_order_release);
+            }
             cv_not_empty_.notify_all();
             cv_not_full_.notify_all();
         }
 
     private:
-        std::queue<T> queue_;                   ///< Underlying message queue.
-        size_t capacity_;                       ///< Maximum queue size.
-        OverflowPolicy policy_;                 ///< Overflow handling strategy.
+        RingBuffer<T> buffer_;
+        OverflowPolicy policy_;
         std::mutex mtx_;
-        std::condition_variable cv_not_empty_;  ///< Signals when queue is not empty.
-        std::condition_variable cv_not_full_;   ///< Signals when queue is not full.
+        std::condition_variable cv_not_empty_;
+        std::condition_variable cv_not_full_;
     };
 
 } // namespace QTrading::Utils::Queue

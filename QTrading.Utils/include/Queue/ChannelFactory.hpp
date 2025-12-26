@@ -1,5 +1,7 @@
 #pragma once
 
+#include <memory>
+
 #include "BoundedChannel.hpp"
 #include "UnboundedChannel.hpp"
 
@@ -9,22 +11,40 @@ namespace QTrading::Utils::Queue {
     /// \details Provides convenient static methods to create bounded or unbounded channels.
     class ChannelFactory {
     public:
-        /// \brief Create a new bounded channel.
-        /// \tparam T Message type.
-        /// \param capacity Maximum queue size.
-        /// \param policy Overflow policy when full.
-        /// \return Pointer to a new BoundedChannel<T>.
+        /// \brief Create a bounded channel managed by std::shared_ptr.
         template <typename T>
-        static Channel<T>* CreateBoundedChannel(size_t capacity, OverflowPolicy policy = OverflowPolicy::Block) {
-            return new BoundedChannel<T>(capacity, policy);
+        static std::shared_ptr<Channel<T>> CreateBoundedChannel(size_t capacity, OverflowPolicy policy = OverflowPolicy::Block) {
+            return std::make_shared<BoundedChannel<T>>(capacity, policy);
         }
 
-        /// \brief Create a new unbounded channel.
-        /// \tparam T Message type.
-        /// \return Pointer to a new UnboundedChannel<T>.
+        /// \brief Create an unbounded channel managed by std::shared_ptr.
         template <typename T>
-        static Channel<T>* CreateUnboundedChannel() {
-            return new UnboundedChannel<T>();
+        static std::shared_ptr<Channel<T>> CreateUnboundedChannel() {
+            return std::make_shared<UnboundedChannel<T>>();
+        }
+
+        /// \brief Create an unbounded channel managed by std::shared_ptr with custom block capacity.
+        template <typename T>
+        static std::shared_ptr<Channel<T>> CreateUnboundedChannel(size_t block_capacity) {
+            return std::make_shared<UnboundedChannel<T>>(block_capacity);
+        }
+
+        /// \brief Create a bounded channel managed by std::unique_ptr.
+        template <typename T>
+        static std::unique_ptr<Channel<T>> CreateBoundedChannelUnique(size_t capacity, OverflowPolicy policy = OverflowPolicy::Block) {
+            return std::make_unique<BoundedChannel<T>>(capacity, policy);
+        }
+
+        /// \brief Create an unbounded channel managed by std::unique_ptr.
+        template <typename T>
+        static std::unique_ptr<Channel<T>> CreateUnboundedChannelUnique() {
+            return std::make_unique<UnboundedChannel<T>>();
+        }
+
+        /// \brief Create an unbounded channel managed by std::unique_ptr with custom block capacity.
+        template <typename T>
+        static std::unique_ptr<Channel<T>> CreateUnboundedChannelUnique(size_t block_capacity) {
+            return std::make_unique<UnboundedChannel<T>>(block_capacity);
         }
     };
 

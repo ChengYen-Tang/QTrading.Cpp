@@ -1,5 +1,9 @@
 ﻿#include <gtest/gtest.h>
 #include <thread>
+#include <atomic>
+#include <unordered_set>
+#include <vector>
+#include <chrono>
 #include "Queue/ChannelFactory.hpp"
 
 using namespace QTrading::Utils::Queue;
@@ -7,7 +11,7 @@ using namespace QTrading::Utils::Queue;
 /// \brief Basic Send()/Receive() under normal conditions (unbounded capacity).
 TEST(UnboundedChannelTest, BasicSendReceive)
 {
-    Channel<int>* channel = ChannelFactory::CreateUnboundedChannel<int>();
+    auto channel = ChannelFactory::CreateUnboundedChannel<int>();
 
     EXPECT_TRUE(channel->Send(42));
     EXPECT_TRUE(channel->Send(100));
@@ -19,14 +23,12 @@ TEST(UnboundedChannelTest, BasicSendReceive)
     auto v2 = channel->Receive();
     ASSERT_TRUE(v2.has_value());
     EXPECT_EQ(v2.value(), 100);
-
-    delete channel;
 }
 
 /// \brief TryReceive returns nullopt when empty, then returns value when data is available.
 TEST(UnboundedChannelTest, TryReceive)
 {
-    Channel<int>* channel = ChannelFactory::CreateUnboundedChannel<int>();
+    auto channel = ChannelFactory::CreateUnboundedChannel<int>();
 
     auto empty1 = channel->TryReceive();
     EXPECT_FALSE(empty1.has_value());
@@ -38,14 +40,12 @@ TEST(UnboundedChannelTest, TryReceive)
 
     auto empty2 = channel->TryReceive();
     EXPECT_FALSE(empty2.has_value());
-
-    delete channel;
 }
 
 /// \brief After Close(), existing items are still readable; Send() fails; Receive() on empty returns nullopt.
 TEST(UnboundedChannelTest, CloseBehavior)
 {
-    Channel<int>* channel = ChannelFactory::CreateUnboundedChannel<int>();
+    auto channel = ChannelFactory::CreateUnboundedChannel<int>();
 
     EXPECT_TRUE(channel->Send(1));
     EXPECT_TRUE(channel->Send(2));
@@ -67,14 +67,12 @@ TEST(UnboundedChannelTest, CloseBehavior)
 
     auto tr = channel->TryReceive();
     EXPECT_FALSE(tr.has_value());
-
-    delete channel;
 }
 
 /// \brief Receive() blocks when empty until a Send() arrives.
 TEST(UnboundedChannelTest, ReceiveBlocksWhenEmptyUntilSend)
 {
-    Channel<int>* channel = ChannelFactory::CreateUnboundedChannel<int>();
+    auto channel = ChannelFactory::CreateUnboundedChannel<int>();
     std::optional<int> received;
     long long wait_ms = 0;
 
@@ -92,14 +90,12 @@ TEST(UnboundedChannelTest, ReceiveBlocksWhenEmptyUntilSend)
     ASSERT_TRUE(received.has_value());
     EXPECT_EQ(received.value(), 123);
     EXPECT_GE(wait_ms, 50);
-
-    delete channel;
 }
 
 /// \brief Receive() unblocks with nullopt on Close() when empty.
 TEST(UnboundedChannelTest, ReceiveBlocksWhenEmptyUntilClose)
 {
-    Channel<int>* channel = ChannelFactory::CreateUnboundedChannel<int>();
+    auto channel = ChannelFactory::CreateUnboundedChannel<int>();
     std::optional<int> received;
     long long wait_ms = 0;
 
@@ -116,14 +112,12 @@ TEST(UnboundedChannelTest, ReceiveBlocksWhenEmptyUntilClose)
     consumer.join();
     EXPECT_FALSE(received.has_value());
     EXPECT_GE(wait_ms, 50);
-
-    delete channel;
 }
 
 /// \brief Simple multi-producer / single-consumer test.
 TEST(UnboundedChannelTest, MultiThreadSendReceive)
 {
-    Channel<int>* channel = ChannelFactory::CreateUnboundedChannel<int>();
+    auto channel = ChannelFactory::CreateUnboundedChannel<int>();
 
     constexpr int producers = 3;
     constexpr int itemsPer = 5;
@@ -153,6 +147,149 @@ TEST(UnboundedChannelTest, MultiThreadSendReceive)
     consumer.join();
 
     EXPECT_EQ(received.size(), producers * itemsPer);
+}
 
-    delete channel;
+/// \brief Multi-producer / single-consumer stress test. Verifies no loss and no duplicates.
+TEST(UnboundedChannelTest, MultiProducerSingleConsumer_NoLoss_NoDup)
+{
+    constexpr int producers = 4;
+    constexpr int itemsPer = 5000;
+    constexpr int total = producers * itemsPer;
+
+    auto channel = ChannelFactory::CreateUnboundedChannel<int>();
+
+    std::atomic<int> produced{ 0 };
+
+    std::vector<std::thread> prodThreads;
+    prodThreads.reserve(producers);
+
+    for (int p = 0; p < producers; ++p) {
+        prodThreads.emplace_back([&, p]() {
+            for (int i = 0; i < itemsPer; ++i) {
+                int v = p * itemsPer + i;
+                ASSERT_TRUE(channel->Send(v));
+                produced.fetch_add(1, std::memory_order_relaxed);
+            }
+            });
+    }
+
+    std::vector<int> received;
+    received.reserve(total);
+
+    std::thread consumer([&]() {
+        while ((int)received.size() < total) {
+            auto v = channel->Receive();
+            if (v) {
+                received.push_back(*v);
+            }
+        }
+        });
+
+    for (auto& t : prodThreads) t.join();
+    EXPECT_EQ(produced.load(std::memory_order_relaxed), total);
+
+    channel->Close();
+    consumer.join();
+
+    ASSERT_EQ((int)received.size(), total);
+
+    std::unordered_set<int> uniq;
+    uniq.reserve(received.size());
+    for (int v : received) {
+        ASSERT_TRUE(uniq.insert(v).second) << "Duplicate value received: " << v;
+    }
+}
+
+TEST(UnboundedChannelTest, ReceiveManyBasic)
+{
+    auto channel = ChannelFactory::CreateUnboundedChannel<int>();
+
+    EXPECT_TRUE(channel->Send(1));
+    EXPECT_TRUE(channel->Send(2));
+    EXPECT_TRUE(channel->Send(3));
+
+    auto batch = channel->ReceiveMany(2);
+    ASSERT_EQ(batch.size(), 2u);
+    EXPECT_EQ(batch[0], 1);
+    EXPECT_EQ(batch[1], 2);
+
+    auto batch2 = channel->ReceiveMany(10);
+    ASSERT_EQ(batch2.size(), 1u);
+    EXPECT_EQ(batch2[0], 3);
+
+    auto empty = channel->ReceiveMany(10);
+    EXPECT_TRUE(empty.empty());
+}
+
+/// \brief Larger MPSC stress test to exercise ChunkedQueue block rollover/release paths.
+TEST(UnboundedChannelTest, MultiProducerSingleConsumer_Larger_NoLoss_NoDup)
+{
+    constexpr int producers = 8;
+    constexpr int itemsPer = 20000;
+    constexpr int total = producers * itemsPer;
+
+    // Use a small block capacity to force frequent block creation.
+    auto channel = ChannelFactory::CreateUnboundedChannel<int>(128);
+
+    std::atomic<int> produced{ 0 };
+
+    std::vector<std::thread> prodThreads;
+    prodThreads.reserve(producers);
+
+    for (int p = 0; p < producers; ++p) {
+        prodThreads.emplace_back([&, p]() {
+            for (int i = 0; i < itemsPer; ++i) {
+                int v = p * itemsPer + i;
+                ASSERT_TRUE(channel->Send(v));
+                produced.fetch_add(1, std::memory_order_relaxed);
+            }
+            });
+    }
+
+    std::vector<int> received;
+    received.reserve(total);
+
+    std::thread consumer([&]() {
+        while ((int)received.size() < total) {
+            auto v = channel->Receive();
+            if (v) received.push_back(*v);
+        }
+        });
+
+    for (auto& t : prodThreads) t.join();
+    EXPECT_EQ(produced.load(std::memory_order_relaxed), total);
+
+    channel->Close();
+    consumer.join();
+
+    ASSERT_EQ((int)received.size(), total);
+
+    std::unordered_set<int> uniq;
+    uniq.reserve(received.size());
+    for (int v : received) {
+        ASSERT_TRUE(uniq.insert(v).second) << "Duplicate value received: " << v;
+    }
+}
+
+/// \brief Verifies that Close() drains remaining items correctly even with large backlog.
+TEST(UnboundedChannelTest, CloseDrainsLargeBacklog)
+{
+    constexpr int total = 50000;
+    auto channel = ChannelFactory::CreateUnboundedChannel<int>(256);
+
+    for (int i = 0; i < total; ++i) {
+        ASSERT_TRUE(channel->Send(i));
+    }
+
+    channel->Close();
+
+    int count = 0;
+    for (;;) {
+        auto v = channel->Receive();
+        if (!v) break;
+        EXPECT_EQ(*v, count);
+        ++count;
+    }
+
+    EXPECT_EQ(count, total);
 }

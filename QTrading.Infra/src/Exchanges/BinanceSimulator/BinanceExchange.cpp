@@ -37,9 +37,9 @@ BinanceExchange::BinanceExchange(
     /// @details Create bounded channels:
     ///          - market_channel: 8-element sliding window of MultiKlineDto
     ///          - position_channel / order_channel: 4-element debounce buffers
-    market_channel.reset(ChannelFactory::CreateBoundedChannel<MultiKlinePtr>(8, OverflowPolicy::DropOldest));
-    position_channel.reset(ChannelFactory::CreateBoundedChannel<std::vector<dto::Position>>(4, OverflowPolicy::DropOldest));
-    order_channel.reset(ChannelFactory::CreateBoundedChannel<std::vector<dto::Order>>(4, OverflowPolicy::DropOldest));
+    market_channel = ChannelFactory::CreateBoundedChannel<MultiKlinePtr>(8, OverflowPolicy::DropOldest);
+    position_channel = ChannelFactory::CreateBoundedChannel<std::vector<dto::Position>>(4, OverflowPolicy::DropOldest);
+    order_channel = ChannelFactory::CreateBoundedChannel<std::vector<dto::Order>>(4, OverflowPolicy::DropOldest);
 }
 
 bool BinanceExchange::place_order(const std::string& symbol,

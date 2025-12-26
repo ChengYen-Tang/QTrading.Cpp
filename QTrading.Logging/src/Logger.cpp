@@ -22,7 +22,7 @@ namespace QTrading::Log {
         if (channel) {
             return;
         }
-        channel.reset(ChannelFactory::CreateUnboundedChannel<Row>());
+        channel = ChannelFactory::CreateUnboundedChannel<Row>();
         consumer = boost::thread(&Logger::Consume, this);
     }
 
