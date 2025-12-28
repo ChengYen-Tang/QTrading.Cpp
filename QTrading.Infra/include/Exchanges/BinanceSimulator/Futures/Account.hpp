@@ -80,6 +80,9 @@ public:
 
     void set_kline_volume_split_mode(KlineVolumeSplitMode mode);
 
+    void set_enable_console_output(bool enable);
+    bool is_console_output_enabled() const;
+
 private:
     double balance_;
     double wallet_balance_;
@@ -98,6 +101,19 @@ private:
 
     std::unordered_map<int, int> order_to_position_;
 
+    // Fast lookup indices (rebuilt when containers are rebuilt).
+    std::unordered_map<int, size_t> open_order_index_by_id_;
+    std::unordered_map<int, size_t> position_index_by_id_;
+
+    // Per-tick reusable scratch buffers to reduce allocations in update_positions().
+    std::unordered_map<std::string, double> remaining_vol_;
+    std::unordered_map<std::string, std::pair<double, double>> remaining_liq_;
+    std::unordered_map<std::string, bool> has_dir_liq_;
+    std::unordered_map<std::string, std::vector<size_t>> per_symbol_;
+    std::vector<bool> keep_open_order_;
+    std::vector<size_t> fillable_;
+    std::vector<Order> next_open_orders_;
+
     // Last known mark/close price per symbol (from kline ClosePrice). Used for market-order notional estimation.
     std::unordered_map<std::string, double> last_mark_price_;
 
@@ -115,26 +131,31 @@ private:
 
     KlineVolumeSplitMode kline_volume_split_mode_{ KlineVolumeSplitMode::TakerBuyOnly };
 
-    inline int generate_order_id();
-    inline int generate_position_id();
+    bool enable_console_output_{ false };
 
-    inline std::tuple<double, double> get_tier_info(double notional) const;
-    inline std::tuple<double, double> get_fee_rates() const;
-    inline bool adjust_position_leverage(const std::string& symbol, double oldLev, double newLev);
+    int generate_order_id();
+    int generate_position_id();
 
-    inline void place_closing_order(int position_id, double quantity, double price);
+    std::tuple<double, double> get_tier_info(double notional) const;
+    std::tuple<double, double> get_fee_rates() const;
+    bool adjust_position_leverage(const std::string& symbol, double oldLev, double newLev);
 
-    inline void merge_positions();
+    void place_closing_order(int position_id, double quantity, double price);
 
-    inline bool handleOneWayReverseOrder(const std::string& symbol, double quantity, double price, QTrading::Dto::Trading::OrderSide side);
+    void merge_positions();
 
-    inline void processClosingOrder(Order& ord, double fill_qty, double fill_price, double fee, std::vector<Order>& leftover);
+    bool handleOneWayReverseOrder(const std::string& symbol, double quantity, double price, QTrading::Dto::Trading::OrderSide side);
 
-    inline bool processReduceOnlyOrder(Order& ord, double fill_qty, double fill_price, double fee, std::vector<Order>& leftover);
+    void processClosingOrder(Order& ord, double fill_qty, double fill_price, double fee, std::vector<Order>& leftover);
 
-    inline void processNormalOpeningOrder(Order& ord, double fill_qty, double fill_price, double notional,
+    bool processReduceOnlyOrder(Order& ord, double fill_qty, double fill_price, double fee, std::vector<Order>& leftover);
+
+    void processNormalOpeningOrder(Order& ord, double fill_qty, double fill_price, double notional,
         double fee, double feeRate, std::vector<Order>& leftover);
 
-    inline void processOpeningOrder(Order& ord, double fill_qty, double fill_price, double notional,
+    void processOpeningOrder(Order& ord, double fill_qty, double fill_price, double notional,
         double fee, double feeRate, std::vector<Order>& leftover);
+
+    void rebuild_open_order_index_();
+    void rebuild_position_index_();
 };

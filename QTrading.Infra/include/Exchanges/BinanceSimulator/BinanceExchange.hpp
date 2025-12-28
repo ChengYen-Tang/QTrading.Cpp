@@ -3,6 +3,7 @@
 #include <unordered_map>
 #include <vector>
 #include <optional>
+#include <queue>
 
 #include "Exchanges/IExchange.h"
 #include "Exchanges/BinanceSimulator/DataProvider/MarketData.hpp"
@@ -72,9 +73,9 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
         /// @copydoc IExchange::get_all_open_orders
         const std::vector<dto::Order>& get_all_open_orders() const override;
         /// @brief Close all channels and mark simulation complete.
-		void  close() override;
+        void  close() override;
     private:
-		std::shared_ptr<QTrading::Log::Logger> logger;        ///< Logger for account/order/position events.
+        std::shared_ptr<QTrading::Log::Logger> logger;        ///< Logger for account/order/position events.
         std::unordered_map<std::string, MarketData> md;       ///< CSV-backed data provider per symbol.
         std::unordered_map<std::string, size_t>     cursor;   ///< Current read index per symbol.
         std::shared_ptr<Account>                    account;  ///< Simulated margin account engine.
@@ -82,10 +83,25 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
         std::vector<dto::Position> last_pos_snapshot;   ///< Last-debounced snapshot of positions.
         std::vector<dto::Order>    last_ord_snapshot;   ///< Last-debounced snapshot of orders.
 
+        // Multiway merge state: next timestamp for each symbol + a min-heap.
+        struct HeapItem {
+            uint64_t ts;
+            std::string sym;
+        };
+        struct HeapItemGreater {
+            bool operator()(const HeapItem& a, const HeapItem& b) const {
+                if (a.ts != b.ts) return a.ts > b.ts;      // min-heap by timestamp
+                return a.sym > b.sym;                      // tie-break deterministically by symbol
+            }
+        };
+
+        std::unordered_map<std::string, uint64_t> next_ts_by_symbol_;
+        std::priority_queue<HeapItem, std::vector<HeapItem>, HeapItemGreater> next_ts_heap_;
+
         /// @brief Find the next timestamp to emit across all symbols.
         /// @param[out] ts Next timestamp (ms since epoch).
         /// @return True if data remains; false when all CSVs are exhausted.
-        bool     next_timestamp(uint64_t& ts) const;
+        bool     next_timestamp(uint64_t& ts);
         /// @brief Build a MultiKlineDto for timestamp ts and advance cursors.
         /// @param ts Timestamp to snapshot.
         /// @param[out] out DTO to populate with per-symbol KlineDto or std::nullopt.

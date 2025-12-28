@@ -18,8 +18,8 @@ namespace QTrading::Log::FileLogger::FeatherV2::AccountLog {
     inline QTrading::Log::Serializer Serializer = [](const void* src, arrow::RecordBatchBuilder& b) {
         using A = QTrading::dto::AccountLog;
         auto a = static_cast<const A*>(src);
-        b.GetFieldAs<arrow::DoubleBuilder>(1)->Append(a->balance);
-        b.GetFieldAs<arrow::DoubleBuilder>(2)->Append(a->unreal_pnl);
-        b.GetFieldAs<arrow::DoubleBuilder>(3)->Append(a->equity);
+        (void)b.GetFieldAs<arrow::DoubleBuilder>(1)->Append(a->balance);
+        (void)b.GetFieldAs<arrow::DoubleBuilder>(2)->Append(a->unreal_pnl);
+        (void)b.GetFieldAs<arrow::DoubleBuilder>(3)->Append(a->equity);
         };
 }

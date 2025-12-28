@@ -2,6 +2,8 @@
 #include "Enum/LogModule.hpp"
 #include "Dto/AccountLog.hpp"
 
+#include <future>
+
 using namespace QTrading;
 using namespace QTrading::Infra::Exchanges::BinanceSim;
 using namespace QTrading::Dto::Market::Binance;
@@ -26,20 +28,37 @@ BinanceExchange::BinanceExchange(
     const std::vector<std::pair<std::string, std::string>>& symbolCsv,
     std::shared_ptr<QTrading::Log::Logger> logger,
     std::shared_ptr<Account> account)
-	: logger(logger), account(account)
+    : logger(logger), account(account)
 {
-    /// @details Preload each CSV into MarketData and initialize the cursor.
+    // Load each CSV in parallel (safe: each MarketData instance is independent).
+    std::vector<std::pair<std::string, std::future<MarketData>>> jobs;
+    jobs.reserve(symbolCsv.size());
+
     for (const auto& [sym, csv] : symbolCsv) {
-        md.emplace(sym, MarketData(sym, csv));
+        jobs.emplace_back(sym, std::async(std::launch::async, [sym, csv]() {
+            return MarketData(sym, csv);
+            }));
         cursor[sym] = 0;
+    }
+
+    // Collect results deterministically by symbol and initialize heap state.
+    for (auto& [sym, fut] : jobs) {
+        md.emplace(sym, fut.get());
+
+        const auto& data = md.at(sym);
+        if (cursor.at(sym) < data.get_klines_count()) {
+            const uint64_t ts = data.get_kline(cursor.at(sym)).Timestamp;
+            next_ts_by_symbol_[sym] = ts;
+            next_ts_heap_.push(HeapItem{ ts, sym });
+        }
     }
 
     /// @details Create bounded channels:
     ///          - market_channel: 8-element sliding window of MultiKlineDto
     ///          - position_channel / order_channel: 4-element debounce buffers
     market_channel = ChannelFactory::CreateBoundedChannel<MultiKlinePtr>(8, OverflowPolicy::DropOldest);
-    position_channel = ChannelFactory::CreateBoundedChannel<std::vector<dto::Position>>(4, OverflowPolicy::DropOldest);
-    order_channel = ChannelFactory::CreateBoundedChannel<std::vector<dto::Order>>(4, OverflowPolicy::DropOldest);
+    position_channel = ChannelFactory::CreateBoundedChannel<std::vector<dto::Position>>(4, OverflowPolicy::Block);
+    order_channel = ChannelFactory::CreateBoundedChannel<std::vector<dto::Order>>(4, OverflowPolicy::Block);
 }
 
 bool BinanceExchange::place_order(const std::string& symbol,
@@ -148,17 +167,20 @@ void BinanceExchange::close()
 /// @brief Determine the next global timestamp to emit.
 /// @param[out] ts  The minimum upcoming timestamp among all symbols.
 /// @return true if at least one symbol has data remaining.
-bool BinanceExchange::next_timestamp(uint64_t& ts) const
+bool BinanceExchange::next_timestamp(uint64_t& ts)
 {
-    ts = std::numeric_limits<uint64_t>::max();
-    bool any = false;
-    for (auto& [sym, data] : md) {
-        size_t idx = cursor.at(sym);
-        if (idx >= data.get_klines_count()) continue;
-        ts = std::min<uint64_t>(ts, data.get_kline(idx).Timestamp);
-        any = true;
+    // Pop stale heap entries until top matches current per-symbol next_ts.
+    while (!next_ts_heap_.empty()) {
+        const auto top = next_ts_heap_.top();
+        auto it = next_ts_by_symbol_.find(top.sym);
+        if (it != next_ts_by_symbol_.end() && it->second == top.ts) {
+            ts = top.ts;
+            return true;
+        }
+        next_ts_heap_.pop();
     }
-    return any;
+    ts = std::numeric_limits<uint64_t>::max();
+    return false;
 }
 
 /// @brief Build and send a MultiKlineDto for timestamp `ts`.
@@ -168,8 +190,10 @@ void BinanceExchange::build_multikline(uint64_t ts, MultiKlineDto& out)
 {
     out.Timestamp = ts;
     out.klines.clear();
+    out.klines.reserve(md.size());
 
     std::unordered_map<std::string, KlineDto> klineSnap;
+    klineSnap.reserve(md.size());
 
     for (auto& [sym, data] : md) {
         size_t idx = cursor[sym];
@@ -180,6 +204,16 @@ void BinanceExchange::build_multikline(uint64_t ts, MultiKlineDto& out)
             out.klines.emplace(sym, k);
             klineSnap.emplace(sym, k);
             ++cursor[sym];
+
+            // Advance this symbol in the multiway merge heap.
+            if (cursor[sym] < data.get_klines_count()) {
+                const uint64_t next_ts = data.get_kline(cursor[sym]).Timestamp;
+                next_ts_by_symbol_[sym] = next_ts;
+                next_ts_heap_.push(HeapItem{ next_ts, sym });
+            }
+            else {
+                next_ts_by_symbol_.erase(sym);
+            }
         }
         else {
             out.klines.emplace(sym, std::nullopt);
@@ -207,18 +241,45 @@ void BinanceExchange::log_status() {
     }
 }
 
-/// @brief Compare two vectors element-wise via raw memory.
-/// @tparam T Element type (Position or Order).
-/// @param a First vector.
-/// @param b Second vector.
-/// @return true if sizes match and all bytes compare equal.
-template<typename T>
-static bool vec_compare(const std::vector<T>& a, const std::vector<T>& b)
+namespace {
+
+static bool position_equal(const dto::Position& x, const dto::Position& y)
+{
+    return x.id == y.id &&
+        x.order_id == y.order_id &&
+        x.symbol == y.symbol &&
+        x.quantity == y.quantity &&
+        x.entry_price == y.entry_price &&
+        x.is_long == y.is_long &&
+        x.unrealized_pnl == y.unrealized_pnl &&
+        x.notional == y.notional &&
+        x.initial_margin == y.initial_margin &&
+        x.maintenance_margin == y.maintenance_margin &&
+        x.fee == y.fee &&
+        x.leverage == y.leverage &&
+        x.fee_rate == y.fee_rate;
+}
+
+static bool order_equal(const dto::Order& x, const dto::Order& y)
+{
+    return x.id == y.id &&
+        x.symbol == y.symbol &&
+        x.quantity == y.quantity &&
+        x.price == y.price &&
+        x.side == y.side &&
+        x.position_side == y.position_side &&
+        x.reduce_only == y.reduce_only &&
+        x.closing_position_id == y.closing_position_id;
+}
+
+template<typename T, typename Eq>
+static bool vec_equal_impl(const std::vector<T>& a, const std::vector<T>& b, Eq eq)
 {
     if (a.size() != b.size()) return false;
-    return std::equal(a.begin(), a.end(), b.begin(), b.end(),
-        [](const T& x, const T& y) { return memcmp(&x, &y, sizeof(T)) == 0; });
+    return std::equal(a.begin(), a.end(), b.begin(), b.end(), eq);
 }
+
+} // namespace
 
 /// @brief Compare two Position snapshots for exact equality.
 /// @param a First positions vector.
@@ -226,7 +287,7 @@ static bool vec_compare(const std::vector<T>& a, const std::vector<T>& b)
 /// @return true if identical.
 bool BinanceExchange::vec_equal(const std::vector<dto::Position>& a,
     const std::vector<dto::Position>& b) {
-    return vec_compare(a, b);
+    return vec_equal_impl(a, b, position_equal);
 }
 
 /// @brief Compare two Order snapshots for exact equality.
@@ -235,5 +296,5 @@ bool BinanceExchange::vec_equal(const std::vector<dto::Position>& a,
 /// @return true if identical.
 bool BinanceExchange::vec_equal(const std::vector<dto::Order>& a,
     const std::vector<dto::Order>& b) {
-    return vec_compare(a, b);
+    return vec_equal_impl(a, b, order_equal);
 }

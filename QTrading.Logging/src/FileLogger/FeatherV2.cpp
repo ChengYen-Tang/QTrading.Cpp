@@ -60,33 +60,42 @@ namespace QTrading::Log {
     /// Exits when channel is closed and empty.
     void FeatherV2::Consume()
     {
+        constexpr size_t kMaxBatch = 1024;
+
         // Read until no more Rows.
         while (true) {
-            auto opt = channel->Receive();
-            if (!opt) {
-                break;  // Channel closed & drained.
+            auto batch = channel->ReceiveMany(kMaxBatch);
+            if (batch.empty()) {
+                // Channel closed & drained.
+                if (channel->IsClosed()) break;
+
+                // Avoid tight spin when empty but not closed.
+                auto opt = channel->Receive();
+                if (!opt) break;
+                batch.push_back(std::move(*opt));
             }
 
-            Row row = std::move(*opt);
-            Slot* s;
-            {
-                std::lock_guard<std::mutex> lk(mtx);
-                s = &slots_.at(row.module);
-            }
-            auto& builder = *s->builder;
+            for (auto& row : batch) {
+                Slot* s;
+                {
+                    std::lock_guard<std::mutex> lk(mtx);
+                    s = &slots_.at(row.module);
+                }
+                auto& builder = *s->builder;
 
-            // Column 0: timestamp
-            builder.GetFieldAs<arrow::UInt64Builder>(0)->Append(row.ts);
+                // Column 0: timestamp
+                builder.GetFieldAs<arrow::UInt64Builder>(0)->Append(row.ts);
 
-            // Remaining columns via serializer.
-            s->serializer(row.payload.get(), builder);
+                // Remaining columns via serializer.
+                s->serializer(row.payload.get(), builder);
 
-            // Flush when batch capacity reached.
-            if (++s->rows >= 8192) {
-                auto rb_res = builder.Flush();
-                PARQUET_ASSIGN_OR_THROW(auto rb, rb_res);
-                PARQUET_THROW_NOT_OK(s->writer->WriteRecordBatch(*rb));
-                s->rows = 0;
+                // Flush when batch capacity reached.
+                if (++s->rows >= 8192) {
+                    auto rb_res = builder.Flush();
+                    PARQUET_ASSIGN_OR_THROW(auto rb, rb_res);
+                    PARQUET_THROW_NOT_OK(s->writer->WriteRecordBatch(*rb));
+                    s->rows = 0;
+                }
             }
         }
 

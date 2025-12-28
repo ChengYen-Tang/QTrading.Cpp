@@ -28,7 +28,7 @@ namespace QTrading::dto {
         /// @brief Unrealized profit and loss.
         double unrealized_pnl;
 
-        /// @brief Notional value (quantity × entry_price).
+        /// @brief Notional value (quantity ?entry_price).
         double notional;
 
         /// @brief Initial margin allocated for this position.

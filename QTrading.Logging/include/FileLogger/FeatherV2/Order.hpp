@@ -23,12 +23,12 @@ namespace QTrading::Log::FileLogger::FeatherV2::Order {
     inline QTrading::Log::Serializer Serializer = [](const void* src, arrow::RecordBatchBuilder& b) {
         using O = QTrading::dto::Order;
         auto o = static_cast<const O*>(src);
-        b.GetFieldAs<arrow::Int32Builder>(1)->Append(o->id);
-        b.GetFieldAs<arrow::StringBuilder>(2)->Append(o->symbol);
-        b.GetFieldAs<arrow::DoubleBuilder>(3)->Append(o->quantity);
-        b.GetFieldAs<arrow::DoubleBuilder>(4)->Append(o->price);
-        b.GetFieldAs<arrow::BooleanBuilder>(5)->Append(o->side == QTrading::Dto::Trading::OrderSide::Buy);
-        b.GetFieldAs<arrow::BooleanBuilder>(6)->Append(o->reduce_only);
-        b.GetFieldAs<arrow::Int32Builder>(7)->Append(o->closing_position_id);
+        (void)b.GetFieldAs<arrow::Int32Builder>(1)->Append(o->id);
+        (void)b.GetFieldAs<arrow::StringBuilder>(2)->Append(o->symbol);
+        (void)b.GetFieldAs<arrow::DoubleBuilder>(3)->Append(o->quantity);
+        (void)b.GetFieldAs<arrow::DoubleBuilder>(4)->Append(o->price);
+        (void)b.GetFieldAs<arrow::BooleanBuilder>(5)->Append(o->side == QTrading::Dto::Trading::OrderSide::Buy);
+        (void)b.GetFieldAs<arrow::BooleanBuilder>(6)->Append(o->reduce_only);
+        (void)b.GetFieldAs<arrow::Int32Builder>(7)->Append(o->closing_position_id);
         };
 }

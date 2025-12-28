@@ -81,6 +81,27 @@ Account::Account(double initial_balance, int vip_level)
 {
     open_orders_.reserve(1024);
     positions_.reserve(1024);
+
+    open_order_index_by_id_.reserve(2048);
+    position_index_by_id_.reserve(2048);
+
+    remaining_vol_.reserve(1024);
+    remaining_liq_.reserve(1024);
+    has_dir_liq_.reserve(1024);
+    per_symbol_.reserve(1024);
+    keep_open_order_.reserve(1024);
+    fillable_.reserve(1024);
+    next_open_orders_.reserve(1024);
+}
+
+void Account::set_enable_console_output(bool enable)
+{
+    enable_console_output_ = enable;
+}
+
+bool Account::is_console_output_enabled() const
+{
+    return enable_console_output_;
 }
 
 static QTrading::Dto::Account::BalanceSnapshot build_snapshot(
@@ -194,7 +215,9 @@ double Account::get_equity() const {
 void Account::set_position_mode(bool hedgeMode) {
     // Disallow switching mode if there are open positions.
     if (!positions_.empty()) {
-        std::cerr << "[set_position_mode] Cannot switch mode while positions are open.\n";
+        if (enable_console_output_) {
+            std::cerr << "[set_position_mode] Cannot switch mode while positions are open.\n";
+        }
         return;
     }
     hedge_mode_ = hedgeMode;
@@ -235,7 +258,9 @@ void Account::set_symbol_leverage(const std::string& symbol, double newLeverage)
             it->second = newLeverage;
         }
         else {
-            std::cerr << "[set_symbol_leverage] Not enough equity to adjust.\n";
+            if (enable_console_output_) {
+                std::cerr << "[set_symbol_leverage] Not enough equity to adjust.\n";
+            }
         }
     }
 }
@@ -268,7 +293,9 @@ bool Account::place_order(const std::string& symbol,
     bool reduce_only)
 {
     if (quantity <= 0) {
-        std::cerr << "[place_order] Invalid quantity <= 0\n";
+        if (enable_console_output_) {
+            std::cerr << "[place_order] Invalid quantity <= 0\n";
+        }
         return false;
     }
 
@@ -278,7 +305,9 @@ bool Account::place_order(const std::string& symbol,
 
     // Binance-like: in hedge mode the caller must specify Long/Short (no inference).
     if (hedge_mode_ && position_side == PositionSide::Both) {
-        std::cerr << "[place_order] Hedge-mode order must specify position_side (Long/Short).\n";
+        if (enable_console_output_) {
+            std::cerr << "[place_order] Hedge-mode order must specify position_side (Long/Short).\n";
+        }
         return false;
     }
 
@@ -303,7 +332,9 @@ bool Account::place_order(const std::string& symbol,
         };
 
         if (!has_reducible_position(positions_, check, hedge_mode_)) {
-            std::cerr << "[place_order] reduce_only rejected: no reducible position.\n";
+            if (enable_console_output_) {
+                std::cerr << "[place_order] reduce_only rejected: no reducible position.\n";
+            }
             return false;
         }
     }
@@ -435,7 +466,9 @@ void Account::place_closing_order(int position_id, double quantity, double price
             return;
         }
     }
-    std::cerr << "[place_closing_order] position_id=" << position_id << " not found\n";
+    if (enable_console_output_) {
+        std::cerr << "[place_closing_order] position_id=" << position_id << " not found\n";
+    }
 }
 
 
@@ -516,21 +549,16 @@ void Account::update_positions(const std::unordered_map<std::string, KlineDto>& 
     double makerFee, takerFee;
     std::tie(makerFee, takerFee) = get_fee_rates();
 
-    std::unordered_map<std::string, double> remaining_vol;
-    remaining_vol.reserve(symbol_kline.size());
+    remaining_vol_.clear();
+    remaining_vol_.reserve(symbol_kline.size());
     for (const auto& kv : symbol_kline) {
-        remaining_vol.emplace(kv.first, kv.second.Volume);
+        remaining_vol_.emplace(kv.first, kv.second.Volume);
     }
 
-    // Split kline volume into directional liquidity pools.
-    // Modes:
-    // - LegacyTotalOnly: do not apply directional caps.
-    // - TakerBuyOnly: enable directional caps only if taker-buy volume is present.
-    // - TakerBuyOrHeuristic: if taker-buy volume is absent, estimate using candle close location.
-    std::unordered_map<std::string, std::pair<double, double>> remaining_liq;
-    remaining_liq.reserve(symbol_kline.size());
-    std::unordered_map<std::string, bool> has_dir_liq;
-    has_dir_liq.reserve(symbol_kline.size());
+    remaining_liq_.clear();
+    remaining_liq_.reserve(symbol_kline.size());
+    has_dir_liq_.clear();
+    has_dir_liq_.reserve(symbol_kline.size());
 
     for (const auto& kv : symbol_kline) {
         const auto& k = kv.second;
@@ -547,10 +575,8 @@ void Account::update_positions(const std::unordered_map<std::string, KlineDto>& 
                 sell_liq = vol - buy_liq;
             }
             else if (kline_volume_split_mode_ == KlineVolumeSplitMode::TakerBuyOrHeuristic) {
-                // Heuristic: use close location in [low, high] as proxy for aggressor imbalance.
                 const double range_raw = k.HighPrice - k.LowPrice;
                 if (std::abs(range_raw) < 1e-12) {
-                    // No directional info.
                     buy_liq = vol * 0.5;
                 }
                 else {
@@ -564,8 +590,8 @@ void Account::update_positions(const std::unordered_map<std::string, KlineDto>& 
             }
         }
 
-        has_dir_liq.emplace(kv.first, has);
-        remaining_liq.emplace(kv.first, std::make_pair(buy_liq, sell_liq));
+        has_dir_liq_.emplace(kv.first, has);
+        remaining_liq_.emplace(kv.first, std::make_pair(buy_liq, sell_liq));
     }
 
     auto can_fill_and_taker = [](const Order& ord, const KlineDto& k) -> std::pair<bool, bool> {
@@ -584,15 +610,15 @@ void Account::update_positions(const std::unordered_map<std::string, KlineDto>& 
         return { true, marketable_at_close };
     };
 
-    std::unordered_map<std::string, std::vector<size_t>> per_symbol;
-    per_symbol.reserve(symbol_kline.size());
+    per_symbol_.clear();
+    per_symbol_.reserve(symbol_kline.size());
     for (size_t i = 0; i < open_orders_.size(); ++i) {
-        per_symbol[open_orders_[i].symbol].push_back(i);
+        per_symbol_[open_orders_[i].symbol].push_back(i);
     }
 
-    std::vector<bool> keep(open_orders_.size(), true);
+    keep_open_order_.assign(open_orders_.size(), true);
 
-    for (auto& symKv : per_symbol) {
+    for (auto& symKv : per_symbol_) {
         const std::string& sym = symKv.first;
         auto itK = symbol_kline.find(sym);
         if (itK == symbol_kline.end()) {
@@ -600,8 +626,8 @@ void Account::update_positions(const std::unordered_map<std::string, KlineDto>& 
         }
         const KlineDto& k = itK->second;
 
-        auto itLiq = remaining_liq.find(sym);
-        if (itLiq == remaining_liq.end()) {
+        auto itLiq = remaining_liq_.find(sym);
+        if (itLiq == remaining_liq_.end()) {
             continue;
         }
 
@@ -609,33 +635,31 @@ void Account::update_positions(const std::unordered_map<std::string, KlineDto>& 
         double& buy_liq = liq.first;
         double& sell_liq = liq.second;
 
-        auto itTot = remaining_vol.find(sym);
-        if (itTot == remaining_vol.end() || itTot->second <= 0.0) {
+        auto itTot = remaining_vol_.find(sym);
+        if (itTot == remaining_vol_.end() || itTot->second <= 0.0) {
             continue;
         }
         double& total_vol = itTot->second;
 
-        // Determine whether directional liquidity is enabled for this symbol.
-        // Legacy: if taker-buy volume is not provided, do not apply directional caps.
-        const bool use_dir = (has_dir_liq.find(sym) != has_dir_liq.end() && has_dir_liq[sym]);
+        const bool use_dir_liq = (has_dir_liq_.find(sym) != has_dir_liq_.end() && has_dir_liq_[sym]);
 
         if (total_vol <= 0.0) {
             continue;
         }
-        if (use_dir && buy_liq <= 0.0 && sell_liq <= 0.0) {
+        if (use_dir_liq && buy_liq <= 0.0 && sell_liq <= 0.0) {
             continue;
         }
 
         auto& indices = symKv.second;
 
-        std::vector<size_t> fillable;
-        fillable.reserve(indices.size());
+        fillable_.clear();
+        fillable_.reserve(indices.size());
         for (size_t idx : indices) {
             const auto [can_fill, _] = can_fill_and_taker(open_orders_[idx], k);
-            if (can_fill) fillable.push_back(idx);
+            if (can_fill) fillable_.push_back(idx);
         }
 
-        std::sort(fillable.begin(), fillable.end(), [&](size_t a, size_t b) {
+        std::sort(fillable_.begin(), fillable_.end(), [&](size_t a, size_t b) {
             const Order& A = open_orders_[a];
             const Order& B = open_orders_[b];
 
@@ -658,17 +682,15 @@ void Account::update_positions(const std::unordered_map<std::string, KlineDto>& 
             return A.id < B.id;
         });
 
-        for (size_t idx : fillable) {
+        for (size_t idx : fillable_) {
             if (total_vol <= 0.0) break;
 
             Order& ord = open_orders_[idx];
             const auto [can_fill, is_taker] = can_fill_and_taker(ord, k);
             if (!can_fill) continue;
 
-            const bool use_dir = (has_dir_liq.find(sym) != has_dir_liq.end() && has_dir_liq[sym]);
-
             double fill_qty = 0.0;
-            if (use_dir) {
+            if (use_dir_liq) {
                 const bool order_is_buy = (ord.side == OrderSide::Buy);
                 double& dir_liq = order_is_buy ? sell_liq : buy_liq;
                 if (dir_liq <= 0.0) continue;
@@ -715,7 +737,7 @@ void Account::update_positions(const std::unordered_map<std::string, KlineDto>& 
             const double feeRate = (is_taker ? takerFee : makerFee);
             const double fee = notional * feeRate;
 
-            keep[idx] = false;
+            keep_open_order_[idx] = false;
 
             std::vector<Order> single_leftover;
             single_leftover.reserve(1);
@@ -729,18 +751,19 @@ void Account::update_positions(const std::unordered_map<std::string, KlineDto>& 
 
             if (!single_leftover.empty()) {
                 ord = single_leftover.front();
-                keep[idx] = true;
+                keep_open_order_[idx] = true;
             }
         }
     }
 
     // Rebuild open_orders_ preserving original time order for orders that remain.
-    std::vector<Order> next_open;
-    next_open.reserve(open_orders_.size());
+    next_open_orders_.clear();
+    next_open_orders_.reserve(open_orders_.size());
     for (size_t i = 0; i < open_orders_.size(); ++i) {
-        if (keep[i]) next_open.push_back(open_orders_[i]);
+        if (keep_open_order_[i]) next_open_orders_.push_back(open_orders_[i]);
     }
-    open_orders_.swap(next_open);
+    open_orders_.swap(next_open_orders_);
+    rebuild_open_order_index_();
 
     // Remove positions with negligible quantity.
     positions_.erase(
@@ -750,6 +773,7 @@ void Account::update_positions(const std::unordered_map<std::string, KlineDto>& 
     );
 
     merge_positions();
+    rebuild_position_index_();
 
     // Recalculate unrealized PnL (markPrice=Close).
     for (auto& pos : positions_) {
@@ -760,12 +784,6 @@ void Account::update_positions(const std::unordered_map<std::string, KlineDto>& 
         }
     }
 
-    // Progressive liquidation (Binance-like approximation)
-    // - Trigger if marginBalance < maintenanceMargin
-    // - Pick the most losing position first (most negative unrealized_pnl)
-    // - Close using worst-case OHLC: long -> Low, short -> High
-    // - Iterate a bounded number of steps per tick
-
     auto snapshot = get_balance();
     if (snapshot.MarginBalance < snapshot.MaintenanceMargin && !positions_.empty()) {
         constexpr int kMaxLiquidationStepsPerTick = 8;
@@ -773,20 +791,17 @@ void Account::update_positions(const std::unordered_map<std::string, KlineDto>& 
         std::cerr << "[update_positions] Liquidation triggered! marginBalance=" << snapshot.MarginBalance
             << ", maintenanceMargin=" << snapshot.MaintenanceMargin << "\n";
 
-        // Cancel all opening orders during liquidation (risk-off). Keep closing orders.
         open_orders_.erase(
             std::remove_if(open_orders_.begin(), open_orders_.end(),
                 [](const Order& o) { return o.closing_position_id < 0; }),
             open_orders_.end());
+        rebuild_open_order_index_();
 
         for (int step = 0; step < kMaxLiquidationStepsPerTick; ++step) {
-            // Refresh snapshot
             snapshot = get_balance();
             if (positions_.empty()) break;
             if (snapshot.MarginBalance >= snapshot.MaintenanceMargin) break;
-            // Do not stop liquidation based on wallet being <= 0; wallet may go negative in extreme cases.
 
-            // Find most losing position (minimum unrealized PnL)
             int worst_idx = -1;
             double worst_unreal = 0.0;
             for (int i = 0; i < static_cast<int>(positions_.size()); ++i) {
@@ -803,32 +818,20 @@ void Account::update_positions(const std::unordered_map<std::string, KlineDto>& 
 
             const KlineDto& k = itK->second;
 
-            // Worst-case liquidation fill price.
             const double liq_price = pos.is_long ? k.LowPrice : k.HighPrice;
             if (liq_price <= 0.0) break;
 
-            // Use available kline volume to bound liquidation amount.
             double volAvail = 0.0;
-            auto itVol = remaining_vol.find(pos.symbol);
-            if (itVol != remaining_vol.end()) volAvail = itVol->second;
+            auto itVol = remaining_vol_.find(pos.symbol);
+            if (itVol != remaining_vol_.end()) volAvail = itVol->second;
             if (volAvail <= 1e-8) break;
 
-            // Close just enough to restore marginBalance >= maintenanceMargin, if possible.
-            // Approximate required close quantity by assuming:
-            //  - realized PnL per unit = (liq_price - entry_price) * dir
-            //  - maintenance margin reduces proportionally with position size
-            //  - fees reduce wallet balance: takerFee * liq_price per unit
             const double dir = pos.is_long ? 1.0 : -1.0;
             const double pnl_per_unit = (liq_price - pos.entry_price) * dir;
             const double fee_per_unit = (liq_price * takerFee);
             const double maint_per_unit = (pos.quantity > 1e-12) ? (pos.maintenance_margin / pos.quantity) : 0.0;
 
-            // Current deficit: need (MarginBalance - MaintenanceMargin) >= 0
             const double deficit = snapshot.MaintenanceMargin - snapshot.MarginBalance;
-
-            // Closing q changes the inequality by approximately:
-            //   new(MB-MM) ≈ (MB-MM) + q * (pnl_per_unit - fee_per_unit) + q * maint_per_unit
-            // We want new(MB-MM) >= 0 => q >= deficit / (pnl_per_unit - fee_per_unit + maint_per_unit)
             const double denom = (pnl_per_unit - fee_per_unit + maint_per_unit);
 
             double desired_close = pos.quantity;
@@ -836,19 +839,16 @@ void Account::update_positions(const std::unordered_map<std::string, KlineDto>& 
                 desired_close = std::min(pos.quantity, deficit / denom);
             }
 
-            // Guard: if denom <= 0, closing doesn't improve the condition in this approximation.
-            // In that case, fall back to closing as much as possible.
             desired_close = std::clamp(desired_close, 1e-8, pos.quantity);
 
             const double close_qty = std::min({ pos.quantity, volAvail, desired_close });
             if (close_qty <= 1e-8) break;
 
-            remaining_vol[pos.symbol] = volAvail - close_qty;
+            remaining_vol_[pos.symbol] = volAvail - close_qty;
 
-            // Build a synthetic closing order against this position.
             const OrderSide liqSide = pos.is_long ? OrderSide::Sell : OrderSide::Buy;
             Order liqOrd{
-                -999999, // synthetic
+                -999999,
                 pos.symbol,
                 close_qty,
                 liq_price,
@@ -864,13 +864,13 @@ void Account::update_positions(const std::unordered_map<std::string, KlineDto>& 
             leftover.reserve(1);
             processClosingOrder(liqOrd, close_qty, liq_price, fee, leftover);
 
-            // Cleanup empty positions and refresh PnL for remaining.
             positions_.erase(
                 std::remove_if(positions_.begin(), positions_.end(),
                     [](const Position& p) { return p.quantity <= 1e-8; }),
                 positions_.end());
 
             merge_positions();
+            rebuild_position_index_();
 
             for (auto& p : positions_) {
                 auto itp = symbol_kline.find(p.symbol);
@@ -881,7 +881,6 @@ void Account::update_positions(const std::unordered_map<std::string, KlineDto>& 
             }
         }
 
-        // If still in liquidation after steps, and nothing left to do, force clear.
         snapshot = get_balance();
         if (!positions_.empty() && snapshot.MarginBalance < snapshot.MaintenanceMargin) {
             std::cerr << "[update_positions] Liquidation unresolved after steps, forcing account bankruptcy\n";
@@ -890,10 +889,11 @@ void Account::update_positions(const std::unordered_map<std::string, KlineDto>& 
             positions_.clear();
             open_orders_.clear();
             order_to_position_.clear();
+            open_order_index_by_id_.clear();
+            position_index_by_id_.clear();
         }
     }
 
-    // Recompute notional/maintenance margin tier-aware (markPrice=Close) after any changes.
     for (auto& p : positions_) {
         auto itp = symbol_kline.find(p.symbol);
         if (itp == symbol_kline.end()) continue;
@@ -906,190 +906,89 @@ void Account::update_positions(const std::unordered_map<std::string, KlineDto>& 
     }
 
     snapshot = get_balance();
-    std::cout << "[update_positions] marginBalance=" << snapshot.MarginBalance
-        << ", maintenanceMargin=" << snapshot.MaintenanceMargin
-        << ", walletBalance=" << snapshot.WalletBalance;
-    for (const auto& kv : symbol_kline) {
-        std::cout << ", " << kv.first << "=" << kv.second.ClosePrice;
+    if (enable_console_output_) {
+        std::cout << "[update_positions] marginBalance=" << snapshot.MarginBalance
+            << ", maintenanceMargin=" << snapshot.MaintenanceMargin
+            << ", walletBalance=" << snapshot.WalletBalance;
+        for (const auto& kv : symbol_kline) {
+            std::cout << ", " << kv.first << "=" << kv.second.ClosePrice;
+        }
+        std::cout << std::endl;
     }
-    std::cout << std::endl;
 }
 
 /// @brief Process a closing order fill: update position, free margin, realize PnL.
 void Account::processClosingOrder(Order& ord, double fill_qty, double fill_price, double fee, std::vector<Order>& leftover) {
-    bool foundPos = false;
-    for (auto& pos : positions_) {
-        if (pos.id == ord.closing_position_id) {
-            foundPos = true;
-            double close_qty = std::min(fill_qty, pos.quantity);
-            double realized_pnl = (fill_price - pos.entry_price) * close_qty * (pos.is_long ? 1.0 : -1.0);
-
-            double ratio = close_qty / pos.quantity;
-            double freed_margin = pos.initial_margin * ratio;
-            double freed_maint = pos.maintenance_margin * ratio;
-            double freed_fee = pos.fee * ratio;
-
-            // Cross margin: realized PnL affects wallet; margin is merely released (tracking only).
-            wallet_balance_ += realized_pnl;
-            wallet_balance_ -= fee;
-
-            used_margin_ -= freed_margin;
-
-            pos.quantity -= close_qty;
-            pos.initial_margin -= freed_margin;
-            pos.maintenance_margin -= freed_maint;
-            pos.fee -= freed_fee;
-            pos.notional = pos.entry_price * pos.quantity;
-
-            ord.quantity -= close_qty;
-            if (ord.quantity > 1e-8)
-                leftover.push_back(ord);
-            break;
+    auto itIdx = position_index_by_id_.find(ord.closing_position_id);
+    if (itIdx == position_index_by_id_.end()) {
+        if (enable_console_output_) {
+            std::cerr << "[processClosingOrder] closing_position_id=" << ord.closing_position_id << " not found\n";
         }
-    }
-    if (!foundPos) {
-        std::cerr << "[processClosingOrder] closing_position_id=" << ord.closing_position_id << " not found\n";
-        leftover.push_back(ord);
-    }
-}
-
-/// @brief Process a reduce_only opening order fill.
-bool Account::processReduceOnlyOrder(Order& ord, double fill_qty, double fill_price, double fee, std::vector<Order>& leftover) {
-    // Use the same eligibility predicate as placement-time to keep semantics consistent.
-    if (!has_reducible_position(positions_, ord, hedge_mode_)) {
-        return false;
-    }
-
-    for (auto& pos : positions_) {
-        if (!order_closes_position(ord, pos, hedge_mode_)) continue;
-
-        Order closeOrd{
-            ord.id,
-            ord.symbol,
-            ord.quantity,
-            ord.price,
-            ord.side,
-            hedge_mode_ ? ord.position_side : PositionSide::Both,
-            ord.reduce_only,
-            pos.id
-        };
-
-        std::vector<Order> tmp;
-        tmp.reserve(1);
-        processClosingOrder(closeOrd, fill_qty, fill_price, fee, tmp);
-
-        ord.quantity = closeOrd.quantity;
-        if (ord.quantity > 1e-8) leftover.push_back(ord);
-        return true;
-    }
-
-    return false;
-}
-
-void Account::processNormalOpeningOrder(Order& ord, double fill_qty, double fill_price, double notional,
-    double fee, double feeRate, std::vector<Order>& leftover) {
-
-    double lev = get_symbol_leverage(ord.symbol);
-    double mmr, maxLev;
-    std::tie(mmr, maxLev) = get_tier_info(notional);
-    if (lev > maxLev) {
-        std::cerr << "[processNormalOpeningOrder] Leverage too high for order id=" << ord.id << "\n";
         leftover.push_back(ord);
         return;
     }
 
-    const double init_margin = notional / lev;
-    const double maint_margin = notional * mmr;
+    Position& pos = positions_[itIdx->second];
 
-    const auto snap = get_balance();
-    const double required = init_margin + fee;
-    if (snap.AvailableBalance < required) {
-        std::cerr << "[processNormalOpeningOrder] Not enough available balance for order id=" << ord.id << "\n";
-        leftover.push_back(ord);
-        return;
-    }
+    double close_qty = std::min(fill_qty, pos.quantity);
+    double realized_pnl = (fill_price - pos.entry_price) * close_qty * (pos.is_long ? 1.0 : -1.0);
 
-    // Hedge-mode requires explicit position side to disambiguate intent.
-    if (hedge_mode_ && ord.position_side == PositionSide::Both) {
-        std::cerr << "[processNormalOpeningOrder] Hedge-mode order must specify position_side (Long/Short). id=" << ord.id << "\n";
-        leftover.push_back(ord);
-        return;
-    }
+    double ratio = close_qty / pos.quantity;
+    double freed_margin = pos.initial_margin * ratio;
+    double freed_maint = pos.maintenance_margin * ratio;
+    double freed_fee = pos.fee * ratio;
 
+    wallet_balance_ += realized_pnl;
     wallet_balance_ -= fee;
-    used_margin_ += init_margin;
 
-    auto pm = order_to_position_.find(ord.id);
-    if (pm == order_to_position_.end()) {
-        int pid = generate_position_id();
-        const bool pos_is_long = hedge_mode_
-            ? (ord.position_side == PositionSide::Long)
-            : (ord.side == OrderSide::Buy);
-        positions_.push_back(Position{
-            pid,
-            ord.id,
-            ord.symbol,
-            fill_qty,
-            fill_price,
-            pos_is_long,
-            0.0,
-            notional,
-            init_margin,
-            maint_margin,
-            fee,
-            lev,
-            feeRate
-            });
-        order_to_position_[ord.id] = pid;
-    }
-    else {
-        int pid = pm->second;
-        for (auto& pos : positions_) {
-            if (pos.id == pid) {
-                double old_notional = pos.notional;
-                double new_notional = old_notional + notional;
-                double old_qty = pos.quantity;
-                double new_qty = old_qty + fill_qty;
-                double new_entry = new_notional / new_qty;
+    used_margin_ -= freed_margin;
 
-                pos.quantity = new_qty;
-                pos.entry_price = new_entry;
-                pos.notional += notional;
-                pos.initial_margin += init_margin;
-                pos.maintenance_margin += maint_margin;
-                pos.fee += fee;
-                break;
-            }
-        }
-    }
+    pos.quantity -= close_qty;
+    pos.initial_margin -= freed_margin;
+    pos.maintenance_margin -= freed_maint;
+    pos.fee -= freed_fee;
+    pos.notional = pos.entry_price * pos.quantity;
 
-    double leftoverQty = ord.quantity - fill_qty;
-    if (leftoverQty > 1e-8) {
-        ord.quantity = leftoverQty;
+    ord.quantity -= close_qty;
+    if (ord.quantity > 1e-8)
         leftover.push_back(ord);
+}
+
+void Account::cancel_order_by_id(int order_id) {
+    auto it = open_order_index_by_id_.find(order_id);
+    if (it == open_order_index_by_id_.end()) {
+        if (enable_console_output_) {
+            std::cerr << "[cancel_order_by_id] No open order with ID=" << order_id << "\n";
+        }
+        return;
+    }
+
+    // Preserve original order: erase the one element and rebuild indices.
+    open_orders_.erase(open_orders_.begin() + static_cast<std::ptrdiff_t>(it->second));
+    rebuild_open_order_index_();
+}
+
+void Account::rebuild_open_order_index_()
+{
+    open_order_index_by_id_.clear();
+    open_order_index_by_id_.reserve(open_orders_.size());
+    for (size_t i = 0; i < open_orders_.size(); ++i) {
+        open_order_index_by_id_[open_orders_[i].id] = i;
     }
 }
 
-/// @brief Dispatch opening order processing.
-/// @param ord, fill_qty, fill_price, notional, fee, feeRate, leftover
-/// @details Calls reduce_only or normal processing accordingly.
-void Account::processOpeningOrder(Order& ord, double fill_qty, double fill_price, double notional,
-    double fee, double feeRate, std::vector<Order>& leftover) {
-    if (ord.reduce_only) {
-        if (!processReduceOnlyOrder(ord, fill_qty, fill_price, fee, leftover)) {
-            // If no matching position to reduce, ignore the order.
-        }
-    }
-    else {
-        processNormalOpeningOrder(ord, fill_qty, fill_price, notional, fee, feeRate, leftover);
+void Account::rebuild_position_index_()
+{
+    position_index_by_id_.clear();
+    position_index_by_id_.reserve(positions_.size());
+    for (size_t i = 0; i < positions_.size(); ++i) {
+        position_index_by_id_[positions_[i].id] = i;
     }
 }
 
 /// @brief Close all positions for a symbol (one-way) or both sides (hedge).
 /// @param symbol Symbol to close.
 void Account::close_position(const std::string& symbol, double price) {
-    // In one‑way mode, close all positions for the symbol.
-    // In hedge mode, this version can be customized to close both long and short positions.
     bool found = false;
     for (const auto& pos : positions_) {
         if (pos.symbol == symbol) {
@@ -1097,8 +996,12 @@ void Account::close_position(const std::string& symbol, double price) {
             place_closing_order(pos.id, pos.quantity, price);
         }
     }
+    rebuild_open_order_index_();
+
     if (!found) {
-        std::cerr << "[close_position] No position found for symbol=" << symbol << "\n";
+        if (enable_console_output_) {
+            std::cerr << "[close_position] No position found for symbol=" << symbol << "\n";
+        }
     }
 }
 
@@ -1109,9 +1012,10 @@ void Account::close_position(const std::string& symbol) {
 /// @brief Close only one side in hedge mode.
 void Account::close_position(const std::string& symbol, QTrading::Dto::Trading::PositionSide position_side, double price) {
     if (!hedge_mode_) {
-        // One-way: only Both is valid.
         if (position_side != PositionSide::Both) {
-            std::cerr << "[close_position] One-way mode requires position_side=Both\n";
+            if (enable_console_output_) {
+                std::cerr << "[close_position] One-way mode requires position_side=Both\n";
+            }
             return;
         }
         close_position(symbol, price);
@@ -1131,26 +1035,13 @@ void Account::close_position(const std::string& symbol, QTrading::Dto::Trading::
             place_closing_order(pos.id, pos.quantity, price);
         }
     }
-    if (!found) {
-        std::cerr << "[close_position] No " << (want_long ? "LONG" : "SHORT")
-            << " position found for symbol=" << symbol << "\n";
-    }
-}
+    rebuild_open_order_index_();
 
-/// @brief Cancel any open order by its unique ID.
-void Account::cancel_order_by_id(int order_id) {
-    bool found = false;
-    for (auto it = open_orders_.begin(); it != open_orders_.end();) {
-        if (it->id == order_id) {
-            found = true;
-            it = open_orders_.erase(it);
-        }
-        else {
-            ++it;
-        }
-    }
     if (!found) {
-        std::cerr << "[cancel_order_by_id] No open order with ID=" << order_id << "\n";
+        if (enable_console_output_) {
+            std::cerr << "[close_position] No " << (want_long ? "LONG" : "SHORT")
+                << " position found for symbol=" << symbol << "\n";
+        }
     }
 }
 
@@ -1206,7 +1097,9 @@ bool Account::adjust_position_leverage(const std::string& symbol, double oldLev,
         double mmr, maxLev;
         std::tie(mmr, maxLev) = get_tier_info(p.notional);
         if (newLev > maxLev) {
-            std::cerr << "[adjust_position_leverage] newLev=" << newLev << " > maxLev=" << maxLev << "\n";
+            if (enable_console_output_) {
+                std::cerr << "[adjust_position_leverage] newLev=" << newLev << " > maxLev=" << maxLev << "\n";
+            }
             return false;
         }
         double oldM = p.initial_margin;
@@ -1218,7 +1111,9 @@ bool Account::adjust_position_leverage(const std::string& symbol, double oldLev,
     double eq = get_equity();
     if (totalDiff > 0) {
         if (eq < totalDiff) {
-            std::cerr << "[adjust_position_leverage] Not enough equity.\n";
+            if (enable_console_output_) {
+                std::cerr << "[adjust_position_leverage] Not enough equity.\n";
+            }
             return false;
         }
         balance_ -= totalDiff;
@@ -1235,4 +1130,145 @@ bool Account::adjust_position_leverage(const std::string& symbol, double oldLev,
         p.maintenance_margin = newMaint[i];
     }
     return true;
+}
+
+/// @brief Process a reduce_only opening order fill.
+bool Account::processReduceOnlyOrder(Order& ord, double fill_qty, double fill_price, double fee, std::vector<Order>& leftover) {
+    if (!has_reducible_position(positions_, ord, hedge_mode_)) {
+        return false;
+    }
+
+    for (auto& pos : positions_) {
+        if (!order_closes_position(ord, pos, hedge_mode_)) continue;
+
+        Order closeOrd{
+            ord.id,
+            ord.symbol,
+            ord.quantity,
+            ord.price,
+            ord.side,
+            hedge_mode_ ? ord.position_side : PositionSide::Both,
+            ord.reduce_only,
+            pos.id
+        };
+
+        std::vector<Order> tmp;
+        tmp.reserve(1);
+        processClosingOrder(closeOrd, fill_qty, fill_price, fee, tmp);
+
+        ord.quantity = closeOrd.quantity;
+        if (ord.quantity > 1e-8) leftover.push_back(ord);
+        return true;
+    }
+
+    return false;
+}
+
+void Account::processNormalOpeningOrder(Order& ord, double fill_qty, double fill_price, double notional,
+    double fee, double feeRate, std::vector<Order>& leftover) {
+
+    double lev = get_symbol_leverage(ord.symbol);
+    double mmr, maxLev;
+    std::tie(mmr, maxLev) = get_tier_info(notional);
+    if (lev > maxLev) {
+        if (enable_console_output_) {
+            std::cerr << "[processNormalOpeningOrder] Leverage too high for order id=" << ord.id << "\n";
+        }
+        leftover.push_back(ord);
+        return;
+    }
+
+    const double init_margin = notional / lev;
+    const double maint_margin = notional * mmr;
+
+    const auto snap = get_balance();
+    const double required = init_margin + fee;
+    if (snap.AvailableBalance < required) {
+        if (enable_console_output_) {
+            std::cerr << "[processNormalOpeningOrder] Not enough available balance for order id=" << ord.id << "\n";
+        }
+        leftover.push_back(ord);
+        return;
+    }
+
+    if (hedge_mode_ && ord.position_side == PositionSide::Both) {
+        if (enable_console_output_) {
+            std::cerr << "[processNormalOpeningOrder] Hedge-mode order must specify position_side (Long/Short). id=" << ord.id << "\n";
+        }
+        leftover.push_back(ord);
+        return;
+    }
+
+    wallet_balance_ -= fee;
+    used_margin_ += init_margin;
+
+    auto pm = order_to_position_.find(ord.id);
+    if (pm == order_to_position_.end()) {
+        int pid = generate_position_id();
+        const bool pos_is_long = hedge_mode_
+            ? (ord.position_side == PositionSide::Long)
+            : (ord.side == OrderSide::Buy);
+        positions_.push_back(Position{
+            pid,
+            ord.id,
+            ord.symbol,
+            fill_qty,
+            fill_price,
+            pos_is_long,
+            0.0,
+            notional,
+            init_margin,
+            maint_margin,
+            fee,
+            lev,
+            feeRate
+            });
+        order_to_position_[ord.id] = pid;
+        rebuild_position_index_();
+    }
+    else {
+        int pid = pm->second;
+        auto itPosIdx = position_index_by_id_.find(pid);
+        if (itPosIdx != position_index_by_id_.end()) {
+            Position& pos = positions_[itPosIdx->second];
+            double old_notional = pos.notional;
+            double new_notional = old_notional + notional;
+            double old_qty = pos.quantity;
+            double new_qty = old_qty + fill_qty;
+            double new_entry = new_notional / new_qty;
+
+            pos.quantity = new_qty;
+            pos.entry_price = new_entry;
+            pos.notional += notional;
+            pos.initial_margin += init_margin;
+            pos.maintenance_margin += maint_margin;
+            pos.fee += fee;
+        }
+        else {
+            // Fallback: index out of sync, do linear search.
+            for (auto& pos : positions_) {
+                if (pos.id == pid) {
+                    double old_notional = pos.notional;
+                    double new_notional = old_notional + notional;
+                    double old_qty = pos.quantity;
+                    double new_qty = old_qty + fill_qty;
+                    double new_entry = new_notional / new_qty;
+
+                    pos.quantity = new_qty;
+                    pos.entry_price = new_entry;
+                    pos.notional += notional;
+                    pos.initial_margin += init_margin;
+                    pos.maintenance_margin += maint_margin;
+                    pos.fee += fee;
+                    break;
+                }
+            }
+        }
+    }
+
+    double leftoverQty = ord.quantity - fill_qty;
+    if (leftoverQty > 1e-8) {
+        ord.quantity = leftoverQty;
+        leftover.push_back(ord);
+    }
 }

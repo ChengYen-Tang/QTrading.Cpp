@@ -28,18 +28,18 @@ namespace QTrading::Log::FileLogger::FeatherV2::Position {
     inline QTrading::Log::Serializer Serializer = [](const void* src, arrow::RecordBatchBuilder& b) {
         using P = QTrading::dto::Position;
         auto p = static_cast<const P*>(src);
-        b.GetFieldAs<arrow::Int32Builder>(1)->Append(p->id);
-        b.GetFieldAs<arrow::Int32Builder>(2)->Append(p->order_id);
-        b.GetFieldAs<arrow::StringBuilder>(3)->Append(p->symbol);
-        b.GetFieldAs<arrow::DoubleBuilder>(4)->Append(p->quantity);
-        b.GetFieldAs<arrow::DoubleBuilder>(5)->Append(p->entry_price);
-        b.GetFieldAs<arrow::BooleanBuilder>(6)->Append(p->is_long);
-        b.GetFieldAs<arrow::DoubleBuilder>(7)->Append(p->unrealized_pnl);
-        b.GetFieldAs<arrow::DoubleBuilder>(8)->Append(p->notional);
-        b.GetFieldAs<arrow::DoubleBuilder>(9)->Append(p->initial_margin);
-        b.GetFieldAs<arrow::DoubleBuilder>(10)->Append(p->maintenance_margin);
-        b.GetFieldAs<arrow::DoubleBuilder>(11)->Append(p->fee);
-        b.GetFieldAs<arrow::DoubleBuilder>(12)->Append(p->leverage);
-        b.GetFieldAs<arrow::DoubleBuilder>(13)->Append(p->fee_rate);
+        (void)b.GetFieldAs<arrow::Int32Builder>(1)->Append(p->id);
+        (void)b.GetFieldAs<arrow::Int32Builder>(2)->Append(p->order_id);
+        (void)b.GetFieldAs<arrow::StringBuilder>(3)->Append(p->symbol);
+        (void)b.GetFieldAs<arrow::DoubleBuilder>(4)->Append(p->quantity);
+        (void)b.GetFieldAs<arrow::DoubleBuilder>(5)->Append(p->entry_price);
+        (void)b.GetFieldAs<arrow::BooleanBuilder>(6)->Append(p->is_long);
+        (void)b.GetFieldAs<arrow::DoubleBuilder>(7)->Append(p->unrealized_pnl);
+        (void)b.GetFieldAs<arrow::DoubleBuilder>(8)->Append(p->notional);
+        (void)b.GetFieldAs<arrow::DoubleBuilder>(9)->Append(p->initial_margin);
+        (void)b.GetFieldAs<arrow::DoubleBuilder>(10)->Append(p->maintenance_margin);
+        (void)b.GetFieldAs<arrow::DoubleBuilder>(11)->Append(p->fee);
+        (void)b.GetFieldAs<arrow::DoubleBuilder>(12)->Append(p->leverage);
+        (void)b.GetFieldAs<arrow::DoubleBuilder>(13)->Append(p->fee_rate);
         };
 }
