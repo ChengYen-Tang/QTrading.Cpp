@@ -126,19 +126,25 @@ bool BinanceExchange::step()
     build_multikline(ts, *dto);
     market_channel->Send(dto);    // always emit market
 
-    /// @details Debounce position updates: only send when changed.
-    const auto& curP = account->get_all_positions();
-    if (!vec_equal(curP, last_pos_snapshot)) {
-        position_channel->Send(curP);
-        last_pos_snapshot = curP;
+    const uint64_t cur_ver = account->get_state_version();
+
+    // Only consider sending snapshots when account reported a state transition.
+    if (cur_ver != last_account_version_) {
+        const auto& curP = account->get_all_positions();
+        if (!vec_equal(curP, last_pos_snapshot)) {
+            position_channel->Send(curP);
+            last_pos_snapshot = curP;
+        }
+
+        const auto& curO = account->get_all_open_orders();
+        if (!vec_equal(curO, last_ord_snapshot)) {
+            order_channel->Send(curO);
+            last_ord_snapshot = curO;
+        }
+
+        last_account_version_ = cur_ver;
     }
 
-    /// @details Debounce order updates: only send when changed.
-    const auto& curO = account->get_all_open_orders();
-    if (!vec_equal(curO, last_ord_snapshot)) {
-        order_channel->Send(curO);
-        last_ord_snapshot = curO;
-    }
     return true;
 }
 
@@ -192,8 +198,8 @@ void BinanceExchange::build_multikline(uint64_t ts, MultiKlineDto& out)
     out.klines.clear();
     out.klines.reserve(md.size());
 
-    std::unordered_map<std::string, KlineDto> klineSnap;
-    klineSnap.reserve(md.size());
+    kline_snap_cache_.clear();
+    kline_snap_cache_.reserve(md.size());
 
     for (auto& [sym, data] : md) {
         size_t idx = cursor[sym];
@@ -202,7 +208,7 @@ void BinanceExchange::build_multikline(uint64_t ts, MultiKlineDto& out)
         {
             const auto& k = data.get_kline(idx);
             out.klines.emplace(sym, k);
-            klineSnap.emplace(sym, k);
+            kline_snap_cache_.emplace(sym, k);
             ++cursor[sym];
 
             // Advance this symbol in the multiway merge heap.
@@ -219,8 +225,8 @@ void BinanceExchange::build_multikline(uint64_t ts, MultiKlineDto& out)
             out.klines.emplace(sym, std::nullopt);
         }
     }
-    if (!klineSnap.empty())
-        account->update_positions(klineSnap);
+    if (!kline_snap_cache_.empty())
+        account->update_positions(kline_snap_cache_);
 }
 
 /// @brief Log account balance, positions, and orders via the Logger.

@@ -1,5 +1,6 @@
 ﻿#include "Exchanges/BinanceSimulator/Futures/Config.hpp"
 #include "Exchanges/BinanceSimulator/Futures/Account.hpp"
+#include "Exchanges/BinanceSimulator/Futures/AccountPolicies.hpp"
 #include <iostream>
 #include <stdexcept>
 #include <cmath>
@@ -11,6 +12,112 @@ using QTrading::Dto::Trading::OrderSide;
 using QTrading::Dto::Trading::PositionSide;
 
 namespace {
+
+struct FeeModel {
+    double maker_fee{};
+    double taker_fee{};
+
+    explicit FeeModel(const std::tuple<double, double>& fees)
+    {
+        maker_fee = std::get<0>(fees);
+        taker_fee = std::get<1>(fees);
+    }
+
+    double fee_rate(bool is_taker) const noexcept { return is_taker ? taker_fee : maker_fee; }
+};
+
+struct PriceExecutionModel {
+    double market_exec_slippage{};
+    double limit_exec_slippage{};
+
+    double execution_price(const Order& ord, const KlineDto& k) const
+    {
+        const bool is_market = (ord.price <= 0.0);
+        double fill_price = is_market ? k.ClosePrice : ord.price;
+
+        if (is_market) {
+            const double slip = std::max(0.0, market_exec_slippage);
+            if (slip > 0.0) {
+                if (ord.side == OrderSide::Buy) {
+                    fill_price = std::min(k.HighPrice, k.ClosePrice * (1.0 + slip));
+                }
+                else {
+                    fill_price = std::max(k.LowPrice, k.ClosePrice * (1.0 - slip));
+                }
+            }
+        }
+        else {
+            const double slip = std::max(0.0, limit_exec_slippage);
+            if (slip > 0.0) {
+                if (ord.side == OrderSide::Buy) {
+                    const double worse = std::min(k.HighPrice, k.ClosePrice * (1.0 + slip));
+                    fill_price = std::min(ord.price, worse);
+                }
+                else {
+                    const double worse = std::max(k.LowPrice, k.ClosePrice * (1.0 - slip));
+                    fill_price = std::max(ord.price, worse);
+                }
+            }
+        }
+
+        return fill_price;
+    }
+};
+
+struct FillModel {
+    Account::KlineVolumeSplitMode split_mode{ Account::KlineVolumeSplitMode::LegacyTotalOnly };
+
+    std::pair<bool, bool> can_fill_and_taker(const Order& ord, const KlineDto& k) const
+    {
+        const bool is_market = (ord.price <= 0.0);
+        if (is_market) {
+            return { true, true };
+        }
+
+        const bool is_buy = (ord.side == OrderSide::Buy);
+        const bool triggered = (is_buy ? (k.LowPrice <= ord.price) : (k.HighPrice >= ord.price));
+        if (!triggered) {
+            return { false, false };
+        }
+
+        const bool marketable_at_close = (is_buy ? (k.ClosePrice <= ord.price) : (k.ClosePrice >= ord.price));
+        return { true, marketable_at_close };
+    }
+
+    std::pair<bool, std::pair<double, double>> build_directional_liquidity(const KlineDto& k) const
+    {
+        const double vol = std::max(0.0, k.Volume);
+        if (split_mode == Account::KlineVolumeSplitMode::LegacyTotalOnly || vol <= 0.0) {
+            return { false, {0.0, 0.0} };
+        }
+
+        bool has = false;
+        double buy_liq = 0.0;
+        double sell_liq = 0.0;
+
+        if (k.TakerBuyBaseVolume > 0.0) {
+            has = true;
+            buy_liq = std::clamp(k.TakerBuyBaseVolume, 0.0, vol);
+            sell_liq = vol - buy_liq;
+        }
+        else if (split_mode == Account::KlineVolumeSplitMode::TakerBuyOrHeuristic) {
+            const double range_raw = k.HighPrice - k.LowPrice;
+            if (std::abs(range_raw) < 1e-12) {
+                buy_liq = vol * 0.5;
+            }
+            else {
+                const double range = std::max(1e-12, range_raw);
+                double close_loc = (k.ClosePrice - k.LowPrice) / range;
+                close_loc = std::clamp(close_loc, 0.0, 1.0);
+                buy_liq = vol * close_loc;
+            }
+            sell_liq = vol - buy_liq;
+            has = true;
+        }
+
+        return { has, {buy_liq, sell_liq} };
+    }
+};
 
 static bool order_closes_position(const Order& ord, const Position& pos, bool hedge_mode)
 {
@@ -77,7 +184,8 @@ Account::Account(double initial_balance, int vip_level)
     vip_level_(vip_level),
     hedge_mode_(false),
     next_order_id_(1),
-    next_position_id_(1)
+    next_position_id_(1),
+    policies_(DefaultPolicies())
 {
     open_orders_.reserve(1024);
     positions_.reserve(1024);
@@ -92,6 +200,14 @@ Account::Account(double initial_balance, int vip_level)
     keep_open_order_.reserve(1024);
     fillable_.reserve(1024);
     next_open_orders_.reserve(1024);
+
+    single_leftover_.reserve(1);
+}
+
+Account::Account(double initial_balance, int vip_level, Policies policies)
+    : Account(initial_balance, vip_level)
+{
+    policies_ = std::move(policies);
 }
 
 void Account::set_enable_console_output(bool enable)
@@ -351,6 +467,7 @@ bool Account::place_order(const std::string& symbol,
         -1
     };
     open_orders_.push_back(newOrd);
+    ++state_version_;
     return true;
 }
 
@@ -541,13 +658,14 @@ void Account::update_positions(const std::unordered_map<std::string, std::pair<d
 }
 
 void Account::update_positions(const std::unordered_map<std::string, KlineDto>& symbol_kline) {
+    bool dirty = false;
+
     // Cache mark prices for margin estimation.
     for (const auto& kv : symbol_kline) {
         last_mark_price_[kv.first] = kv.second.ClosePrice;
     }
 
-    double makerFee, takerFee;
-    std::tie(makerFee, takerFee) = get_fee_rates();
+    const FeeModel fee_model(get_fee_rates());
 
     remaining_vol_.clear();
     remaining_vol_.reserve(symbol_kline.size());
@@ -562,53 +680,12 @@ void Account::update_positions(const std::unordered_map<std::string, KlineDto>& 
 
     for (const auto& kv : symbol_kline) {
         const auto& k = kv.second;
-        const double vol = std::max(0.0, k.Volume);
-
-        bool has = false;
-        double buy_liq = 0.0;
-        double sell_liq = 0.0;
-
-        if (kline_volume_split_mode_ != KlineVolumeSplitMode::LegacyTotalOnly && vol > 0.0) {
-            if (k.TakerBuyBaseVolume > 0.0) {
-                has = true;
-                buy_liq = std::clamp(k.TakerBuyBaseVolume, 0.0, vol);
-                sell_liq = vol - buy_liq;
-            }
-            else if (kline_volume_split_mode_ == KlineVolumeSplitMode::TakerBuyOrHeuristic) {
-                const double range_raw = k.HighPrice - k.LowPrice;
-                if (std::abs(range_raw) < 1e-12) {
-                    buy_liq = vol * 0.5;
-                }
-                else {
-                    const double range = std::max(1e-12, range_raw);
-                    double close_loc = (k.ClosePrice - k.LowPrice) / range;
-                    close_loc = std::clamp(close_loc, 0.0, 1.0);
-                    buy_liq = vol * close_loc;
-                }
-                sell_liq = vol - buy_liq;
-                has = true;
-            }
-        }
-
+        const auto [has, liq] = policies_.directional_liquidity
+            ? policies_.directional_liquidity(kline_volume_split_mode_, k)
+            : FillModel{ kline_volume_split_mode_ }.build_directional_liquidity(k);
         has_dir_liq_.emplace(kv.first, has);
-        remaining_liq_.emplace(kv.first, std::make_pair(buy_liq, sell_liq));
+        remaining_liq_.emplace(kv.first, liq);
     }
-
-    auto can_fill_and_taker = [](const Order& ord, const KlineDto& k) -> std::pair<bool, bool> {
-        const bool is_market = (ord.price <= 0.0);
-        if (is_market) {
-            return { true, true };
-        }
-
-        const bool is_buy = (ord.side == OrderSide::Buy);
-        const bool triggered = (is_buy ? (k.LowPrice <= ord.price) : (k.HighPrice >= ord.price));
-        if (!triggered) {
-            return { false, false };
-        }
-
-        const bool marketable_at_close = (is_buy ? (k.ClosePrice <= ord.price) : (k.ClosePrice >= ord.price));
-        return { true, marketable_at_close };
-    };
 
     per_symbol_.clear();
     per_symbol_.reserve(symbol_kline.size());
@@ -655,7 +732,9 @@ void Account::update_positions(const std::unordered_map<std::string, KlineDto>& 
         fillable_.clear();
         fillable_.reserve(indices.size());
         for (size_t idx : indices) {
-            const auto [can_fill, _] = can_fill_and_taker(open_orders_[idx], k);
+            const auto [can_fill, _] = policies_.can_fill_and_taker
+                ? policies_.can_fill_and_taker(open_orders_[idx], k)
+                : FillModel{ kline_volume_split_mode_ }.can_fill_and_taker(open_orders_[idx], k);
             if (can_fill) fillable_.push_back(idx);
         }
 
@@ -686,7 +765,9 @@ void Account::update_positions(const std::unordered_map<std::string, KlineDto>& 
             if (total_vol <= 0.0) break;
 
             Order& ord = open_orders_[idx];
-            const auto [can_fill, is_taker] = can_fill_and_taker(ord, k);
+            const auto [can_fill, is_taker] = policies_.can_fill_and_taker
+                ? policies_.can_fill_and_taker(ord, k)
+                : FillModel{ kline_volume_split_mode_ }.can_fill_and_taker(ord, k);
             if (!can_fill) continue;
 
             double fill_qty = 0.0;
@@ -705,58 +786,41 @@ void Account::update_positions(const std::unordered_map<std::string, KlineDto>& 
                 total_vol -= fill_qty;
             }
 
-            const bool is_market = (ord.price <= 0.0);
-            double fill_price = is_market ? k.ClosePrice : ord.price;
-
-            if (is_market) {
-                const double slip = std::max(0.0, market_execution_slippage_);
-                if (slip > 0.0) {
-                    if (ord.side == OrderSide::Buy) {
-                        fill_price = std::min(k.HighPrice, k.ClosePrice * (1.0 + slip));
-                    }
-                    else {
-                        fill_price = std::max(k.LowPrice, k.ClosePrice * (1.0 - slip));
-                    }
-                }
-            }
-            else {
-                const double slip = std::max(0.0, limit_execution_slippage_);
-                if (slip > 0.0) {
-                    if (ord.side == OrderSide::Buy) {
-                        const double worse = std::min(k.HighPrice, k.ClosePrice * (1.0 + slip));
-                        fill_price = std::min(ord.price, worse);
-                    }
-                    else {
-                        const double worse = std::max(k.LowPrice, k.ClosePrice * (1.0 - slip));
-                        fill_price = std::max(ord.price, worse);
-                    }
-                }
-            }
+            const double fill_price = policies_.execution_price
+                ? policies_.execution_price(ord, k, market_execution_slippage_, limit_execution_slippage_)
+                : PriceExecutionModel{ market_execution_slippage_, limit_execution_slippage_ }.execution_price(ord, k);
 
             const double notional = fill_qty * fill_price;
-            const double feeRate = (is_taker ? takerFee : makerFee);
+            const double feeRate = fee_model.fee_rate(is_taker);
             const double fee = notional * feeRate;
 
             keep_open_order_[idx] = false;
 
-            std::vector<Order> single_leftover;
-            single_leftover.reserve(1);
+            // Reuse single-order leftover buffer (avoids per-fill tiny vector alloc).
+            single_leftover_.clear();
 
             if (ord.closing_position_id >= 0) {
-                processClosingOrder(ord, fill_qty, fill_price, fee, single_leftover);
+                processClosingOrder(ord, fill_qty, fill_price, fee, single_leftover_);
             }
             else {
-                processOpeningOrder(ord, fill_qty, fill_price, notional, fee, feeRate, single_leftover);
+                processOpeningOrder(ord, fill_qty, fill_price, notional, fee, feeRate, single_leftover_);
             }
 
-            if (!single_leftover.empty()) {
-                ord = single_leftover.front();
+            if (!single_leftover_.empty()) {
+                ord = single_leftover_.front();
                 keep_open_order_[idx] = true;
             }
         }
     }
 
     // Rebuild open_orders_ preserving original time order for orders that remain.
+    // If any order was filled/removed, keep_open_order_ will have at least one false.
+    if (!keep_open_order_.empty()) {
+        for (bool keep : keep_open_order_) {
+            if (!keep) { dirty = true; break; }
+        }
+    }
+
     next_open_orders_.clear();
     next_open_orders_.reserve(open_orders_.size());
     for (size_t i = 0; i < open_orders_.size(); ++i) {
@@ -818,7 +882,9 @@ void Account::update_positions(const std::unordered_map<std::string, KlineDto>& 
 
             const KlineDto& k = itK->second;
 
-            const double liq_price = pos.is_long ? k.LowPrice : k.HighPrice;
+            const double liq_price = policies_.liquidation_price
+                ? policies_.liquidation_price(pos, k)
+                : (pos.is_long ? k.LowPrice : k.HighPrice);
             if (liq_price <= 0.0) break;
 
             double volAvail = 0.0;
@@ -828,7 +894,7 @@ void Account::update_positions(const std::unordered_map<std::string, KlineDto>& 
 
             const double dir = pos.is_long ? 1.0 : -1.0;
             const double pnl_per_unit = (liq_price - pos.entry_price) * dir;
-            const double fee_per_unit = (liq_price * takerFee);
+            const double fee_per_unit = (liq_price * fee_model.taker_fee);
             const double maint_per_unit = (pos.quantity > 1e-12) ? (pos.maintenance_margin / pos.quantity) : 0.0;
 
             const double deficit = snapshot.MaintenanceMargin - snapshot.MarginBalance;
@@ -859,7 +925,7 @@ void Account::update_positions(const std::unordered_map<std::string, KlineDto>& 
             };
 
             const double notional = close_qty * liq_price;
-            const double fee = notional * takerFee;
+            const double fee = notional * fee_model.taker_fee;
             std::vector<Order> leftover;
             leftover.reserve(1);
             processClosingOrder(liqOrd, close_qty, liq_price, fee, leftover);
@@ -915,6 +981,18 @@ void Account::update_positions(const std::unordered_map<std::string, KlineDto>& 
         }
         std::cout << std::endl;
     }
+
+    // Track changes from position cleanup/merge as well.
+    // If any position was removed by epsilon-filter, quantity set changed.
+    // (We can't easily know removed count without scanning; mark dirty if we had any positions going into cleanup.)
+    // Any liquidation path or position size adjustment affects externally visible state.
+    if (!per_symbol_.empty()) {
+        dirty = true;
+    }
+
+    if (dirty) {
+        ++state_version_;
+    }
 }
 
 /// @brief Process a closing order fill: update position, free margin, realize PnL.
@@ -966,28 +1044,9 @@ void Account::cancel_order_by_id(int order_id) {
     // Preserve original order: erase the one element and rebuild indices.
     open_orders_.erase(open_orders_.begin() + static_cast<std::ptrdiff_t>(it->second));
     rebuild_open_order_index_();
+    ++state_version_;
 }
 
-void Account::rebuild_open_order_index_()
-{
-    open_order_index_by_id_.clear();
-    open_order_index_by_id_.reserve(open_orders_.size());
-    for (size_t i = 0; i < open_orders_.size(); ++i) {
-        open_order_index_by_id_[open_orders_[i].id] = i;
-    }
-}
-
-void Account::rebuild_position_index_()
-{
-    position_index_by_id_.clear();
-    position_index_by_id_.reserve(positions_.size());
-    for (size_t i = 0; i < positions_.size(); ++i) {
-        position_index_by_id_[positions_[i].id] = i;
-    }
-}
-
-/// @brief Close all positions for a symbol (one-way) or both sides (hedge).
-/// @param symbol Symbol to close.
 void Account::close_position(const std::string& symbol, double price) {
     bool found = false;
     for (const auto& pos : positions_) {
@@ -997,6 +1056,9 @@ void Account::close_position(const std::string& symbol, double price) {
         }
     }
     rebuild_open_order_index_();
+    if (found) {
+        ++state_version_;
+    }
 
     if (!found) {
         if (enable_console_output_) {
@@ -1036,6 +1098,9 @@ void Account::close_position(const std::string& symbol, QTrading::Dto::Trading::
         }
     }
     rebuild_open_order_index_();
+    if (found) {
+        ++state_version_;
+    }
 
     if (!found) {
         if (enable_console_output_) {
@@ -1072,6 +1137,9 @@ std::tuple<double, double> Account::get_tier_info(double notional) const {
 /// @brief Get maker and taker fee rates based on VIP level.
 /// @return Tuple(maker_fee_rate, taker_fee_rate).
 std::tuple<double, double> Account::get_fee_rates() const {
+    if (policies_.fee_rates) {
+        return policies_.fee_rates(vip_level_);
+    }
     auto it = vip_fee_rates.find(vip_level_);
     if (it != vip_fee_rates.end()) {
         return std::make_tuple(it->second.maker_fee_rate, it->second.taker_fee_rate);
@@ -1271,4 +1339,9 @@ void Account::processNormalOpeningOrder(Order& ord, double fill_qty, double fill
         ord.quantity = leftoverQty;
         leftover.push_back(ord);
     }
+}
+
+Account::Policies Account::DefaultPolicies()
+{
+    return AccountPolicies::Default();
 }

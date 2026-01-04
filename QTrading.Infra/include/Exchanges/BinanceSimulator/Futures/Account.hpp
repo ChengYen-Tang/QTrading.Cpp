@@ -10,6 +10,7 @@
 #include "Dto/Account/BalanceSnapshot.hpp"
 #include "Dto/Trading/Side.hpp"
 #include <optional>
+#include <functional>
 
 using namespace QTrading::dto;
 
@@ -17,7 +18,41 @@ using namespace QTrading::dto;
 ///        Manages balance, margin, orders, and positions.
 class Account {
 public:
+    enum class KlineVolumeSplitMode {
+        LegacyTotalOnly = 0,
+        TakerBuyOnly = 1,
+        TakerBuyOrHeuristic = 2,
+    };
+
+    // --- Policies (P2.1) ---
+    using FeeRates = std::tuple<double, double>; // (maker, taker)
+
+    struct Policies {
+        // Fee rates by VIP level
+        std::function<FeeRates(int vip_level)> fee_rates;
+
+        // Decide if order can fill on this kline and whether it's taker
+        std::function<std::pair<bool, bool>(const Order& ord, const QTrading::Dto::Market::Binance::KlineDto& k)> can_fill_and_taker;
+
+        // Directional liquidity split: returns {has_dir_liq, {buy_liq, sell_liq}}
+        std::function<std::pair<bool, std::pair<double, double>>(
+            KlineVolumeSplitMode mode,
+            const QTrading::Dto::Market::Binance::KlineDto& k)> directional_liquidity;
+
+        // Execution price given slippage settings
+        std::function<double(const Order& ord,
+            const QTrading::Dto::Market::Binance::KlineDto& k,
+            double market_exec_slip,
+            double limit_exec_slip)> execution_price;
+
+        // Liquidation execution price (defaults to Low/High)
+        std::function<double(const Position& pos, const QTrading::Dto::Market::Binance::KlineDto& k)> liquidation_price;
+    };
+
+    static Policies DefaultPolicies();
+
     Account(double initial_balance, int vip_level = 0);
+    Account(double initial_balance, int vip_level, Policies policies);
 
     QTrading::Dto::Account::BalanceSnapshot get_balance() const;
 
@@ -72,12 +107,6 @@ public:
     // Applied to triggered limit fills to model worse price within the candle while preserving limit protection.
     void set_limit_execution_slippage(double pct);
 
-    enum class KlineVolumeSplitMode {
-        LegacyTotalOnly = 0,
-        TakerBuyOnly = 1,
-        TakerBuyOrHeuristic = 2,
-    };
-
     void set_kline_volume_split_mode(KlineVolumeSplitMode mode);
 
     void set_enable_console_output(bool enable);
@@ -113,6 +142,7 @@ private:
     std::vector<bool> keep_open_order_;
     std::vector<size_t> fillable_;
     std::vector<Order> next_open_orders_;
+    std::vector<Order> single_leftover_;
 
     // Last known mark/close price per symbol (from kline ClosePrice). Used for market-order notional estimation.
     std::unordered_map<std::string, double> last_mark_price_;
@@ -129,9 +159,14 @@ private:
     // sell limit: fill = max(limit, close*(1-slip), low)
     double limit_execution_slippage_{ 0.0 };
 
+    Policies policies_{ };
+
     KlineVolumeSplitMode kline_volume_split_mode_{ KlineVolumeSplitMode::TakerBuyOnly };
 
     bool enable_console_output_{ false };
+
+    // Monotonic state version for O(1) change detection by exchange.
+    uint64_t state_version_{ 0 };
 
     int generate_order_id();
     int generate_position_id();
@@ -158,4 +193,7 @@ private:
 
     void rebuild_open_order_index_();
     void rebuild_position_index_();
+
+public:
+    uint64_t get_state_version() const noexcept { return state_version_; }
 };

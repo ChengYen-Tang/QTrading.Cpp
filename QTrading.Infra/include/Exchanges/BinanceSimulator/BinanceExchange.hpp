@@ -98,6 +98,11 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
         std::unordered_map<std::string, uint64_t> next_ts_by_symbol_;
         std::priority_queue<HeapItem, std::vector<HeapItem>, HeapItemGreater> next_ts_heap_;
 
+        uint64_t last_account_version_{ 0 };
+
+        // P1: Reusable per-step buffer to avoid rebuilding an unordered_map each tick.
+        std::unordered_map<std::string, QTrading::Dto::Market::Binance::KlineDto> kline_snap_cache_;
+
         /// @brief Find the next timestamp to emit across all symbols.
         /// @param[out] ts Next timestamp (ms since epoch).
         /// @return True if data remains; false when all CSVs are exhausted.
