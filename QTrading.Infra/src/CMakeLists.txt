@@ -13,6 +13,10 @@ target_include_directories(QTrading.Infra.Library
     ${CMAKE_CURRENT_SOURCE_DIR}/../../QTrading.Utils/include
 )
 
+if(QTRADING_ENABLE_TRACE)
+  target_compile_definitions(QTrading.Infra.Library PRIVATE QTRADING_TRACE)
+endif()
+
 target_link_libraries(QTrading.Infra.Library
   PRIVATE
     QTrading.Logging.Library

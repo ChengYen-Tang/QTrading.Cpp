@@ -1,4 +1,5 @@
 ﻿#include "Aggregator/BinanceHourAggregator.hpp"
+#include "Debug/Trace.hpp"
 
 using namespace QTrading;
 using namespace QTrading::Dto::Market::Binance;
@@ -6,9 +7,6 @@ using namespace QTrading::DataPreprocess;
 using namespace QTrading::DataPreprocess::Aggregator;
 using namespace QTrading::Utils::Queue;
 
-/// @brief  Initialize with exchange source and window size.
-/// @param  ex             Exchange producing minute‐level MultiKlineDto.
-/// @param  hoursToKeep    Number of past hours to retain.
 BinanceHourAggregator::BinanceHourAggregator(
     std::shared_ptr<Infra::Exchanges::IExchange<MinutePtr>> ex,
     std::size_t hoursToKeep)
@@ -21,22 +19,25 @@ BinanceHourAggregator::BinanceHourAggregator(
             ChannelFactory::CreateBoundedChannel<
             std::shared_ptr<Dto::AggregateKline>>(16,
                 OverflowPolicy::DropOldest));
+
+    QTR_TRACE("agg", "BinanceHourAggregator constructed");
 }
 
-/// @brief  Main loop: receive minutes, aggregate, and emit hourly DTOs.
 void BinanceHourAggregator::run()
 {
+    QTR_TRACE("agg", "run loop begin");
     while (!stopFlag.load())
     {
-        if (inCh->IsClosed() && !inCh->TryReceive().has_value()) break;
-
+        QTR_TRACE("agg", "Receive minute begin");
         auto minuteOpt = inCh->Receive();
-        if (!minuteOpt) continue;
+        QTR_TRACE("agg", minuteOpt ? "Receive minute got value" : "Receive minute nullopt (closed+empty?)");
+        if (!minuteOpt) break; // closed & empty
         const auto& minute = minuteOpt.value();
 
         // absorb each symbol’s minute bar
-        for (const auto& [sym, optK] : minute->klines)
+        for (const auto& [sym, optK] : minute->klines) {
             if (optK) absorbMinute(sym, optK.value());
+        }
 
         // push downstream
         auto out = std::make_shared<Dto::AggregateKline>();
@@ -44,19 +45,20 @@ void BinanceHourAggregator::run()
         out->HistoricalKlines = cache;
 
         // include in-progress bar at front if initialised
-        for (const auto& [sym, st] : working)
+        for (const auto& [sym, st] : working) {
             if (st.initialised)
                 out->HistoricalKlines[sym].push_front(st.bar);
+        }
 
+        QTR_TRACE("agg", "Send downstream begin");
         market_channel->Send(out);
+        QTR_TRACE("agg", "Send downstream end");
     }
+    QTR_TRACE("agg", "run loop end");
 }
 
 /// @brief  Merge a single minute bar into the hourly aggregate.
-/// @param  sym  Symbol.
-/// @param  k    Minute‐level KlineDto.
-void BinanceHourAggregator::absorbMinute(const std::string& sym,
-    const KlineDto& k)
+void BinanceHourAggregator::absorbMinute(const std::string& sym, const KlineDto& k)
 {
     using clock = std::chrono::system_clock;
     const auto oneHour = std::chrono::hours(1);
@@ -70,7 +72,6 @@ void BinanceHourAggregator::absorbMinute(const std::string& sym,
             cache[sym].push_front(ws.bar);
         }
 
-        // start new working hour
         ws.hourStart = floorToHour(k.CloseDateTime);
         ws.bar = k;
         ws.bar.Timestamp =
@@ -93,9 +94,6 @@ void BinanceHourAggregator::absorbMinute(const std::string& sym,
     ws.bar.CloseDateTime = k.CloseDateTime;
 }
 
-/// @brief  Drop hours older than keepWindow.
-/// @param  sym  Symbol key.
-/// @param  now  Current hour start time.
 void BinanceHourAggregator::pruneOld(
     const std::string& sym,
     const std::chrono::system_clock::time_point& now)
@@ -111,9 +109,6 @@ void BinanceHourAggregator::pruneOld(
     }
 }
 
-/// @brief  Truncate time_point to the nearest hour.
-/// @param  tp  Input time_point.
-/// @return     Hour-aligned time_point.
 std::chrono::system_clock::time_point
 BinanceHourAggregator::floorToHour(const std::chrono::system_clock::time_point& tp)
 {

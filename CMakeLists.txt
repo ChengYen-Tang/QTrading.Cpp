@@ -5,6 +5,20 @@ project(QTrading.Cpp LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Trace instrumentation:
+# - Zero overhead unless QTRADING_ENABLE_TRACE is ON.
+# - Default: ON for Debug/RelWithDebInfo, OFF for Release/MinSizeRel.
+set(_qtrading_trace_default OFF)
+if(DEFINED CMAKE_BUILD_TYPE)
+  string(TOUPPER "${CMAKE_BUILD_TYPE}" _bt)
+  if(_bt STREQUAL "DEBUG" OR _bt STREQUAL "RELWITHDEBINFO")
+    set(_qtrading_trace_default ON)
+  endif()
+endif()
+option(QTRADING_ENABLE_TRACE "Enable QTRADING_TRACE instrumentation" ${_qtrading_trace_default})
+unset(_qtrading_trace_default)
+unset(_bt)
+
 # MSVC 静态 CRT & 全符号导出
 if(MSVC)
 #  set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")

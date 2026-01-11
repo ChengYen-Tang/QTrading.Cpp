@@ -1,6 +1,7 @@
 ﻿#include "Exchanges/BinanceSimulator/BinanceExchange.hpp"
 #include "Enum/LogModule.hpp"
 #include "Dto/AccountLog.hpp"
+#include "Debug/Trace.hpp"
 
 #include <future>
 
@@ -55,10 +56,10 @@ BinanceExchange::BinanceExchange(
 
     /// @details Create bounded channels:
     ///          - market_channel: 8-element sliding window of MultiKlineDto
-    ///          - position_channel / order_channel: 4-element debounce buffers
+    ///          - position_channel / order_channel: debounce buffers (latest snapshot is sufficient)
     market_channel = ChannelFactory::CreateBoundedChannel<MultiKlinePtr>(8, OverflowPolicy::DropOldest);
-    position_channel = ChannelFactory::CreateBoundedChannel<std::vector<dto::Position>>(4, OverflowPolicy::Block);
-    order_channel = ChannelFactory::CreateBoundedChannel<std::vector<dto::Order>>(4, OverflowPolicy::Block);
+    position_channel = ChannelFactory::CreateUnboundedChannel<std::vector<dto::Position>>();
+    order_channel = ChannelFactory::CreateUnboundedChannel<std::vector<dto::Order>>();
 }
 
 bool BinanceExchange::place_order(const std::string& symbol,
@@ -101,10 +102,13 @@ void BinanceExchange::close_position(const std::string& symbol,
 /// @return true if new data was emitted; false once all CSV data is exhausted.
 bool BinanceExchange::step()
 {
+    QTR_TRACE("ex", "step begin");
+
     log_status();
 
     // Terminate simulation (end backtest) once wallet balance is depleted.
     if (account->get_balance().WalletBalance <= 0.0) {
+        QTR_TRACE("ex", "balance depleted -> close channels");
         market_channel->Close();
         position_channel->Close();
         order_channel->Close();
@@ -114,6 +118,7 @@ bool BinanceExchange::step()
     uint64_t ts;
     /// @details Find the next minimum timestamp among all symbols.
     if (!next_timestamp(ts)) {
+        QTR_TRACE("ex", "no next timestamp -> close channels");
         market_channel->Close();
         position_channel->Close();
         order_channel->Close();
@@ -124,7 +129,10 @@ bool BinanceExchange::step()
     set_global_timestamp(ts);
     auto dto = std::make_shared<MultiKlineDto>();
     build_multikline(ts, *dto);
-    market_channel->Send(dto);    // always emit market
+
+    QTR_TRACE("ex", "market_channel Send begin");
+    market_channel->Send(dto);
+    QTR_TRACE("ex", "market_channel Send end");
 
     const uint64_t cur_ver = account->get_state_version();
 
@@ -132,12 +140,14 @@ bool BinanceExchange::step()
     if (cur_ver != last_account_version_) {
         const auto& curP = account->get_all_positions();
         if (!vec_equal(curP, last_pos_snapshot)) {
+            QTR_TRACE("ex", "position_channel Send");
             position_channel->Send(curP);
             last_pos_snapshot = curP;
         }
 
         const auto& curO = account->get_all_open_orders();
         if (!vec_equal(curO, last_ord_snapshot)) {
+            QTR_TRACE("ex", "order_channel Send");
             order_channel->Send(curO);
             last_ord_snapshot = curO;
         }
@@ -145,6 +155,7 @@ bool BinanceExchange::step()
         last_account_version_ = cur_ver;
     }
 
+    QTR_TRACE("ex", "step end");
     return true;
 }
 

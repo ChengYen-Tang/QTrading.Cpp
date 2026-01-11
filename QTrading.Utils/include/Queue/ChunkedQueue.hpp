@@ -75,12 +75,21 @@ namespace QTrading::Utils::Queue {
 
         void maybe_release_head() {
             if (!head_) return;
+
+            // If current head block is fully consumed and there's another block, advance.
             if (head_->begin == head_->end && head_->next) {
                 head_ = std::move(head_->next);
-                // tail_ remains valid; if queue was reduced to one block, tail_ should be head_.get()
                 if (!head_->next) {
                     tail_ = head_.get();
                 }
+                return;
+            }
+
+            // If queue becomes empty and we're on the last block, reset indices for reuse.
+            if (size_ == 0 && head_->begin == head_->end && !head_->next) {
+                head_->begin = 0;
+                head_->end = 0;
+                tail_ = head_.get();
             }
         }
 

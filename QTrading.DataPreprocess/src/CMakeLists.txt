@@ -10,6 +10,10 @@ target_include_directories(QTrading.DataPreprocess.Library
     ${CMAKE_CURRENT_SOURCE_DIR}/../../QTrading.Infra/include
 )
 
+if(QTRADING_ENABLE_TRACE)
+  target_compile_definitions(QTrading.DataPreprocess.Library PRIVATE QTRADING_TRACE)
+endif()
+
 target_link_libraries(QTrading.DataPreprocess.Library
   PRIVATE
     Boost::thread

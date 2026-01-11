@@ -12,7 +12,12 @@ target_include_directories(QTrading.Service PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/../QTrading.DataPreprocess/include
   ${CMAKE_CURRENT_SOURCE_DIR}/../QTrading.Infra/include
   ${CMAKE_CURRENT_SOURCE_DIR}/../QTrading.Strategy/include
+  ${CMAKE_CURRENT_SOURCE_DIR}/../QTrading.Utils/include
 )
+
+if(QTRADING_ENABLE_TRACE)
+  target_compile_definitions(QTrading.Service PRIVATE QTRADING_TRACE)
+endif()
 
 target_link_libraries(QTrading.Service
   PRIVATE
