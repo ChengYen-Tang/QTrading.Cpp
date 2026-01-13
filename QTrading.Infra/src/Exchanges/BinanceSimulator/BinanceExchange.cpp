@@ -1,7 +1,7 @@
 ﻿#include "Exchanges/BinanceSimulator/BinanceExchange.hpp"
 #include "Enum/LogModule.hpp"
 #include "Dto/AccountLog.hpp"
-#include "Debug/Trace.hpp"
+#include "Diagnostics/Trace.hpp"
 
 #include <future>
 

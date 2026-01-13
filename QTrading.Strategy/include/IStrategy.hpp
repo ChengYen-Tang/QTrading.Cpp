@@ -7,7 +7,7 @@
 #include <semaphore>
 #include <chrono>
 #include "Queue/Channel.hpp"
-#include "Debug/Trace.hpp"
+#include "Diagnostics/Trace.hpp"
 
 namespace QTrading::Strategy {
 

@@ -7,7 +7,7 @@
 #include "FileLogger/FeatherV2/AccountLog.hpp"
 #include "FileLogger/FeatherV2/Order.hpp"
 #include "FileLogger/FeatherV2/Position.hpp"
-#include "Debug/Trace.hpp"
+#include "Diagnostics/Trace.hpp"
 
 #include <vector>
 #include <memory>

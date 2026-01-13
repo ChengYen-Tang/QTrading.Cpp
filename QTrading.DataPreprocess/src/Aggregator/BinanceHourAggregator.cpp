@@ -1,5 +1,5 @@
 ﻿#include "Aggregator/BinanceHourAggregator.hpp"
-#include "Debug/Trace.hpp"
+#include "Diagnostics/Trace.hpp"
 
 using namespace QTrading;
 using namespace QTrading::Dto::Market::Binance;
