@@ -1,6 +1,7 @@
 ﻿#define _USE_MATH_DEFINES
 #include <cmath>
 #include <gtest/gtest.h>
+#include <chrono>
 #include <filesystem>
 #include <thread>
 
@@ -36,6 +37,7 @@ protected:
     std::shared_ptr<BinanceExchange>          ex;       ///< Exchange simulator
     std::unique_ptr<BinanceHourAggregator>    agg;      ///< Aggregator under test
     std::shared_ptr<QTrading::Log::Logger>    logger;   ///< MockLogger instance
+    using AggChannel = QTrading::Utils::Queue::Channel<AggPtr>;
 
     /// @brief  Write a minute‐level CSV for a symbol.
     /// @param  path            Relative CSV filename under tmpDir.
@@ -51,17 +53,21 @@ protected:
         double     priceBase = 1.0,
         double     vol = 100,
         uint64_t   driftMs = 0,
-        const std::function<double(size_t)>& priceFn = {})
+        const std::function<double(size_t)>& priceFn = {},
+        bool append = false)
     {
         std::filesystem::path fullPath = tmpDir / path;
-        bool fileExists = std::filesystem::exists(fullPath);
 
         std::ofstream f;
-        if (fileExists) {
+        if (append) {
+            const bool fileExists = std::filesystem::exists(fullPath);
             f.open(fullPath, std::ios::app);
+            if (!fileExists) {
+                f << "openTime,open,high,low,close,volume,closeTime,quoteVol,tradeCnt,takerBB,takerBQ\n";
+            }
         }
         else {
-            f.open(fullPath);
+            f.open(fullPath, std::ios::trunc);
             f << "openTime,open,high,low,close,volume,closeTime,quoteVol,tradeCnt,takerBB,takerBQ\n";
         }
 
@@ -75,6 +81,44 @@ protected:
                 << price << ',' << vol << ',' << closeTs << ','
                 << vol << ",1,0,0\n";
         }
+    }
+
+    /// @brief  Wait until predicate passes or timeout.
+    bool wait_for_update(const std::shared_ptr<AggChannel>& ch,
+        const std::function<bool(const AggPtr&)>& predicate,
+        std::chrono::milliseconds timeout,
+        AggPtr& out)
+    {
+        AggPtr last;
+        auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (std::chrono::steady_clock::now() < deadline) {
+            while (auto p = ch->TryReceive()) {
+                last = p.value();
+                if (last && predicate(last)) {
+                    out = last;
+                    return true;
+                }
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        out = last;
+        return false;
+    }
+
+    /// @brief  Wait for a specific minute timestamp to be processed.
+    bool wait_for_timestamp(const std::shared_ptr<AggChannel>& ch,
+        uint64_t expected_ts,
+        std::chrono::milliseconds timeout,
+        AggPtr& out)
+    {
+        return wait_for_update(ch,
+            [expected_ts](const AggPtr& aggUpdate) {
+                return aggUpdate &&
+                    aggUpdate->CurrentKlines &&
+                    aggUpdate->CurrentKlines->Timestamp == expected_ts;
+            },
+            timeout,
+            out);
     }
 
     /// @brief  Prepare test: create tmpDir and start mock logger.
@@ -113,11 +157,26 @@ TEST_F(AggregatorFixture, BasicAggregate)
     agg->start();
     auto ch = agg->get_market_channel();
 
-    for (int i = 0; i < 60; ++i) ex->step();
-    std::this_thread::sleep_for(std::chrono::milliseconds(40));
-
+    const uint64_t base_ts = 1'704'038'400'000ULL;
     AggPtr last;
-    while (auto p = ch->TryReceive()) last = p.value();
+    for (int i = 0; i < 60; ++i) {
+        ASSERT_TRUE(ex->step());
+        const uint64_t expected_ts = base_ts + (static_cast<uint64_t>(i) * 60'000ULL);
+        AggPtr update;
+        const bool got = wait_for_timestamp(
+            ch,
+            expected_ts,
+            std::chrono::milliseconds(5000),
+            update);
+        ASSERT_TRUE(got)
+            << "expected_ts=" << expected_ts
+            << " last_ts=" << (update && update->CurrentKlines
+                ? update->CurrentKlines->Timestamp
+                : 0ULL);
+        last = update;
+    }
+    const uint64_t expected_close =
+        base_ts + (59 * 60'000ULL) + 59'000ULL;
     ASSERT_TRUE(last);
 
     const auto& bars = last->HistoricalKlines.at("BTCUSDT");
@@ -125,7 +184,7 @@ TEST_F(AggregatorFixture, BasicAggregate)
 
     const auto& bar = bars.front();
 	EXPECT_EQ(bar.Timestamp, 1'704'038'400'000ULL);
-	EXPECT_EQ(bar.CloseTime, 1'704'038'400'000ULL + (59 * 60'000ULL) + 59'000ULL);
+    EXPECT_EQ(bar.CloseTime, expected_close);
     EXPECT_EQ(bar.OpenPrice, 1.0);         // first minute
     EXPECT_EQ(bar.ClosePrice, 1.0 + 59);    // last minute
     EXPECT_EQ(bar.HighPrice, 1.0 + 59);
@@ -225,7 +284,7 @@ TEST_F(AggregatorFixture, LargeJumpRollover)
 {
     /* First minute at t=0, second minute at t=90min → jump 1.5h */
     writeCsv("jump.csv", 1, 0, 1.0, 10);
-    writeCsv("jump.csv", 1, 180, 101.0, 20, 0, [](size_t i) {return 101.0; }); // append
+    writeCsv("jump.csv", 1, 180, 101.0, 20, 0, [](size_t i) {return 101.0; }, true); // append
 
     ex = std::make_shared<BinanceExchange>(std::vector<std::pair<std::string, std::string>>{ {"JMP",(tmpDir / "jump.csv").string()} }, logger);
     agg = std::make_unique<BinanceHourAggregator>(ex, 2);
@@ -252,20 +311,37 @@ TEST_F(AggregatorFixture, LargeJumpRollover)
 TEST_F(AggregatorFixture, GapInsideHour)
 {
     /* Generate minutes 0‑24 and 35‑59 (10‑minute gap) */
-    writeCsv("gap.csv", 25, 0, 50, 5);          // 0‑24
-    writeCsv("gap.csv", 25, 35, 75, 5, 0,        // 35‑59
-        [](size_t i) { return 75 + i; });
+    writeCsv("gap.csv", 25, 0, 50, 5);          // 0-24
+    writeCsv("gap.csv", 25, 35, 75, 5, 0,        // 35-59
+        [](size_t i) { return 75 + i; }, true);
 
     ex = std::make_shared<BinanceExchange>(std::vector<std::pair<std::string, std::string>>{ {"GAP",(tmpDir / "gap.csv").string()} }, logger);
     agg = std::make_unique<BinanceHourAggregator>(ex, 1);
     agg->start();
     auto ch = agg->get_market_channel();
 
-    for (int i = 0; i < 50; ++i) ex->step();          // 50 rows total
-    std::this_thread::sleep_for(std::chrono::milliseconds(30));
-
+    const uint64_t base_ts = 1'704'038'400'000ULL;
     AggPtr last;
-    while (auto p = ch->TryReceive()) last = p.value();
+    for (int i = 0; i < 50; ++i) {
+        ASSERT_TRUE(ex->step());
+        const uint64_t minute = (i < 25) ? static_cast<uint64_t>(i)
+            : (static_cast<uint64_t>(i) + 10ULL);
+        const uint64_t expected_ts = base_ts + (minute * 60'000ULL);
+        AggPtr update;
+        const bool got = wait_for_timestamp(
+            ch,
+            expected_ts,
+            std::chrono::milliseconds(5000),
+            update);
+        ASSERT_TRUE(got)
+            << "expected_ts=" << expected_ts
+            << " last_ts=" << (update && update->CurrentKlines
+                ? update->CurrentKlines->Timestamp
+                : 0ULL);
+        last = update;
+    }
+    const uint64_t expected_close =
+        base_ts + (59 * 60'000ULL) + 59'000ULL;
     ASSERT_TRUE(last);
 
     const auto& bar = last->HistoricalKlines.at("GAP").front();

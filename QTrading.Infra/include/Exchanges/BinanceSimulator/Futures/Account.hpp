@@ -4,6 +4,7 @@
 #include <vector>
 #include <unordered_map>
 #include <tuple>
+#include <memory_resource>
 #include "Dto/Order.hpp"
 #include "Dto/Position.hpp"
 #include "Dto/Market/Binance/Kline.hpp"
@@ -133,16 +134,24 @@ private:
     // Fast lookup indices (rebuilt when containers are rebuilt).
     std::unordered_map<int, size_t> open_order_index_by_id_;
     std::unordered_map<int, size_t> position_index_by_id_;
+    std::unordered_map<std::string, std::vector<size_t>> position_indices_by_symbol_;
 
-    // Per-tick reusable scratch buffers to reduce allocations in update_positions().
-    std::unordered_map<std::string, double> remaining_vol_;
-    std::unordered_map<std::string, std::pair<double, double>> remaining_liq_;
-    std::unordered_map<std::string, bool> has_dir_liq_;
-    std::unordered_map<std::string, std::vector<size_t>> per_symbol_;
-    std::vector<bool> keep_open_order_;
-    std::vector<size_t> fillable_;
-    std::vector<Order> next_open_orders_;
-    std::vector<Order> single_leftover_;
+    // Reusable buffers/caches to reduce allocations in update_positions().
+    std::pmr::unsynchronized_pool_resource tick_memory_;
+    std::unordered_map<std::string, size_t> symbol_id_by_name_;
+    std::vector<double> remaining_vol_;
+    std::vector<std::pair<double, double>> remaining_liq_;
+    std::vector<char> has_dir_liq_;
+    // Cached per-symbol open order indices in priority order (indexed by symbol id).
+    std::vector<std::vector<size_t>> per_symbol_;
+    std::vector<size_t> per_symbol_active_ids_;
+    std::vector<const QTrading::Dto::Market::Binance::KlineDto*> kline_by_id_;
+    struct FillCandidate {
+        size_t idx{};
+        bool is_taker{};
+    };
+    std::vector<size_t> merge_indices_;
+    std::vector<Position> merged_positions_;
 
     // Last known mark/close price per symbol (from kline ClosePrice). Used for market-order notional estimation.
     std::unordered_map<std::string, double> last_mark_price_;
@@ -167,6 +176,13 @@ private:
 
     // Monotonic state version for O(1) change detection by exchange.
     uint64_t state_version_{ 0 };
+    // Monotonic open-order version for per-symbol cache invalidation.
+    uint64_t open_orders_version_{ 0 };
+    uint64_t per_symbol_cache_version_{ static_cast<uint64_t>(-1) };
+    // Cached balance snapshot to avoid repeated O(P+O) scans.
+    mutable QTrading::Dto::Account::BalanceSnapshot balance_cache_{};
+    mutable uint64_t balance_cache_version_{ static_cast<uint64_t>(-1) };
+    uint64_t balance_version_{ 0 };
 
     int generate_order_id();
     int generate_position_id();
@@ -193,6 +209,11 @@ private:
 
     void rebuild_open_order_index_();
     void rebuild_position_index_();
+    void rebuild_per_symbol_cache_();
+    size_t get_symbol_id_(const std::string& symbol);
+    void ensure_symbol_capacity_(size_t id);
+    void mark_open_orders_dirty_();
+    void mark_balance_dirty_();
 
 public:
     uint64_t get_state_version() const noexcept { return state_version_; }

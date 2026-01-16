@@ -4,6 +4,7 @@
 #include <vector>
 #include <optional>
 #include <queue>
+#include <cstdint>
 
 #include "Exchanges/IExchange.h"
 #include "Exchanges/BinanceSimulator/DataProvider/MarketData.hpp"
@@ -76,8 +77,9 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
         void  close() override;
     private:
         std::shared_ptr<QTrading::Log::Logger> logger;        ///< Logger for account/order/position events.
-        std::unordered_map<std::string, MarketData> md;       ///< CSV-backed data provider per symbol.
-        std::unordered_map<std::string, size_t>     cursor;   ///< Current read index per symbol.
+        std::vector<std::string>                    symbols_; ///< Stable symbol list.
+        std::vector<MarketData>                     md_;      ///< CSV-backed data provider per symbol.
+        std::vector<size_t>                         cursor_;  ///< Current read index per symbol.
         std::shared_ptr<Account>                    account;  ///< Simulated margin account engine.
 
         std::vector<dto::Position> last_pos_snapshot;   ///< Last-debounced snapshot of positions.
@@ -86,19 +88,21 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
         // Multiway merge state: next timestamp for each symbol + a min-heap.
         struct HeapItem {
             uint64_t ts;
-            std::string sym;
+            size_t sym_id;
         };
         struct HeapItemGreater {
             bool operator()(const HeapItem& a, const HeapItem& b) const {
                 if (a.ts != b.ts) return a.ts > b.ts;      // min-heap by timestamp
-                return a.sym > b.sym;                      // tie-break deterministically by symbol
+                return a.sym_id > b.sym_id;                // tie-break deterministically by symbol id
             }
         };
 
-        std::unordered_map<std::string, uint64_t> next_ts_by_symbol_;
+        std::vector<uint64_t> next_ts_by_symbol_;
+        std::vector<uint8_t>  has_next_ts_;
         std::priority_queue<HeapItem, std::vector<HeapItem>, HeapItemGreater> next_ts_heap_;
 
         uint64_t last_account_version_{ 0 };
+        uint64_t last_logged_version_{ static_cast<uint64_t>(-1) };
 
         // P1: Reusable per-step buffer to avoid rebuilding an unordered_map each tick.
         std::unordered_map<std::string, QTrading::Dto::Market::Binance::KlineDto> kline_snap_cache_;

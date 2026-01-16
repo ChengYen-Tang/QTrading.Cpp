@@ -28,7 +28,10 @@ void Account::rebuild_position_index_()
 {
     position_index_by_id_.clear();
     position_index_by_id_.reserve(positions_.size());
+    position_indices_by_symbol_.clear();
+    position_indices_by_symbol_.reserve(positions_.size());
     for (size_t i = 0; i < positions_.size(); ++i) {
         position_index_by_id_[positions_[i].id] = i;
+        position_indices_by_symbol_[positions_[i].symbol].push_back(i);
     }
 }

@@ -4,6 +4,9 @@
 #include "Diagnostics/Trace.hpp"
 
 #include <future>
+#include <memory>
+#include <memory_resource>
+#include <utility>
 
 using namespace QTrading;
 using namespace QTrading::Infra::Exchanges::BinanceSim;
@@ -11,6 +14,23 @@ using namespace QTrading::Dto::Market::Binance;
 using namespace QTrading::Utils::Queue;
 using namespace QTrading::Log;
 
+namespace {
+
+std::pmr::synchronized_pool_resource& log_pool()
+{
+    static std::pmr::synchronized_pool_resource pool{ std::pmr::new_delete_resource() };
+    return pool;
+}
+
+template <typename T, typename... Args>
+std::shared_ptr<T> make_pooled(Args&&... args)
+{
+    auto& pool = log_pool();
+    std::pmr::polymorphic_allocator<T> alloc(&pool);
+    return std::allocate_shared<T>(alloc, std::forward<Args>(args)...);
+}
+
+} // namespace
 
 /// @brief Simulator for Binance futures exchange.
 /// @details Reads multiple CSV files (one per symbol), publishes multi-symbol 1-minute bars,
@@ -32,25 +52,31 @@ BinanceExchange::BinanceExchange(
     : logger(logger), account(account)
 {
     // Load each CSV in parallel (safe: each MarketData instance is independent).
-    std::vector<std::pair<std::string, std::future<MarketData>>> jobs;
+    std::vector<std::future<MarketData>> jobs;
+    symbols_.reserve(symbolCsv.size());
+    md_.reserve(symbolCsv.size());
+    cursor_.assign(symbolCsv.size(), 0);
+    next_ts_by_symbol_.assign(symbolCsv.size(), 0);
+    has_next_ts_.assign(symbolCsv.size(), 0);
     jobs.reserve(symbolCsv.size());
 
     for (const auto& [sym, csv] : symbolCsv) {
-        jobs.emplace_back(sym, std::async(std::launch::async, [sym, csv]() {
+        symbols_.push_back(sym);
+        jobs.emplace_back(std::async(std::launch::async, [sym, csv]() {
             return MarketData(sym, csv);
             }));
-        cursor[sym] = 0;
     }
 
-    // Collect results deterministically by symbol and initialize heap state.
-    for (auto& [sym, fut] : jobs) {
-        md.emplace(sym, fut.get());
+    // Collect results deterministically by input order and initialize heap state.
+    for (size_t i = 0; i < jobs.size(); ++i) {
+        md_.push_back(jobs[i].get());
 
-        const auto& data = md.at(sym);
-        if (cursor.at(sym) < data.get_klines_count()) {
-            const uint64_t ts = data.get_kline(cursor.at(sym)).Timestamp;
-            next_ts_by_symbol_[sym] = ts;
-            next_ts_heap_.push(HeapItem{ ts, sym });
+        const auto& data = md_[i];
+        if (cursor_[i] < data.get_klines_count()) {
+            const uint64_t ts = data.get_kline(cursor_[i]).Timestamp;
+            next_ts_by_symbol_[i] = ts;
+            has_next_ts_[i] = 1;
+            next_ts_heap_.push(HeapItem{ ts, i });
         }
     }
 
@@ -127,7 +153,7 @@ bool BinanceExchange::step()
 
     /// @details Publish multi-symbol market data at timestamp `ts`.
     set_global_timestamp(ts);
-    auto dto = std::make_shared<MultiKlineDto>();
+    auto dto = make_pooled<MultiKlineDto>();
     build_multikline(ts, *dto);
 
     QTR_TRACE("ex", "market_channel Send begin");
@@ -175,8 +201,10 @@ const std::vector<dto::Order>& BinanceExchange::get_all_open_orders() const {
 /// @details Advances each symbol’s cursor to the end before closing.
 void BinanceExchange::close()
 {
-    for (auto& [s, idx] : cursor) 
-        idx = md.at(s).get_klines_count();
+    for (size_t i = 0; i < md_.size(); ++i) {
+        cursor_[i] = md_[i].get_klines_count();
+        has_next_ts_[i] = 0;
+    }
 
 	IExchange<MultiKlinePtr>::close();
 }
@@ -189,8 +217,9 @@ bool BinanceExchange::next_timestamp(uint64_t& ts)
     // Pop stale heap entries until top matches current per-symbol next_ts.
     while (!next_ts_heap_.empty()) {
         const auto top = next_ts_heap_.top();
-        auto it = next_ts_by_symbol_.find(top.sym);
-        if (it != next_ts_by_symbol_.end() && it->second == top.ts) {
+        if (top.sym_id < next_ts_by_symbol_.size() &&
+            has_next_ts_[top.sym_id] &&
+            next_ts_by_symbol_[top.sym_id] == top.ts) {
             ts = top.ts;
             return true;
         }
@@ -207,29 +236,32 @@ void BinanceExchange::build_multikline(uint64_t ts, MultiKlineDto& out)
 {
     out.Timestamp = ts;
     out.klines.clear();
-    out.klines.reserve(md.size());
+    out.klines.reserve(md_.size());
 
     kline_snap_cache_.clear();
-    kline_snap_cache_.reserve(md.size());
+    kline_snap_cache_.reserve(md_.size());
 
-    for (auto& [sym, data] : md) {
-        size_t idx = cursor[sym];
+    for (size_t i = 0; i < md_.size(); ++i) {
+        const auto& sym = symbols_[i];
+        auto& data = md_[i];
+        size_t idx = cursor_[i];
         if (idx < data.get_klines_count() &&
             data.get_kline(idx).Timestamp == ts)
         {
             const auto& k = data.get_kline(idx);
             out.klines.emplace(sym, k);
             kline_snap_cache_.emplace(sym, k);
-            ++cursor[sym];
+            ++cursor_[i];
 
             // Advance this symbol in the multiway merge heap.
-            if (cursor[sym] < data.get_klines_count()) {
-                const uint64_t next_ts = data.get_kline(cursor[sym]).Timestamp;
-                next_ts_by_symbol_[sym] = next_ts;
-                next_ts_heap_.push(HeapItem{ next_ts, sym });
+            if (cursor_[i] < data.get_klines_count()) {
+                const uint64_t next_ts = data.get_kline(cursor_[i]).Timestamp;
+                next_ts_by_symbol_[i] = next_ts;
+                has_next_ts_[i] = 1;
+                next_ts_heap_.push(HeapItem{ next_ts, i });
             }
             else {
-                next_ts_by_symbol_.erase(sym);
+                has_next_ts_[i] = 0;
             }
         }
         else {
@@ -243,19 +275,34 @@ void BinanceExchange::build_multikline(uint64_t ts, MultiKlineDto& out)
 /// @brief Log account balance, positions, and orders via the Logger.
 /// @details Uses Arrow Feather-V2 for efficient batch logging.
 void BinanceExchange::log_status() {
+    if (!logger) {
+        return;
+    }
+
+    const uint64_t cur_ver = account->get_state_version();
+    if (cur_ver == last_logged_version_) {
+        return;
+    }
+
+    const auto& account_module = LogModuleToString(LogModule::Account);
+    const auto& position_module = LogModuleToString(LogModule::Position);
+    const auto& order_module = LogModuleToString(LogModule::Order);
+
     auto snap = account->get_balance();
-    auto account_log = std::make_shared<AccountLog>(AccountLog{ snap.WalletBalance, snap.UnrealizedPnl, snap.MarginBalance });
-	logger->Log(LogModuleToString(LogModule::Account), account_log);
+    auto account_log = make_pooled<AccountLog>(AccountLog{ snap.WalletBalance, snap.UnrealizedPnl, snap.MarginBalance });
+	logger->Log(account_module, account_log);
     const auto& curP = account->get_all_positions();
     for (const auto& p : curP) {
-        auto pos_log = std::make_shared<Position>(p);
-        logger->Log(LogModuleToString(LogModule::Position), pos_log);
+        auto pos_log = make_pooled<Position>(p);
+        logger->Log(position_module, pos_log);
 	}
     const auto& curO = account->get_all_open_orders();
     for (const auto& o : curO) {
-        auto ord_log = std::make_shared<Order>(o);
-        logger->Log(LogModuleToString(LogModule::Order), ord_log);
+        auto ord_log = make_pooled<Order>(o);
+        logger->Log(order_module, ord_log);
     }
+
+    last_logged_version_ = cur_ver;
 }
 
 namespace {

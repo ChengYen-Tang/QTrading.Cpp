@@ -6,6 +6,8 @@
 #include <cmath>
 #include <algorithm>
 #include <unordered_map>
+#include <future>
+#include <thread>
 
 using QTrading::Dto::Market::Binance::KlineDto;
 using QTrading::Dto::Trading::OrderSide;
@@ -185,23 +187,25 @@ Account::Account(double initial_balance, int vip_level)
     hedge_mode_(false),
     next_order_id_(1),
     next_position_id_(1),
-    policies_(DefaultPolicies())
+    policies_(DefaultPolicies()),
+    tick_memory_(std::pmr::new_delete_resource())
 {
     open_orders_.reserve(1024);
     positions_.reserve(1024);
 
     open_order_index_by_id_.reserve(2048);
     position_index_by_id_.reserve(2048);
+    position_indices_by_symbol_.reserve(1024);
 
+    symbol_id_by_name_.reserve(1024);
     remaining_vol_.reserve(1024);
     remaining_liq_.reserve(1024);
     has_dir_liq_.reserve(1024);
     per_symbol_.reserve(1024);
-    keep_open_order_.reserve(1024);
-    fillable_.reserve(1024);
-    next_open_orders_.reserve(1024);
-
-    single_leftover_.reserve(1);
+    per_symbol_active_ids_.reserve(1024);
+    kline_by_id_.reserve(1024);
+    merge_indices_.reserve(1024);
+    merged_positions_.reserve(1024);
 }
 
 Account::Account(double initial_balance, int vip_level, Policies policies)
@@ -282,12 +286,17 @@ static QTrading::Dto::Account::BalanceSnapshot build_snapshot(
 }
 
 QTrading::Dto::Account::BalanceSnapshot Account::get_balance() const {
-    return build_snapshot(wallet_balance_, positions_, open_orders_, symbol_leverage_, last_mark_price_, market_slippage_buffer_);
+    if (balance_cache_version_ != balance_version_) {
+        balance_cache_ = build_snapshot(wallet_balance_, positions_, open_orders_, symbol_leverage_, last_mark_price_, market_slippage_buffer_);
+        balance_cache_version_ = balance_version_;
+    }
+    return balance_cache_;
 }
 
 void Account::set_market_slippage_buffer(double pct)
 {
     market_slippage_buffer_ = pct;
+    mark_balance_dirty_();
 }
 
 void Account::set_market_execution_slippage(double pct)
@@ -303,6 +312,91 @@ void Account::set_limit_execution_slippage(double pct)
 void Account::set_kline_volume_split_mode(KlineVolumeSplitMode mode)
 {
     kline_volume_split_mode_ = mode;
+}
+
+void Account::mark_open_orders_dirty_()
+{
+    ++open_orders_version_;
+    mark_balance_dirty_();
+}
+
+void Account::mark_balance_dirty_()
+{
+    ++balance_version_;
+}
+
+void Account::ensure_symbol_capacity_(size_t id)
+{
+    const size_t need = id + 1;
+    if (per_symbol_.size() < need) {
+        per_symbol_.resize(need);
+        remaining_vol_.resize(need);
+        remaining_liq_.resize(need);
+        has_dir_liq_.resize(need);
+        kline_by_id_.resize(need);
+    }
+}
+
+size_t Account::get_symbol_id_(const std::string& symbol)
+{
+    auto it = symbol_id_by_name_.find(symbol);
+    if (it != symbol_id_by_name_.end()) {
+        return it->second;
+    }
+
+    const size_t id = symbol_id_by_name_.size();
+    symbol_id_by_name_.emplace(symbol, id);
+    ensure_symbol_capacity_(id);
+    return id;
+}
+
+void Account::rebuild_per_symbol_cache_()
+{
+    for (auto& indices : per_symbol_) {
+        indices.clear();
+    }
+    per_symbol_active_ids_.clear();
+    per_symbol_active_ids_.reserve(open_orders_.size());
+    for (size_t i = 0; i < open_orders_.size(); ++i) {
+        const size_t sym_id = get_symbol_id_(open_orders_[i].symbol);
+        auto& indices = per_symbol_[sym_id];
+        if (indices.empty()) {
+            per_symbol_active_ids_.push_back(sym_id);
+        }
+        indices.push_back(i);
+    }
+
+    auto less = [this](size_t a, size_t b) {
+        const Order& A = open_orders_[a];
+        const Order& B = open_orders_[b];
+
+        const bool Am = (A.price <= 0.0);
+        const bool Bm = (B.price <= 0.0);
+        if (Am != Bm) return Am;
+
+        const bool A_is_buy = (A.side == OrderSide::Buy);
+        const bool B_is_buy = (B.side == OrderSide::Buy);
+
+        if (!Am && A_is_buy == B_is_buy) {
+            if (A_is_buy) {
+                if (A.price != B.price) return A.price > B.price;
+            }
+            else {
+                if (A.price != B.price) return A.price < B.price;
+            }
+        }
+
+        return A.id < B.id;
+    };
+
+    for (size_t sym_id : per_symbol_active_ids_) {
+        auto& indices = per_symbol_[sym_id];
+        if (indices.size() > 1) {
+            std::sort(indices.begin(), indices.end(), less);
+        }
+    }
+
+    per_symbol_cache_version_ = open_orders_version_;
 }
 
 double Account::get_wallet_balance() const {
@@ -336,7 +430,11 @@ void Account::set_position_mode(bool hedgeMode) {
         }
         return;
     }
+    if (hedge_mode_ == hedgeMode) {
+        return;
+    }
     hedge_mode_ = hedgeMode;
+    mark_balance_dirty_();
 }
 
 
@@ -368,6 +466,7 @@ void Account::set_symbol_leverage(const std::string& symbol, double newLeverage)
     }
     if (it == symbol_leverage_.end()) {
         symbol_leverage_[symbol] = newLeverage;
+        mark_balance_dirty_();
     }
     else {
         if (adjust_position_leverage(symbol, oldLev, newLeverage)) {
@@ -467,6 +566,7 @@ bool Account::place_order(const std::string& symbol,
         -1
     };
     open_orders_.push_back(newOrd);
+    mark_open_orders_dirty_();
     ++state_version_;
     return true;
 }
@@ -488,76 +588,79 @@ bool Account::place_order(const std::string& symbol,
 /// @return true if the order was converted into a closing/reverse order.
 bool Account::handleOneWayReverseOrder(const std::string& symbol, double quantity, double price, OrderSide side) {
     // In one-way mode we maintain at most one net position per symbol.
-    for (auto& pos : positions_) {
-        if (pos.symbol != symbol) continue;
+    auto it = position_indices_by_symbol_.find(symbol);
+    if (it == position_indices_by_symbol_.end() || it->second.empty()) {
+        return false;
+    }
 
-        const bool posIsLong = pos.is_long;
-        const bool orderIsBuy = (side == OrderSide::Buy);
+    Position& pos = positions_[it->second.front()];
+    const bool posIsLong = pos.is_long;
+    const bool orderIsBuy = (side == OrderSide::Buy);
 
-        // Same-direction add: BUY with long position, or SELL with short position.
-        if ((posIsLong && orderIsBuy) || (!posIsLong && !orderIsBuy)) {
-            return false;
-        }
+    // Same-direction add: BUY with long position, or SELL with short position.
+    if ((posIsLong && orderIsBuy) || (!posIsLong && !orderIsBuy)) {
+        return false;
+    }
 
-        // Reverse-direction: this is a reduce/flip.
-        double pos_qty = pos.quantity;
-        double order_qty = quantity;
+    // Reverse-direction: this is a reduce/flip.
+    double pos_qty = pos.quantity;
+    double order_qty = quantity;
 
-        // This is a closing action, so create a closing order targeting the existing position id.
-        // Closing direction is opposite the position: long closes via SELL, short closes via BUY.
-        const OrderSide closeSide = posIsLong ? OrderSide::Sell : OrderSide::Buy;
+    // This is a closing action, so create a closing order targeting the existing position id.
+    // Closing direction is opposite the position: long closes via SELL, short closes via BUY.
+    const OrderSide closeSide = posIsLong ? OrderSide::Sell : OrderSide::Buy;
 
-        if (order_qty <= pos_qty) {
-            int oid = generate_order_id();
-            Order closingOrd{
-                oid,
-                symbol,
-                order_qty,
-                price,
-                closeSide,
-                PositionSide::Both,
-                false,
-                pos.id
-            };
-            open_orders_.push_back(closingOrd);
-            return true;
-        }
-
-        // order_qty > pos_qty: first close the existing position, then open a new reverse position.
-        {
-            int oid = generate_order_id();
-            Order closingOrd{
-                oid,
-                symbol,
-                pos_qty,
-                price,
-                closeSide,
-                PositionSide::Both,
-                false,
-                pos.id
-            };
-            open_orders_.push_back(closingOrd);
-        }
-
-        const double newOpenQty = order_qty - pos_qty;
-        const OrderSide openSide = side;
-        {
-            int openOid = generate_order_id();
-            Order newOpen{
-                openOid,
-                symbol,
-                newOpenQty,
-                price,
-                openSide,
-                PositionSide::Both,
-                false,
-                -1
-            };
-            open_orders_.push_back(newOpen);
-        }
+    if (order_qty <= pos_qty) {
+        int oid = generate_order_id();
+        Order closingOrd{
+            oid,
+            symbol,
+            order_qty,
+            price,
+            closeSide,
+            PositionSide::Both,
+            false,
+            pos.id
+        };
+        open_orders_.push_back(closingOrd);
+        mark_open_orders_dirty_();
         return true;
     }
-    return false;
+
+    // order_qty > pos_qty: first close the existing position, then open a new reverse position.
+    {
+        int oid = generate_order_id();
+        Order closingOrd{
+            oid,
+            symbol,
+            pos_qty,
+            price,
+            closeSide,
+            PositionSide::Both,
+            false,
+            pos.id
+        };
+        open_orders_.push_back(closingOrd);
+    }
+
+    const double newOpenQty = order_qty - pos_qty;
+    const OrderSide openSide = side;
+    {
+        int openOid = generate_order_id();
+        Order newOpen{
+            openOid,
+            symbol,
+            newOpenQty,
+            price,
+            openSide,
+            PositionSide::Both,
+            false,
+            -1
+        };
+        open_orders_.push_back(newOpen);
+    }
+    mark_open_orders_dirty_();
+    return true;
 }
 
 /// @brief Create a closing order for a specific position.
@@ -565,23 +668,24 @@ bool Account::handleOneWayReverseOrder(const std::string& symbol, double quantit
 /// @param quantity     Amount to close.
 /// @param price        Close price (<=0 = market).
 void Account::place_closing_order(int position_id, double quantity, double price) {
-    for (const auto& pos : positions_) {
-        if (pos.id == position_id) {
-            int oid = generate_order_id();
-            const OrderSide closeSide = pos.is_long ? OrderSide::Sell : OrderSide::Buy;
-            Order closingOrd{
-                oid,
-                pos.symbol,
-                quantity,
-                price,
-                closeSide,
-                hedge_mode_ ? (pos.is_long ? PositionSide::Long : PositionSide::Short) : PositionSide::Both,
-                false,
-                position_id
-            };
-            open_orders_.push_back(closingOrd);
-            return;
-        }
+    auto it = position_index_by_id_.find(position_id);
+    if (it != position_index_by_id_.end()) {
+        const Position& pos = positions_[it->second];
+        int oid = generate_order_id();
+        const OrderSide closeSide = pos.is_long ? OrderSide::Sell : OrderSide::Buy;
+        Order closingOrd{
+            oid,
+            pos.symbol,
+            quantity,
+            price,
+            closeSide,
+            hedge_mode_ ? (pos.is_long ? PositionSide::Long : PositionSide::Short) : PositionSide::Both,
+            false,
+            position_id
+        };
+        open_orders_.push_back(closingOrd);
+        mark_open_orders_dirty_();
+        return;
     }
     if (enable_console_output_) {
         std::cerr << "[place_closing_order] position_id=" << position_id << " not found\n";
@@ -593,52 +697,56 @@ void Account::place_closing_order(int position_id, double quantity, double price
 /// @details Aggregates quantities and recalculates weighted entry price, margin, fees.
 void Account::merge_positions() {
     if (positions_.empty()) return;
+    merge_indices_.clear();
+    merge_indices_.reserve(positions_.size());
+    for (size_t i = 0; i < positions_.size(); ++i) {
+        merge_indices_.push_back(i);
+    }
 
-    // Define a key by symbol and direction.
-    struct Key {
-        std::string sym;
-        bool dir;
-        bool operator==(const Key& o) const {
-            return (sym == o.sym && dir == o.dir);
-        }
+    auto less = [this](size_t a, size_t b) {
+        const Position& A = positions_[a];
+        const Position& B = positions_[b];
+        if (A.symbol != B.symbol) return A.symbol < B.symbol;
+        if (A.is_long != B.is_long) return A.is_long < B.is_long;
+        return a < b;
     };
-    struct KeyHash {
-        std::size_t operator()(const Key& k) const {
-            auto h1 = std::hash<std::string>()(k.sym);
-            auto h2 = std::hash<bool>()(k.dir);
-            return (h1 ^ (h2 + 0x9e3779b97f4a7c15ULL + (h1 << 6) + (h1 >> 2)));
-        }
-    };
+    std::sort(merge_indices_.begin(), merge_indices_.end(), less);
 
-    std::unordered_map<Key, Position, KeyHash> merged;
-    for (auto& pos : positions_) {
-        Key key{ pos.symbol, pos.is_long };
-        if (merged.find(key) == merged.end()) {
-            merged[key] = pos;
-        }
-        else {
-            Position& p0 = merged[key];
-            double totalQty = p0.quantity + pos.quantity;
+    merged_positions_.clear();
+    merged_positions_.reserve(positions_.size());
+
+    size_t i = 0;
+    while (i < merge_indices_.size()) {
+        const Position& first = positions_[merge_indices_[i]];
+        Position merged = first;
+
+        size_t j = i + 1;
+        for (; j < merge_indices_.size(); ++j) {
+            const Position& pos = positions_[merge_indices_[j]];
+            if (pos.symbol != merged.symbol || pos.is_long != merged.is_long) break;
+
+            double totalQty = merged.quantity + pos.quantity;
             if (totalQty < 1e-8) {
-                p0.quantity = 0;
+                merged.quantity = 0.0;
                 continue;
             }
-            double weightedPrice = (p0.entry_price * p0.quantity + pos.entry_price * pos.quantity) / totalQty;
-            p0.quantity = totalQty;
-            p0.entry_price = weightedPrice;
-            p0.notional += pos.notional;
-            p0.initial_margin += pos.initial_margin;
-            p0.maintenance_margin += pos.maintenance_margin;
-            p0.fee += pos.fee;
+            double weightedPrice = (merged.entry_price * merged.quantity + pos.entry_price * pos.quantity) / totalQty;
+            merged.quantity = totalQty;
+            merged.entry_price = weightedPrice;
+            merged.notional += pos.notional;
+            merged.initial_margin += pos.initial_margin;
+            merged.maintenance_margin += pos.maintenance_margin;
+            merged.fee += pos.fee;
         }
+
+        if (merged.quantity > 1e-8) {
+            merged_positions_.push_back(merged);
+        }
+        i = j;
     }
 
-    positions_.clear();
-    positions_.reserve(merged.size());
-    for (auto& kv : merged) {
-        if (kv.second.quantity > 1e-8)
-            positions_.push_back(kv.second);
-    }
+    positions_.swap(merged_positions_);
+    mark_balance_dirty_();
 }
 
 void Account::update_positions(const std::unordered_map<std::string, std::pair<double, double>>& symbol_price_volume) {
@@ -659,182 +767,242 @@ void Account::update_positions(const std::unordered_map<std::string, std::pair<d
 
 void Account::update_positions(const std::unordered_map<std::string, KlineDto>& symbol_kline) {
     bool dirty = false;
+    bool open_orders_changed = false;
+    // Reset per-tick scratch allocator before building fill buffers.
+    tick_memory_.release();
+    std::pmr::vector<unsigned char> keep_open_order{ &tick_memory_ };
+    std::pmr::vector<Order> next_open_orders{ &tick_memory_ };
+    std::vector<Order> single_leftover;
+    single_leftover.reserve(1);
 
     // Cache mark prices for margin estimation.
     for (const auto& kv : symbol_kline) {
         last_mark_price_[kv.first] = kv.second.ClosePrice;
     }
+    if (!symbol_kline.empty()) {
+        mark_balance_dirty_();
+    }
 
     const FeeModel fee_model(get_fee_rates());
+    const FillModel fill_model{ kline_volume_split_mode_ };
 
-    remaining_vol_.clear();
-    remaining_vol_.reserve(symbol_kline.size());
-    for (const auto& kv : symbol_kline) {
-        remaining_vol_.emplace(kv.first, kv.second.Volume);
+    if (!kline_by_id_.empty()) {
+        std::fill(kline_by_id_.begin(), kline_by_id_.end(), nullptr);
     }
 
-    remaining_liq_.clear();
-    remaining_liq_.reserve(symbol_kline.size());
-    has_dir_liq_.clear();
-    has_dir_liq_.reserve(symbol_kline.size());
-
     for (const auto& kv : symbol_kline) {
+        const size_t sym_id = get_symbol_id_(kv.first);
         const auto& k = kv.second;
+        kline_by_id_[sym_id] = &k;
+        remaining_vol_[sym_id] = k.Volume;
         const auto [has, liq] = policies_.directional_liquidity
             ? policies_.directional_liquidity(kline_volume_split_mode_, k)
-            : FillModel{ kline_volume_split_mode_ }.build_directional_liquidity(k);
-        has_dir_liq_.emplace(kv.first, has);
-        remaining_liq_.emplace(kv.first, liq);
+            : fill_model.build_directional_liquidity(k);
+        has_dir_liq_[sym_id] = has ? 1 : 0;
+        remaining_liq_[sym_id] = liq;
     }
 
-    per_symbol_.clear();
-    per_symbol_.reserve(symbol_kline.size());
-    for (size_t i = 0; i < open_orders_.size(); ++i) {
-        per_symbol_[open_orders_[i].symbol].push_back(i);
+    if (per_symbol_cache_version_ != open_orders_version_) {
+        rebuild_per_symbol_cache_();
     }
 
-    keep_open_order_.assign(open_orders_.size(), true);
+    keep_open_order.assign(open_orders_.size(), true);
 
-    for (auto& symKv : per_symbol_) {
-        const std::string& sym = symKv.first;
-        auto itK = symbol_kline.find(sym);
-        if (itK == symbol_kline.end()) {
+    struct SymbolWork {
+        size_t sym_id;
+        const std::vector<size_t>* indices;
+    };
+    struct FillPlanEntry {
+        size_t idx;
+        double fill_qty;
+        double fill_price;
+        bool is_taker;
+    };
+    struct SymbolPlan {
+        std::vector<FillPlanEntry> fills;
+        double remaining_vol{ 0.0 };
+        double remaining_buy_liq{ 0.0 };
+        double remaining_sell_liq{ 0.0 };
+        bool has_data{ false };
+    };
+
+    std::vector<SymbolWork> symbol_work;
+    symbol_work.reserve(per_symbol_active_ids_.size());
+    for (size_t sym_id : per_symbol_active_ids_) {
+        if (sym_id >= kline_by_id_.size() || kline_by_id_[sym_id] == nullptr) {
             continue;
         }
-        const KlineDto& k = itK->second;
-
-        auto itLiq = remaining_liq_.find(sym);
-        if (itLiq == remaining_liq_.end()) {
+        const auto& indices = per_symbol_[sym_id];
+        if (indices.empty()) {
             continue;
         }
+        symbol_work.push_back(SymbolWork{ sym_id, &indices });
+    }
 
-        auto& liq = itLiq->second;
-        double& buy_liq = liq.first;
-        double& sell_liq = liq.second;
+    std::vector<SymbolPlan> symbol_plans(symbol_work.size());
 
-        auto itTot = remaining_vol_.find(sym);
-        if (itTot == remaining_vol_.end() || itTot->second <= 0.0) {
-            continue;
-        }
-        double& total_vol = itTot->second;
+    auto build_plan = [&](size_t begin, size_t end) {
+        for (size_t i = begin; i < end; ++i) {
+            const size_t sym_id = symbol_work[i].sym_id;
+            const auto& indices = *symbol_work[i].indices;
 
-        const bool use_dir_liq = (has_dir_liq_.find(sym) != has_dir_liq_.end() && has_dir_liq_[sym]);
+            if (sym_id >= kline_by_id_.size()) {
+                continue;
+            }
+            const KlineDto* kptr = kline_by_id_[sym_id];
+            if (!kptr) {
+                continue;
+            }
+            const KlineDto& k = *kptr;
 
-        if (total_vol <= 0.0) {
-            continue;
-        }
-        if (use_dir_liq && buy_liq <= 0.0 && sell_liq <= 0.0) {
-            continue;
-        }
+            const double total_vol_init = remaining_vol_[sym_id];
+            if (total_vol_init <= 0.0) {
+                continue;
+            }
 
-        auto& indices = symKv.second;
+            const bool use_dir_liq = (has_dir_liq_[sym_id] != 0);
+            double total_vol = total_vol_init;
+            double buy_liq = remaining_liq_[sym_id].first;
+            double sell_liq = remaining_liq_[sym_id].second;
 
-        fillable_.clear();
-        fillable_.reserve(indices.size());
-        for (size_t idx : indices) {
-            const auto [can_fill, _] = policies_.can_fill_and_taker
-                ? policies_.can_fill_and_taker(open_orders_[idx], k)
-                : FillModel{ kline_volume_split_mode_ }.can_fill_and_taker(open_orders_[idx], k);
-            if (can_fill) fillable_.push_back(idx);
-        }
+            if (use_dir_liq && buy_liq <= 0.0 && sell_liq <= 0.0) {
+                continue;
+            }
 
-        std::sort(fillable_.begin(), fillable_.end(), [&](size_t a, size_t b) {
-            const Order& A = open_orders_[a];
-            const Order& B = open_orders_[b];
+            auto& plan = symbol_plans[i];
+            plan.fills.clear();
+            plan.fills.reserve(indices.size());
+            plan.has_data = true;
 
-            const bool Am = (A.price <= 0.0);
-            const bool Bm = (B.price <= 0.0);
-            if (Am != Bm) return Am;
+            for (size_t idx : indices) {
+                if (total_vol <= 0.0) break;
 
-            const bool A_is_buy = (A.side == OrderSide::Buy);
-            const bool B_is_buy = (B.side == OrderSide::Buy);
+                const auto [can_fill, is_taker] = policies_.can_fill_and_taker
+                    ? policies_.can_fill_and_taker(open_orders_[idx], k)
+                    : fill_model.can_fill_and_taker(open_orders_[idx], k);
+                if (!can_fill) continue;
 
-            if (!Am && A_is_buy == B_is_buy) {
-                if (A_is_buy) {
-                    if (A.price != B.price) return A.price > B.price;
+                const Order& ord = open_orders_[idx];
+                double fill_qty = 0.0;
+                if (use_dir_liq) {
+                    const bool order_is_buy = (ord.side == OrderSide::Buy);
+                    double& dir_liq = order_is_buy ? sell_liq : buy_liq;
+                    if (dir_liq <= 0.0) continue;
+                    fill_qty = std::min({ ord.quantity, total_vol, dir_liq });
+                    if (fill_qty < 1e-8) continue;
+                    total_vol -= fill_qty;
+                    dir_liq -= fill_qty;
                 }
                 else {
-                    if (A.price != B.price) return A.price < B.price;
+                    fill_qty = std::min(ord.quantity, total_vol);
+                    if (fill_qty < 1e-8) continue;
+                    total_vol -= fill_qty;
                 }
+
+                const double fill_price = policies_.execution_price
+                    ? policies_.execution_price(ord, k, market_execution_slippage_, limit_execution_slippage_)
+                    : PriceExecutionModel{ market_execution_slippage_, limit_execution_slippage_ }.execution_price(ord, k);
+
+                plan.fills.push_back(FillPlanEntry{ idx, fill_qty, fill_price, is_taker });
             }
 
-            return A.id < B.id;
-        });
+            plan.remaining_vol = total_vol;
+            plan.remaining_buy_liq = buy_liq;
+            plan.remaining_sell_liq = sell_liq;
+        }
+    };
 
-        for (size_t idx : fillable_) {
-            if (total_vol <= 0.0) break;
-
-            Order& ord = open_orders_[idx];
-            const auto [can_fill, is_taker] = policies_.can_fill_and_taker
-                ? policies_.can_fill_and_taker(ord, k)
-                : FillModel{ kline_volume_split_mode_ }.can_fill_and_taker(ord, k);
-            if (!can_fill) continue;
-
-            double fill_qty = 0.0;
-            if (use_dir_liq) {
-                const bool order_is_buy = (ord.side == OrderSide::Buy);
-                double& dir_liq = order_is_buy ? sell_liq : buy_liq;
-                if (dir_liq <= 0.0) continue;
-                fill_qty = std::min({ ord.quantity, total_vol, dir_liq });
-                if (fill_qty < 1e-8) continue;
-                total_vol -= fill_qty;
-                dir_liq -= fill_qty;
+    const size_t symbol_count = symbol_work.size();
+    if (symbol_count > 1) {
+        const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
+        const size_t task_count = std::min(symbol_count, static_cast<size_t>(hw));
+        if (task_count > 1) {
+            const size_t chunk = (symbol_count + task_count - 1) / task_count;
+            std::vector<std::future<void>> tasks;
+            tasks.reserve(task_count);
+            for (size_t t = 0; t < task_count; ++t) {
+                const size_t begin = t * chunk;
+                if (begin >= symbol_count) break;
+                const size_t end = std::min(symbol_count, begin + chunk);
+                tasks.emplace_back(std::async(std::launch::async, build_plan, begin, end));
             }
-            else {
-                fill_qty = std::min(ord.quantity, total_vol);
-                if (fill_qty < 1e-8) continue;
-                total_vol -= fill_qty;
+            for (auto& task : tasks) {
+                task.get();
             }
+        }
+        else {
+            build_plan(0, symbol_count);
+        }
+    }
+    else if (symbol_count == 1) {
+        build_plan(0, 1);
+    }
 
-            const double fill_price = policies_.execution_price
-                ? policies_.execution_price(ord, k, market_execution_slippage_, limit_execution_slippage_)
-                : PriceExecutionModel{ market_execution_slippage_, limit_execution_slippage_ }.execution_price(ord, k);
+    for (size_t s = 0; s < symbol_work.size(); ++s) {
+        if (!symbol_plans[s].has_data) continue;
+        const size_t sym_id = symbol_work[s].sym_id;
+        remaining_vol_[sym_id] = symbol_plans[s].remaining_vol;
+        remaining_liq_[sym_id] = { symbol_plans[s].remaining_buy_liq, symbol_plans[s].remaining_sell_liq };
+
+        auto& fills = symbol_plans[s].fills;
+        for (const auto& entry : fills) {
+            Order& ord = open_orders_[entry.idx];
+            const double fill_qty = entry.fill_qty;
+            const double fill_price = entry.fill_price;
+            const bool is_taker = entry.is_taker;
 
             const double notional = fill_qty * fill_price;
             const double feeRate = fee_model.fee_rate(is_taker);
             const double fee = notional * feeRate;
 
-            keep_open_order_[idx] = false;
+            keep_open_order[entry.idx] = false;
 
             // Reuse single-order leftover buffer (avoids per-fill tiny vector alloc).
-            single_leftover_.clear();
+            single_leftover.clear();
 
             if (ord.closing_position_id >= 0) {
-                processClosingOrder(ord, fill_qty, fill_price, fee, single_leftover_);
+                processClosingOrder(ord, fill_qty, fill_price, fee, single_leftover);
             }
             else {
-                processOpeningOrder(ord, fill_qty, fill_price, notional, fee, feeRate, single_leftover_);
+                processOpeningOrder(ord, fill_qty, fill_price, notional, fee, feeRate, single_leftover);
             }
 
-            if (!single_leftover_.empty()) {
-                ord = single_leftover_.front();
-                keep_open_order_[idx] = true;
+            if (!single_leftover.empty()) {
+                ord = single_leftover.front();
+                keep_open_order[entry.idx] = true;
             }
         }
     }
 
     // Rebuild open_orders_ preserving original time order for orders that remain.
-    // If any order was filled/removed, keep_open_order_ will have at least one false.
-    if (!keep_open_order_.empty()) {
-        for (bool keep : keep_open_order_) {
-            if (!keep) { dirty = true; break; }
+    // If any order was filled/removed, keep_open_order will have at least one false.
+    if (!keep_open_order.empty()) {
+        for (bool keep : keep_open_order) {
+            if (!keep) { dirty = true; open_orders_changed = true; break; }
         }
     }
 
-    next_open_orders_.clear();
-    next_open_orders_.reserve(open_orders_.size());
+    next_open_orders.clear();
+    next_open_orders.reserve(open_orders_.size());
     for (size_t i = 0; i < open_orders_.size(); ++i) {
-        if (keep_open_order_[i]) next_open_orders_.push_back(open_orders_[i]);
+        if (keep_open_order[i]) next_open_orders.push_back(open_orders_[i]);
     }
-    open_orders_.swap(next_open_orders_);
+    open_orders_.assign(next_open_orders.begin(), next_open_orders.end());
     rebuild_open_order_index_();
+    if (open_orders_changed) {
+        mark_open_orders_dirty_();
+    }
 
     // Remove positions with negligible quantity.
+    const size_t positions_before = positions_.size();
     positions_.erase(
         std::remove_if(positions_.begin(), positions_.end(),
             [](const Position& p) { return p.quantity <= 1e-8; }),
         positions_.end()
     );
+    if (positions_.size() != positions_before) {
+        mark_balance_dirty_();
+    }
 
     merge_positions();
     rebuild_position_index_();
@@ -855,10 +1023,15 @@ void Account::update_positions(const std::unordered_map<std::string, KlineDto>& 
         std::cerr << "[update_positions] Liquidation triggered! marginBalance=" << snapshot.MarginBalance
             << ", maintenanceMargin=" << snapshot.MaintenanceMargin << "\n";
 
+        const size_t open_before = open_orders_.size();
         open_orders_.erase(
             std::remove_if(open_orders_.begin(), open_orders_.end(),
                 [](const Order& o) { return o.closing_position_id < 0; }),
             open_orders_.end());
+        if (open_orders_.size() != open_before) {
+            open_orders_changed = true;
+            mark_open_orders_dirty_();
+        }
         rebuild_open_order_index_();
 
         for (int step = 0; step < kMaxLiquidationStepsPerTick; ++step) {
@@ -888,8 +1061,10 @@ void Account::update_positions(const std::unordered_map<std::string, KlineDto>& 
             if (liq_price <= 0.0) break;
 
             double volAvail = 0.0;
-            auto itVol = remaining_vol_.find(pos.symbol);
-            if (itVol != remaining_vol_.end()) volAvail = itVol->second;
+            const size_t sym_id = get_symbol_id_(pos.symbol);
+            if (sym_id < remaining_vol_.size()) {
+                volAvail = remaining_vol_[sym_id];
+            }
             if (volAvail <= 1e-8) break;
 
             const double dir = pos.is_long ? 1.0 : -1.0;
@@ -910,7 +1085,9 @@ void Account::update_positions(const std::unordered_map<std::string, KlineDto>& 
             const double close_qty = std::min({ pos.quantity, volAvail, desired_close });
             if (close_qty <= 1e-8) break;
 
-            remaining_vol_[pos.symbol] = volAvail - close_qty;
+            if (sym_id < remaining_vol_.size()) {
+                remaining_vol_[sym_id] = volAvail - close_qty;
+            }
 
             const OrderSide liqSide = pos.is_long ? OrderSide::Sell : OrderSide::Buy;
             Order liqOrd{
@@ -953,7 +1130,13 @@ void Account::update_positions(const std::unordered_map<std::string, KlineDto>& 
             wallet_balance_ = 0.0;
             used_margin_ = 0.0;
             positions_.clear();
-            open_orders_.clear();
+            mark_balance_dirty_();
+            position_indices_by_symbol_.clear();
+            if (!open_orders_.empty()) {
+                open_orders_.clear();
+                open_orders_changed = true;
+                mark_open_orders_dirty_();
+            }
             order_to_position_.clear();
             open_order_index_by_id_.clear();
             position_index_by_id_.clear();
@@ -986,7 +1169,7 @@ void Account::update_positions(const std::unordered_map<std::string, KlineDto>& 
     // If any position was removed by epsilon-filter, quantity set changed.
     // (We can't easily know removed count without scanning; mark dirty if we had any positions going into cleanup.)
     // Any liquidation path or position size adjustment affects externally visible state.
-    if (!per_symbol_.empty()) {
+    if (!open_orders_.empty()) {
         dirty = true;
     }
 
@@ -1030,6 +1213,7 @@ void Account::processClosingOrder(Order& ord, double fill_qty, double fill_price
     ord.quantity -= close_qty;
     if (ord.quantity > 1e-8)
         leftover.push_back(ord);
+    mark_balance_dirty_();
 }
 
 void Account::cancel_order_by_id(int order_id) {
@@ -1044,13 +1228,17 @@ void Account::cancel_order_by_id(int order_id) {
     // Preserve original order: erase the one element and rebuild indices.
     open_orders_.erase(open_orders_.begin() + static_cast<std::ptrdiff_t>(it->second));
     rebuild_open_order_index_();
+    mark_open_orders_dirty_();
     ++state_version_;
 }
 
 void Account::close_position(const std::string& symbol, double price) {
     bool found = false;
-    for (const auto& pos : positions_) {
-        if (pos.symbol == symbol) {
+    auto it = position_indices_by_symbol_.find(symbol);
+    if (it != position_indices_by_symbol_.end()) {
+        for (size_t idx : it->second) {
+            const auto& pos = positions_[idx];
+            if (pos.symbol != symbol) continue;
             found = true;
             place_closing_order(pos.id, pos.quantity, price);
         }
@@ -1091,10 +1279,14 @@ void Account::close_position(const std::string& symbol, QTrading::Dto::Trading::
 
     const bool want_long = (position_side == PositionSide::Long);
     bool found = false;
-    for (const auto& pos : positions_) {
-        if (pos.symbol == symbol && pos.is_long == want_long) {
-            found = true;
-            place_closing_order(pos.id, pos.quantity, price);
+    auto it = position_indices_by_symbol_.find(symbol);
+    if (it != position_indices_by_symbol_.end()) {
+        for (size_t idx : it->second) {
+            const auto& pos = positions_[idx];
+            if (pos.symbol == symbol && pos.is_long == want_long) {
+                found = true;
+                place_closing_order(pos.id, pos.quantity, price);
+            }
         }
     }
     rebuild_open_order_index_();
@@ -1197,6 +1389,7 @@ bool Account::adjust_position_leverage(const std::string& symbol, double oldLev,
         p.leverage = newLev;
         p.maintenance_margin = newMaint[i];
     }
+    mark_balance_dirty_();
     return true;
 }
 
@@ -1333,6 +1526,8 @@ void Account::processNormalOpeningOrder(Order& ord, double fill_qty, double fill
             }
         }
     }
+
+    mark_balance_dirty_();
 
     double leftoverQty = ord.quantity - fill_qty;
     if (leftoverQty > 1e-8) {
