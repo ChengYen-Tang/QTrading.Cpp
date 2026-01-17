@@ -17,6 +17,9 @@ target_include_directories(QTrading.Service PUBLIC
 
 if(QTRADING_ENABLE_TRACE)
   target_compile_definitions(QTrading.Service PRIVATE QTRADING_TRACE)
+  if(QTRADING_TRACE_VERBOSE)
+    target_compile_definitions(QTrading.Service PRIVATE QTRADING_TRACE_VERBOSE)
+  endif()
 endif()
 
 target_link_libraries(QTrading.Service

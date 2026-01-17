@@ -12,6 +12,9 @@ target_include_directories(QTrading.Strategy.Library
 
 if(QTRADING_ENABLE_TRACE)
   target_compile_definitions(QTrading.Strategy.Library PRIVATE QTRADING_TRACE)
+  if(QTRADING_TRACE_VERBOSE)
+    target_compile_definitions(QTrading.Strategy.Library PRIVATE QTRADING_TRACE_VERBOSE)
+  endif()
 endif()
 
 target_link_libraries(QTrading.Strategy.Library

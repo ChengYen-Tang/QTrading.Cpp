@@ -19,6 +19,10 @@ option(QTRADING_ENABLE_TRACE "Enable QTRADING_TRACE instrumentation" ${_qtrading
 unset(_qtrading_trace_default)
 unset(_bt)
 
+# Trace verbosity:
+# - When OFF, QTR_TRACE compiles to no-op even if QTRADING_TRACE is enabled.
+option(QTRADING_TRACE_VERBOSE "Enable verbose QTR_TRACE output" ON)
+
 # MSVC 静态 CRT & 全符号导出
 if(MSVC)
 #  set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")

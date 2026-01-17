@@ -12,7 +12,7 @@
 
 namespace QTrading::Debug {
 
-#ifdef QTRADING_TRACE
+#if defined(QTRADING_TRACE) && defined(QTRADING_TRACE_VERBOSE)
 
     inline std::mutex& trace_mtx() {
         static std::mutex m;

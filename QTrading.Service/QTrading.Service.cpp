@@ -15,16 +15,21 @@
 #include "FileLogger/FeatherV2/RunMetadata.hpp"
 #include "Diagnostics/Trace.hpp"
 
-#include <vector>
-#include <memory>
-#include <iostream>
+#include <atomic>
 #include <chrono>
+#include <csignal>
 #include <exception>
 #include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <memory>
+#include <sstream>
 #include <string>
+#include <vector>
 
 using namespace std;
 using namespace QTrading::Log;
+using BinanceExchange = QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
 
 namespace {
 
@@ -46,6 +51,48 @@ std::string JsonEscape(const std::string& input)
     return out;
 }
 
+std::atomic<bool> g_stop_requested{ false };
+
+void HandleSignal(int)
+{
+    g_stop_requested.store(true, std::memory_order_relaxed);
+}
+
+bool StopRequested()
+{
+    return g_stop_requested.load(std::memory_order_relaxed);
+}
+
+#if defined(QTRADING_TRACE) && !defined(QTRADING_TRACE_VERBOSE)
+void PrintStatusLine(const BinanceExchange::StatusSnapshot& snap)
+{
+    std::ostringstream oss;
+    oss.setf(std::ios::fixed);
+    oss << std::setprecision(2);
+    oss << "[Service][Status] ts=" << snap.ts_exchange
+        << " wallet=" << snap.wallet_balance
+        << " margin=" << snap.margin_balance
+        << " avail=" << snap.available_balance
+        << " u_pnl=" << snap.total_unrealized_pnl
+        << " progress=" << snap.progress_pct << "%";
+    oss << " prices=";
+    for (size_t i = 0; i < snap.prices.size(); ++i) {
+        const auto& p = snap.prices[i];
+        if (i > 0) {
+            oss << ",";
+        }
+        oss << p.symbol << "=";
+        if (p.has_price) {
+            oss << p.price;
+        }
+        else {
+            oss << "n/a";
+        }
+    }
+    std::cout << oss.str() << std::endl;
+}
+#endif
+
 } // namespace
 
 /// @file QTrading.Service.cpp
@@ -63,6 +110,9 @@ std::string JsonEscape(const std::string& input)
 /// @return Returns 0 on successful completion.
 int main()
 {
+    std::signal(SIGINT, HandleSignal);
+    std::signal(SIGTERM, HandleSignal);
+
 #ifdef QTRADING_TRACE
     std::cerr << "[Service] QTRADING_TRACE enabled" << std::endl;
 #else
@@ -152,13 +202,44 @@ int main()
 
         uint64_t steps = 0;
         auto last_progress = std::chrono::steady_clock::now();
+        bool stop_logged = false;
+        bool shutdown_initiated = false;
+#if defined(QTRADING_TRACE) && !defined(QTRADING_TRACE_VERBOSE)
+        BinanceExchange::StatusSnapshot status;
+#endif
+        auto Shutdown = [&](const char* reason) {
+            if (shutdown_initiated) {
+                return;
+            }
+            shutdown_initiated = true;
+            if (reason && *reason) {
+                std::cerr << "[Service] " << reason << std::endl;
+            }
+            aggregator->stop();
+            strategy->stop();
+            exchange->close();
+        };
 
         // @brief Main simulation loop: advance exchange until no more data.
         while (true) {
+            if (StopRequested()) {
+                if (!stop_logged) {
+                    stop_logged = true;
+                }
+                Shutdown("stop requested, shutting down modules...");
+                break;
+            }
             QTR_TRACE("service", "exchange->step begin");
             const bool ok = exchange->step();
             QTR_TRACE("service", ok ? "exchange->step end ok" : "exchange->step end false");
             if (!ok) break;
+            if (StopRequested()) {
+                if (!stop_logged) {
+                    stop_logged = true;
+                }
+                Shutdown("stop requested, shutting down modules...");
+                break;
+            }
 
             if (!strategy->wait_for_done_for(std::chrono::seconds(5))) {
                 std::cerr << "[Service][WARN] wait_for_done timeout. steps=" << steps
@@ -173,18 +254,21 @@ int main()
             // Lightweight progress heartbeat every ~2s to help spot freezes.
             auto now = std::chrono::steady_clock::now();
             if (now - last_progress >= std::chrono::seconds(2)) {
+#if defined(QTRADING_TRACE) && !defined(QTRADING_TRACE_VERBOSE)
+                exchange->FillStatusSnapshot(status);
+                PrintStatusLine(status);
+#else
                 std::cout << "[Service] steps=" << steps
                           << " ex_market_closed=" << exchange->get_market_channel()->IsClosed()
                           << " agg_closed=" << aggregator->get_market_channel()->IsClosed()
                           << std::endl;
+#endif
                 last_progress = now;
             }
         }
 
         // @brief Clean shutdown: stop threads, close channels, stop logger.
-        aggregator->stop();
-        strategy->stop();
-        exchange->close();
+        Shutdown("shutting down modules...");
         logger->Stop();
 
         QTR_TRACE("service", "main end");

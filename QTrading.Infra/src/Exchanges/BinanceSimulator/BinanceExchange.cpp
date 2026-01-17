@@ -3,6 +3,7 @@
 #include "Dto/AccountLog.hpp"
 #include "Diagnostics/Trace.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <future>
@@ -132,6 +133,7 @@ BinanceExchange::BinanceExchange(
     cursor_.assign(symbolCsv.size(), 0);
     next_ts_by_symbol_.assign(symbolCsv.size(), 0);
     has_next_ts_.assign(symbolCsv.size(), 0);
+    kline_counts_.reserve(symbolCsv.size());
     jobs.reserve(symbolCsv.size());
 
     for (const auto& [sym, csv] : symbolCsv) {
@@ -146,6 +148,7 @@ BinanceExchange::BinanceExchange(
         md_.push_back(jobs[i].get());
 
         const auto& data = md_[i];
+        kline_counts_.push_back(data.get_klines_count());
         if (cursor_[i] < data.get_klines_count()) {
             const uint64_t ts = data.get_kline(cursor_[i]).Timestamp;
             next_ts_by_symbol_[i] = ts;
@@ -153,6 +156,8 @@ BinanceExchange::BinanceExchange(
             next_ts_heap_.push(HeapItem{ ts, i });
         }
     }
+    last_close_by_symbol_.assign(symbols_.size(), 0.0);
+    has_last_close_.assign(symbols_.size(), 0);
 
     /// @details Create bounded channels:
     ///          - market_channel: 8-element sliding window of MultiKlineDto
@@ -224,6 +229,7 @@ bool BinanceExchange::step()
     }
 
     /// @details Publish multi-symbol market data at timestamp `ts`.
+    last_step_ts_ = ts;
     log_ctx_.ts_exchange = ts;
     log_ctx_.step_seq += 1;
     log_ctx_.event_seq = 0;
@@ -342,6 +348,8 @@ void BinanceExchange::build_multikline(uint64_t ts, MultiKlineDto& out)
             const auto& k = data.get_kline(idx);
             out.klines.emplace(sym, k);
             kline_snap_cache_.emplace(sym, k);
+            last_close_by_symbol_[i] = k.ClosePrice;
+            has_last_close_[i] = 1;
             ++cursor_[i];
 
             // Advance this symbol in the multiway merge heap.
@@ -613,6 +621,67 @@ void BinanceExchange::log_events(const MultiKlineDto& market,
     }
 
     last_event_version_ = cur_ver;
+}
+
+void BinanceExchange::FillStatusSnapshot(StatusSnapshot& out) const
+{
+    out.ts_exchange = last_step_ts_;
+    if (account) {
+        const auto bal = account->get_balance();
+        out.wallet_balance = bal.WalletBalance;
+        out.margin_balance = bal.MarginBalance;
+        out.available_balance = bal.AvailableBalance;
+        out.unrealized_pnl = bal.UnrealizedPnl;
+        out.total_unrealized_pnl = account->total_unrealized_pnl();
+    }
+    else {
+        out.wallet_balance = 0.0;
+        out.margin_balance = 0.0;
+        out.available_balance = 0.0;
+        out.unrealized_pnl = 0.0;
+        out.total_unrealized_pnl = 0.0;
+    }
+    out.progress_pct = progress_pct_();
+    out.prices.clear();
+    out.prices.reserve(symbols_.size());
+    for (size_t i = 0; i < symbols_.size(); ++i) {
+        StatusSnapshot::PriceSnapshot snap;
+        snap.symbol = symbols_[i];
+        snap.price = last_close_by_symbol_[i];
+        snap.has_price = has_last_close_[i] != 0;
+        out.prices.emplace_back(std::move(snap));
+    }
+}
+
+double BinanceExchange::progress_pct_() const
+{
+    if (kline_counts_.empty()) {
+        return 0.0;
+    }
+    double min_ratio = 1.0;
+    bool has_count = false;
+    const size_t count = std::min(kline_counts_.size(), cursor_.size());
+    for (size_t i = 0; i < count; ++i) {
+        const auto total = kline_counts_[i];
+        if (total == 0) {
+            continue;
+        }
+        has_count = true;
+        double ratio = static_cast<double>(cursor_[i]) / static_cast<double>(total);
+        if (ratio < min_ratio) {
+            min_ratio = ratio;
+        }
+    }
+    if (!has_count) {
+        return 0.0;
+    }
+    if (min_ratio < 0.0) {
+        min_ratio = 0.0;
+    }
+    if (min_ratio > 1.0) {
+        min_ratio = 1.0;
+    }
+    return min_ratio * 100.0;
 }
 
 namespace {

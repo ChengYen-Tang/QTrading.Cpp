@@ -82,6 +82,26 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
         const std::vector<dto::Order>& get_all_open_orders() const override;
         /// @brief Close all channels and mark simulation complete.
         void  close() override;
+
+        struct StatusSnapshot {
+            struct PriceSnapshot {
+                std::string symbol;
+                double price{ 0.0 };
+                bool has_price{ false };
+            };
+
+            uint64_t ts_exchange{ 0 };
+            double wallet_balance{ 0.0 };
+            double margin_balance{ 0.0 };
+            double available_balance{ 0.0 };
+            double unrealized_pnl{ 0.0 };
+            double total_unrealized_pnl{ 0.0 };
+            double progress_pct{ 0.0 };
+            std::vector<PriceSnapshot> prices;
+        };
+
+        /// @brief Fill a lightweight snapshot for status reporting.
+        void FillStatusSnapshot(StatusSnapshot& out) const;
     private:
         std::shared_ptr<QTrading::Log::Logger> logger;        ///< Logger for account/order/position events.
         QTrading::Log::Logger::ModuleId account_module_id_{ QTrading::Log::Logger::kInvalidModuleId };
@@ -125,9 +145,13 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
 
         uint64_t last_account_version_{ 0 };
         uint64_t last_logged_version_{ static_cast<uint64_t>(-1) };
+        uint64_t last_step_ts_{ 0 };
 
         // P1: Reusable per-step buffer to avoid rebuilding an unordered_map each tick.
         std::unordered_map<std::string, QTrading::Dto::Market::Binance::KlineDto> kline_snap_cache_;
+        std::vector<size_t> kline_counts_;
+        std::vector<double> last_close_by_symbol_;
+        std::vector<uint8_t> has_last_close_;
 
         /// @brief Find the next timestamp to emit across all symbols.
         /// @param[out] ts Next timestamp (ms since epoch).
@@ -144,6 +168,8 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
         void log_events(const QTrading::Dto::Market::Binance::MultiKlineDto& market,
             const std::vector<dto::Position>& cur_positions,
             const std::vector<dto::Order>& cur_orders);
+
+        double progress_pct_() const;
 
         static bool vec_equal(const std::vector<dto::Position>& a,
             const std::vector<dto::Position>& b);
