@@ -1,10 +1,13 @@
 #pragma once
 
-#include <condition_variable>
+#include <atomic>
 #include <mutex>
 #include <vector>
 
+#include "BlockingChannelBase.hpp"
 #include "Channel.hpp"
+#include "ChannelCore.hpp"
+#include "QueueOps.hpp"
 #include "RingBuffer.hpp"
 
 namespace QTrading::Utils::Queue {
@@ -20,8 +23,11 @@ namespace QTrading::Utils::Queue {
     /// \tparam T Message type.
     /// \details Supports configurable overflow policies for backpressure management.
     template <typename T>
-    class BoundedChannel : public Channel<T> {
+    class BoundedChannel : public BlockingChannelBase<T, BoundedChannel<T>> {
     public:
+        using Base = BlockingChannelBase<T, BoundedChannel<T>>;
+        using SendMode = typename Base::SendMode;
+
         /// \brief Construct a bounded channel.
         /// \param capacity Maximum number of messages.
         /// \param policy Overflow behavior when full.
@@ -31,126 +37,85 @@ namespace QTrading::Utils::Queue {
 
         /// \copydoc Channel::Send
         bool Send(T value) override {
-            std::unique_lock<std::mutex> lock(mtx_);
-            if (this->closed_.load(std::memory_order_acquire)) return false;
-
-            if (!buffer_.full()) {
-                buffer_.push(std::move(value));
-                lock.unlock();
-                cv_not_empty_.notify_one();
-                return true;
-            }
-
-            switch (policy_) {
-            case OverflowPolicy::Reject:
-                return false;
-            case OverflowPolicy::DropOldest:
-                buffer_.drop_oldest();
-                buffer_.push(std::move(value));
-                lock.unlock();
-                cv_not_empty_.notify_one();
-                return true;
-            case OverflowPolicy::Block:
-            default:
-                cv_not_full_.wait(lock, [&] {
-                    return this->closed_.load(std::memory_order_acquire) || !buffer_.full();
-                    });
-                if (this->closed_.load(std::memory_order_acquire)) return false;
-                buffer_.push(std::move(value));
-                lock.unlock();
-                cv_not_empty_.notify_one();
-                return true;
-            }
+            return this->SendWithMode(std::move(value), SendMode::Block);
         }
 
         /// \copydoc Channel::TrySend
         bool TrySend(T value) override {
-            std::unique_lock<std::mutex> lock(mtx_);
-            if (this->closed_.load(std::memory_order_acquire)) return false;
+            return this->SendWithMode(std::move(value), SendMode::Try);
+        }
 
-            if (!buffer_.full()) {
-                buffer_.push(std::move(value));
+        /// \copydoc Channel::DropCount
+        uint64_t DropCount() const override {
+            return drop_count_.load(std::memory_order_relaxed);
+        }
+
+    private:
+        friend class BlockingChannelBase<T, BoundedChannel<T>>;
+
+        bool SendLocked(T value, std::unique_lock<std::mutex>& lock, SendMode mode) {
+            if (!BoundedQueueOps<RingBuffer<T>>::Full(buffer_)) {
+                BoundedQueueOps<RingBuffer<T>>::Push(buffer_, std::move(value));
                 lock.unlock();
-                cv_not_empty_.notify_one();
+                this->core_.cv_not_empty.notify_one();
                 return true;
             }
 
             switch (policy_) {
             case OverflowPolicy::Reject:
+                BoundedQueueOps<RingBuffer<T>>::RecordDrop(drop_count_);
                 return false;
             case OverflowPolicy::DropOldest:
-                buffer_.drop_oldest();
-                buffer_.push(std::move(value));
+                BoundedQueueOps<RingBuffer<T>>::DropOldest(buffer_, drop_count_);
+                BoundedQueueOps<RingBuffer<T>>::Push(buffer_, std::move(value));
                 lock.unlock();
-                cv_not_empty_.notify_one();
+                this->core_.cv_not_empty.notify_one();
                 return true;
             case OverflowPolicy::Block:
             default:
-                return false; // would block
+                if (mode == SendMode::Try) {
+                    return false; // would block
+                }
+                this->core_.cv_not_full.wait(lock, [&] {
+                    return this->closed_.load(std::memory_order_acquire) || !BoundedQueueOps<RingBuffer<T>>::Full(buffer_);
+                    });
+                if (this->closed_.load(std::memory_order_acquire)) return false;
+                BoundedQueueOps<RingBuffer<T>>::Push(buffer_, std::move(value));
+                lock.unlock();
+                this->core_.cv_not_empty.notify_one();
+                return true;
             }
         }
 
-        /// \copydoc Channel::Receive
-        std::optional<T> Receive() override {
-            std::unique_lock<std::mutex> lock(mtx_);
-            cv_not_empty_.wait(lock, [&] {
-                return !buffer_.empty() || this->closed_.load(std::memory_order_acquire);
-                });
-
-            if (buffer_.empty()) return std::nullopt;
-
-            auto v = buffer_.pop();
-            lock.unlock();
-            cv_not_full_.notify_one();
-            return v;
+        bool HasDataLocked() const {
+            return !QueueOps<RingBuffer<T>>::Empty(buffer_);
         }
 
-        /// \copydoc Channel::TryReceive
-        std::optional<T> TryReceive() override {
-            std::unique_lock<std::mutex> lock(mtx_);
-            if (buffer_.empty()) return std::nullopt;
-            auto v = buffer_.pop();
-            lock.unlock();
-            cv_not_full_.notify_one();
-            return v;
+        std::optional<T> PopLocked() {
+            return QueueOps<RingBuffer<T>>::Pop(buffer_);
         }
 
-        /// \copydoc Channel::ReceiveMany
-        std::vector<T> ReceiveMany(size_t max_items) override {
-            std::vector<T> out;
-            out.reserve(max_items);
+        size_t PopManyLocked(size_t max_items, std::vector<T>& out) {
+            return QueueOps<RingBuffer<T>>::PopMany(buffer_, max_items, out);
+        }
 
-            std::unique_lock<std::mutex> lock(mtx_);
-            const auto n = (std::min)(max_items, buffer_.size());
-            for (size_t i = 0; i < n; ++i) {
-                auto v = buffer_.pop();
-                if (!v) break;
-                out.push_back(std::move(*v));
+        size_t SizeLocked() const {
+            return BoundedQueueOps<RingBuffer<T>>::Depth(buffer_);
+        }
+
+        void OnPopped(size_t count, bool from_receive_many) {
+            if (count == 0) return;
+            if (from_receive_many) {
+                this->core_.cv_not_full.notify_all();
             }
-            lock.unlock();
-
-            if (!out.empty()) {
-                cv_not_full_.notify_all();
+            else {
+                this->core_.cv_not_full.notify_one();
             }
-            return out;
         }
 
-        /// \copydoc Channel::Close
-        void Close() override {
-            {
-                std::lock_guard<std::mutex> lock(mtx_);
-                this->closed_.store(true, std::memory_order_release);
-            }
-            cv_not_empty_.notify_all();
-            cv_not_full_.notify_all();
-        }
-
-    private:
         RingBuffer<T> buffer_;
         OverflowPolicy policy_;
-        std::mutex mtx_;
-        std::condition_variable cv_not_empty_;
-        std::condition_variable cv_not_full_;
+        std::atomic<uint64_t> drop_count_{ 0 };
     };
 
 } // namespace QTrading::Utils::Queue

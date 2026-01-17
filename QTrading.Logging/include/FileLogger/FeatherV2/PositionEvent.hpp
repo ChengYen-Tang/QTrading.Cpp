@@ -4,6 +4,8 @@
 #include <memory>
 #include <string>
 
+#include "FileLogger/FeatherV2/ArrowAppend.hpp"
+
 namespace QTrading::Log::FileLogger::FeatherV2 {
 
     enum class PositionEventType : int32_t {
@@ -18,6 +20,7 @@ namespace QTrading::Log::FileLogger::FeatherV2 {
         uint64_t run_id{};
         uint64_t step_seq{};
         uint64_t event_seq{};
+        uint64_t ts_local{};
 
         uint64_t request_id{};
         int64_t source_order_id{};
@@ -62,7 +65,8 @@ namespace QTrading::Log::FileLogger::FeatherV2 {
                 arrow::field("maintenance_margin", arrow::float64()),
                 arrow::field("leverage", arrow::float64()),
                 arrow::field("fee", arrow::float64()),
-                arrow::field("fee_rate", arrow::float64())
+                arrow::field("fee_rate", arrow::float64()),
+                arrow::field("ts_local", arrow::uint64())
             });
         }
 
@@ -70,24 +74,25 @@ namespace QTrading::Log::FileLogger::FeatherV2 {
         {
             const auto& e = *static_cast<const PositionEventDto*>(src);
 
-            builder.GetFieldAs<arrow::UInt64Builder>(1)->Append(e.run_id);
-            builder.GetFieldAs<arrow::UInt64Builder>(2)->Append(e.step_seq);
-            builder.GetFieldAs<arrow::UInt64Builder>(3)->Append(e.event_seq);
-            builder.GetFieldAs<arrow::UInt64Builder>(4)->Append(e.request_id);
-            builder.GetFieldAs<arrow::Int64Builder>(5)->Append(e.source_order_id);
-            builder.GetFieldAs<arrow::Int64Builder>(6)->Append(e.position_id);
-            builder.GetFieldAs<arrow::StringBuilder>(7)->Append(e.symbol);
-            builder.GetFieldAs<arrow::BooleanBuilder>(8)->Append(e.is_long);
-            builder.GetFieldAs<arrow::Int32Builder>(9)->Append(e.event_type);
-            builder.GetFieldAs<arrow::DoubleBuilder>(10)->Append(e.qty);
-            builder.GetFieldAs<arrow::DoubleBuilder>(11)->Append(e.entry_price);
-            builder.GetFieldAs<arrow::DoubleBuilder>(12)->Append(e.notional);
-            builder.GetFieldAs<arrow::DoubleBuilder>(13)->Append(e.unrealized_pnl);
-            builder.GetFieldAs<arrow::DoubleBuilder>(14)->Append(e.initial_margin);
-            builder.GetFieldAs<arrow::DoubleBuilder>(15)->Append(e.maintenance_margin);
-            builder.GetFieldAs<arrow::DoubleBuilder>(16)->Append(e.leverage);
-            builder.GetFieldAs<arrow::DoubleBuilder>(17)->Append(e.fee);
-            builder.GetFieldAs<arrow::DoubleBuilder>(18)->Append(e.fee_rate);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::UInt64Builder>(1), e.run_id);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::UInt64Builder>(2), e.step_seq);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::UInt64Builder>(3), e.event_seq);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::UInt64Builder>(4), e.request_id);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::Int64Builder>(5), e.source_order_id);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::Int64Builder>(6), e.position_id);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::StringBuilder>(7), e.symbol);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::BooleanBuilder>(8), e.is_long);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::Int32Builder>(9), e.event_type);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(10), e.qty);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(11), e.entry_price);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(12), e.notional);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(13), e.unrealized_pnl);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(14), e.initial_margin);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(15), e.maintenance_margin);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(16), e.leverage);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(17), e.fee);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(18), e.fee_rate);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::UInt64Builder>(19), e.ts_local);
         }
     } // namespace PositionEvent
 

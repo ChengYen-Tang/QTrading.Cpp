@@ -313,7 +313,7 @@ TEST_F(AggregatorFixture, GapInsideHour)
     /* Generate minutes 0‑24 and 35‑59 (10‑minute gap) */
     writeCsv("gap.csv", 25, 0, 50, 5);          // 0-24
     writeCsv("gap.csv", 25, 35, 75, 5, 0,        // 35-59
-        [](size_t i) { return 75 + i; }, true);
+        [](size_t i) { return 75.0 + static_cast<double>(i); }, true);
 
     ex = std::make_shared<BinanceExchange>(std::vector<std::pair<std::string, std::string>>{ {"GAP",(tmpDir / "gap.csv").string()} }, logger);
     agg = std::make_unique<BinanceHourAggregator>(ex, 1);

@@ -62,6 +62,22 @@ TEST(BoundedChannelTest, OverflowPolicyDropOldest)
     EXPECT_EQ(val2.value(), 30);
 }
 
+/// \brief Verify DropCount increments for Reject and DropOldest policies.
+TEST(BoundedChannelTest, DropCountIncrements)
+{
+    auto reject = ChannelFactory::CreateBoundedChannel<int>(1, OverflowPolicy::Reject);
+    EXPECT_TRUE(reject->Send(1));
+    EXPECT_FALSE(reject->Send(2));
+    EXPECT_EQ(reject->DropCount(), 1u);
+
+    auto drop = ChannelFactory::CreateBoundedChannel<int>(2, OverflowPolicy::DropOldest);
+    EXPECT_TRUE(drop->Send(10));
+    EXPECT_TRUE(drop->Send(20));
+    EXPECT_TRUE(drop->Send(30));
+    EXPECT_EQ(drop->DropCount(), 1u);
+    EXPECT_EQ(drop->Size(), 2u);
+}
+
 /// \brief Test that Send() blocks when full (policy=Block) until space is available.
 TEST(BoundedChannelTest, OverflowPolicyBlock)
 {
@@ -96,6 +112,15 @@ TEST(BoundedChannelTest, OverflowPolicyBlock)
     EXPECT_EQ(val2.value(), 222);
 }
 
+/// \brief TrySend returns false instead of blocking when full under Block policy.
+TEST(BoundedChannelTest, TrySendReturnsFalseWhenFullWithBlockPolicy)
+{
+    auto channel = ChannelFactory::CreateBoundedChannel<int>(1, OverflowPolicy::Block);
+    EXPECT_TRUE(channel->Send(5));
+    EXPECT_FALSE(channel->TrySend(6));
+    EXPECT_EQ(channel->Size(), 1u);
+}
+
 /// \brief Test that after Close(), existing items can be received but new Send() fails.
 TEST(BoundedChannelTest, CloseBehavior)
 {
@@ -122,6 +147,25 @@ TEST(BoundedChannelTest, CloseBehavior)
 
     // And Send() must fail on closed channel
     EXPECT_FALSE(channel->Send(30));
+}
+
+/// \brief Size tracks enqueued items as they are received.
+TEST(BoundedChannelTest, SizeTracksQueueDepth)
+{
+    auto channel = ChannelFactory::CreateBoundedChannel<int>(3, OverflowPolicy::Block);
+    EXPECT_EQ(channel->Size(), 0u);
+
+    EXPECT_TRUE(channel->Send(1));
+    EXPECT_TRUE(channel->Send(2));
+    EXPECT_EQ(channel->Size(), 2u);
+
+    auto v1 = channel->Receive();
+    ASSERT_TRUE(v1.has_value());
+    EXPECT_EQ(channel->Size(), 1u);
+
+    auto v2 = channel->Receive();
+    ASSERT_TRUE(v2.has_value());
+    EXPECT_EQ(channel->Size(), 0u);
 }
 
 /// \brief Test non-blocking TryReceive() behavior.

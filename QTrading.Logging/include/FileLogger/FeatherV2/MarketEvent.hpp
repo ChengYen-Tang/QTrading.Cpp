@@ -4,11 +4,15 @@
 #include <memory>
 #include <string>
 
+#include "FileLogger/FeatherV2/ArrowAppend.hpp"
+
 namespace QTrading::Log::FileLogger::FeatherV2 {
 
     struct MarketEventDto {
         uint64_t run_id{};
         uint64_t step_seq{};
+        uint64_t event_seq{};
+        uint64_t ts_local{};
 
         std::string symbol;
         bool has_kline{};
@@ -28,6 +32,7 @@ namespace QTrading::Log::FileLogger::FeatherV2 {
                 arrow::field("ts", arrow::uint64()),
                 arrow::field("run_id", arrow::uint64()),
                 arrow::field("step_seq", arrow::uint64()),
+                arrow::field("event_seq", arrow::uint64()),
                 arrow::field("symbol", arrow::utf8()),
                 arrow::field("has_kline", arrow::boolean()),
                 arrow::field("open", arrow::float64()),
@@ -35,7 +40,8 @@ namespace QTrading::Log::FileLogger::FeatherV2 {
                 arrow::field("low", arrow::float64()),
                 arrow::field("close", arrow::float64()),
                 arrow::field("volume", arrow::float64()),
-                arrow::field("taker_buy_base_volume", arrow::float64())
+                arrow::field("taker_buy_base_volume", arrow::float64()),
+                arrow::field("ts_local", arrow::uint64())
             });
         }
 
@@ -43,16 +49,18 @@ namespace QTrading::Log::FileLogger::FeatherV2 {
         {
             const auto& e = *static_cast<const MarketEventDto*>(src);
 
-            builder.GetFieldAs<arrow::UInt64Builder>(1)->Append(e.run_id);
-            builder.GetFieldAs<arrow::UInt64Builder>(2)->Append(e.step_seq);
-            builder.GetFieldAs<arrow::StringBuilder>(3)->Append(e.symbol);
-            builder.GetFieldAs<arrow::BooleanBuilder>(4)->Append(e.has_kline);
-            builder.GetFieldAs<arrow::DoubleBuilder>(5)->Append(e.open);
-            builder.GetFieldAs<arrow::DoubleBuilder>(6)->Append(e.high);
-            builder.GetFieldAs<arrow::DoubleBuilder>(7)->Append(e.low);
-            builder.GetFieldAs<arrow::DoubleBuilder>(8)->Append(e.close);
-            builder.GetFieldAs<arrow::DoubleBuilder>(9)->Append(e.volume);
-            builder.GetFieldAs<arrow::DoubleBuilder>(10)->Append(e.taker_buy_base_volume);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::UInt64Builder>(1), e.run_id);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::UInt64Builder>(2), e.step_seq);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::UInt64Builder>(3), e.event_seq);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::StringBuilder>(4), e.symbol);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::BooleanBuilder>(5), e.has_kline);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(6), e.open);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(7), e.high);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(8), e.low);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(9), e.close);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(10), e.volume);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(11), e.taker_buy_base_volume);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::UInt64Builder>(12), e.ts_local);
         }
     } // namespace MarketEvent
 

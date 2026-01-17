@@ -24,6 +24,8 @@ namespace QTrading::Infra::Logging {
             if (ctx) {
                 e.run_id = ctx->run_id;
                 e.step_seq = ctx->step_seq;
+                e.event_seq = ctx->next_event_seq();
+                e.ts_local = ctx->ts_local;
             }
             events.emplace_back(std::move(e));
         }

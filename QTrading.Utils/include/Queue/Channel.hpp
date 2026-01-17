@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <cstdint>
 #include <optional>
 #include <vector>
 
@@ -59,6 +60,14 @@ namespace QTrading::Utils::Queue {
         /// \brief Closes the channel, unblocking any waiting operations.
         /// \remarks After closing, Send() calls will return false and Receive()/TryReceive() will return any remaining messages before emptying.
         virtual void Close() = 0;
+
+        /// \brief Get current queue depth.
+        /// \return Number of queued items.
+        virtual size_t Size() const = 0;
+
+        /// \brief Get total number of dropped items (if supported).
+        /// \return Drop count.
+        virtual uint64_t DropCount() const { return 0; }
 
         /// \brief Checks whether the channel is closed.
         /// \return true if closed, false otherwise.

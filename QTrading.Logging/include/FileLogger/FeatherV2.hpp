@@ -1,10 +1,10 @@
-﻿#pragma once
+#pragma once
 
 #include <arrow/api.h>
 #include <arrow/ipc/api.h>
 #include <arrow/io/api.h>
 #include <functional>
-#include <unordered_map>
+#include <vector>
 #include "Logger.hpp"
 
 namespace QTrading::Log {
@@ -25,9 +25,12 @@ namespace QTrading::Log {
         /// @param module    The module name (must match Logger::Log usage).
         /// @param schema    Shared pointer to the Arrow schema (column 0 = timestamp).
         /// @param serializer Function to serialize payloads into the builder.
+        /// @param kind       Channel kind for the module (critical/debug).
+        /// @note Must be called before Start() to keep Consume() lock-free per row.
         void RegisterModule(const std::string& module,
             std::shared_ptr<arrow::Schema> schema,
-            Serializer serializer);
+            Serializer serializer,
+            ChannelKind kind = ChannelKind::Critical);
 
     protected:
         /// @brief Background consumer that writes Rows to Feather files.
@@ -46,6 +49,7 @@ namespace QTrading::Log {
             std::shared_ptr<arrow::io::OutputStream>       outfile;    ///< Output stream.
             uint32_t                                       rows = 0;   ///< Rows in current batch.
         };
-        std::unordered_map<std::string, Slot> slots_; ///< Map module→Slot.
+        std::vector<Slot> slots_; ///< Indexed by module id - 1.
     };
 }
+

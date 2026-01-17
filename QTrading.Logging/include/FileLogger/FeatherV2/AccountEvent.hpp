@@ -4,6 +4,8 @@
 #include <memory>
 #include <string>
 
+#include "FileLogger/FeatherV2/ArrowAppend.hpp"
+
 namespace QTrading::Log::FileLogger::FeatherV2 {
 
     enum class AccountEventType : int32_t {
@@ -15,6 +17,7 @@ namespace QTrading::Log::FileLogger::FeatherV2 {
         uint64_t run_id{};
         uint64_t step_seq{};
         uint64_t event_seq{};
+        uint64_t ts_local{};
 
         uint64_t request_id{};
         int64_t source_order_id{};
@@ -41,7 +44,8 @@ namespace QTrading::Log::FileLogger::FeatherV2 {
                 arrow::field("wallet_delta", arrow::float64()),
                 arrow::field("wallet_balance_after", arrow::float64()),
                 arrow::field("margin_balance_after", arrow::float64()),
-                arrow::field("available_balance_after", arrow::float64())
+                arrow::field("available_balance_after", arrow::float64()),
+                arrow::field("ts_local", arrow::uint64())
             });
         }
 
@@ -49,16 +53,17 @@ namespace QTrading::Log::FileLogger::FeatherV2 {
         {
             const auto& e = *static_cast<const AccountEventDto*>(src);
 
-            builder.GetFieldAs<arrow::UInt64Builder>(1)->Append(e.run_id);
-            builder.GetFieldAs<arrow::UInt64Builder>(2)->Append(e.step_seq);
-            builder.GetFieldAs<arrow::UInt64Builder>(3)->Append(e.event_seq);
-            builder.GetFieldAs<arrow::UInt64Builder>(4)->Append(e.request_id);
-            builder.GetFieldAs<arrow::Int64Builder>(5)->Append(e.source_order_id);
-            builder.GetFieldAs<arrow::Int32Builder>(6)->Append(e.event_type);
-            builder.GetFieldAs<arrow::DoubleBuilder>(7)->Append(e.wallet_delta);
-            builder.GetFieldAs<arrow::DoubleBuilder>(8)->Append(e.wallet_balance_after);
-            builder.GetFieldAs<arrow::DoubleBuilder>(9)->Append(e.margin_balance_after);
-            builder.GetFieldAs<arrow::DoubleBuilder>(10)->Append(e.available_balance_after);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::UInt64Builder>(1), e.run_id);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::UInt64Builder>(2), e.step_seq);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::UInt64Builder>(3), e.event_seq);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::UInt64Builder>(4), e.request_id);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::Int64Builder>(5), e.source_order_id);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::Int32Builder>(6), e.event_type);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(7), e.wallet_delta);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(8), e.wallet_balance_after);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(9), e.margin_balance_after);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(10), e.available_balance_after);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::UInt64Builder>(11), e.ts_local);
         }
     } // namespace AccountEvent
 

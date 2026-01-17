@@ -25,6 +25,38 @@ TEST(UnboundedChannelTest, BasicSendReceive)
     EXPECT_EQ(v2.value(), 100);
 }
 
+/// \brief Basic Send()/Receive() with single-reader optimization enabled.
+TEST(UnboundedChannelTest, SingleReaderOptionsBasic)
+{
+    ChannelOptions options;
+    options.single_reader = true;
+    auto channel = ChannelFactory::CreateUnboundedChannel<int>(options);
+
+    EXPECT_TRUE(channel->Send(7));
+    auto v = channel->Receive();
+    ASSERT_TRUE(v.has_value());
+    EXPECT_EQ(v.value(), 7);
+}
+
+/// \brief Close behavior with single-reader optimization enabled.
+TEST(UnboundedChannelTest, SingleReaderOptionsCloseBehavior)
+{
+    ChannelOptions options;
+    options.single_reader = true;
+    auto channel = ChannelFactory::CreateUnboundedChannel<int>(options);
+
+    EXPECT_TRUE(channel->Send(1));
+    channel->Close();
+    EXPECT_FALSE(channel->Send(2));
+
+    auto v1 = channel->Receive();
+    ASSERT_TRUE(v1.has_value());
+    EXPECT_EQ(v1.value(), 1);
+
+    auto v2 = channel->Receive();
+    EXPECT_FALSE(v2.has_value());
+}
+
 /// \brief TryReceive returns nullopt when empty, then returns value when data is available.
 TEST(UnboundedChannelTest, TryReceive)
 {
@@ -40,6 +72,25 @@ TEST(UnboundedChannelTest, TryReceive)
 
     auto empty2 = channel->TryReceive();
     EXPECT_FALSE(empty2.has_value());
+}
+
+/// \brief Size tracks enqueued items as they are received.
+TEST(UnboundedChannelTest, SizeTracksQueueDepth)
+{
+    auto channel = ChannelFactory::CreateUnboundedChannel<int>();
+    EXPECT_EQ(channel->Size(), 0u);
+
+    EXPECT_TRUE(channel->Send(1));
+    EXPECT_TRUE(channel->Send(2));
+    EXPECT_EQ(channel->Size(), 2u);
+
+    auto v1 = channel->Receive();
+    ASSERT_TRUE(v1.has_value());
+    EXPECT_EQ(channel->Size(), 1u);
+
+    auto v2 = channel->Receive();
+    ASSERT_TRUE(v2.has_value());
+    EXPECT_EQ(channel->Size(), 0u);
 }
 
 /// \brief After Close(), existing items are still readable; Send() fails; Receive() on empty returns nullopt.
@@ -182,6 +233,56 @@ TEST(UnboundedChannelTest, MultiProducerSingleConsumer_NoLoss_NoDup)
             if (v) {
                 received.push_back(*v);
             }
+        }
+        });
+
+    for (auto& t : prodThreads) t.join();
+    EXPECT_EQ(produced.load(std::memory_order_relaxed), total);
+
+    channel->Close();
+    consumer.join();
+
+    ASSERT_EQ((int)received.size(), total);
+
+    std::unordered_set<int> uniq;
+    uniq.reserve(received.size());
+    for (int v : received) {
+        ASSERT_TRUE(uniq.insert(v).second) << "Duplicate value received: " << v;
+    }
+}
+
+/// \brief Multi-producer / single-consumer test with single-reader options.
+TEST(UnboundedChannelTest, SingleReaderOptions_MultiProducerNoLossNoDup)
+{
+    constexpr int producers = 4;
+    constexpr int itemsPer = 2000;
+    constexpr int total = producers * itemsPer;
+
+    ChannelOptions options;
+    options.single_reader = true;
+    auto channel = ChannelFactory::CreateUnboundedChannel<int>(options);
+
+    std::atomic<int> produced{ 0 };
+    std::vector<std::thread> prodThreads;
+    prodThreads.reserve(producers);
+
+    for (int p = 0; p < producers; ++p) {
+        prodThreads.emplace_back([&, p]() {
+            for (int i = 0; i < itemsPer; ++i) {
+                int v = p * itemsPer + i;
+                ASSERT_TRUE(channel->Send(v));
+                produced.fetch_add(1, std::memory_order_relaxed);
+            }
+            });
+    }
+
+    std::vector<int> received;
+    received.reserve(total);
+
+    std::thread consumer([&]() {
+        while ((int)received.size() < total) {
+            auto v = channel->Receive();
+            if (v) received.push_back(*v);
         }
         });
 

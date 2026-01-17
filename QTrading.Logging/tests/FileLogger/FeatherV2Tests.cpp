@@ -6,6 +6,8 @@
 
 #include <boost/filesystem.hpp>
 #include <boost/thread.hpp>
+#include <atomic>
+#include <stdexcept>
 
 using namespace QTrading::Log;
 namespace bfs = boost::filesystem;
@@ -14,6 +16,13 @@ namespace bfs = boost::filesystem;
 /// @details Ensures a clean state before or after tests run.
 static void ClearLogs() {
     bfs::remove_all("logs");
+}
+
+/// @brief Throw if an Arrow status is not OK.
+static void ThrowIfNotOk(const arrow::Status& status) {
+    if (!status.ok()) {
+        throw std::runtime_error(status.ToString());
+    }
 }
 
 /// @brief Load an Arrow Table from an IPC file.
@@ -63,8 +72,8 @@ static void InitSimpleModule(std::unique_ptr<FeatherV2> &logger) {
         });
     Serializer ser = [](const void* src, arrow::RecordBatchBuilder& bld) {
         auto p = static_cast<const SimpleLog*>(src);
-        bld.GetFieldAs<arrow::Int32Builder>(1)->Append(p->a);
-        bld.GetFieldAs<arrow::StringBuilder>(2)->Append(p->b);
+        ThrowIfNotOk(bld.GetFieldAs<arrow::Int32Builder>(1)->Append(p->a));
+        ThrowIfNotOk(bld.GetFieldAs<arrow::StringBuilder>(2)->Append(p->b));
         };
     logger->RegisterModule("Simple", schema, ser);
 }
@@ -85,7 +94,7 @@ static void InitOtherModule(std::unique_ptr<FeatherV2> &logger) {
         });
     Serializer ser = [](const void* src, arrow::RecordBatchBuilder& bld) {
         auto p = static_cast<const OtherLog*>(src);
-        bld.GetFieldAs<arrow::DoubleBuilder>(1)->Append(p->x);
+        ThrowIfNotOk(bld.GetFieldAs<arrow::DoubleBuilder>(1)->Append(p->x));
         };
     logger->RegisterModule("Other", schema, ser);
 }
@@ -113,13 +122,12 @@ protected:
 /// @details Registers the "Simple" module, logs one SimpleLog, and
 /// checks that the resulting Arrow file has the correct schema and values.
 TEST_F(LoggerTest, SingleRecord) {
-    logger->Start();
     InitSimpleModule(logger);
+    logger->Start();
 
     QTrading::Utils::GlobalTimestamp.store(5555);
 
-    auto obj = std::make_shared<SimpleLog>(SimpleLog{ 42, "foo" });
-    logger->Log("Simple", obj);
+    EXPECT_TRUE(logger->Log("Simple", SimpleLog{ 42, "foo" }));
 
     logger->Stop();
 
@@ -139,12 +147,47 @@ TEST_F(LoggerTest, SingleRecord) {
     EXPECT_EQ(b_arr->GetString(0), "foo");
 }
 
+/// @brief Verify batch logging writes multiple rows for a single module.
+/// @details Logs several SimpleLog entries in one call and checks ordering and values.
+TEST_F(LoggerTest, BatchLoggingSingleModule) {
+    InitSimpleModule(logger);
+    logger->Start();
+
+    std::vector<SimpleLog> logs{
+        { 1, "a" },
+        { 2, "b" },
+        { 3, "c" }
+    };
+
+    QTrading::Utils::GlobalTimestamp.store(7777);
+    const auto count = logger->LogBatch("Simple", logs.data(), logs.size());
+    EXPECT_EQ(count, logs.size());
+
+    logger->Stop();
+
+    auto tbl = ReadTable("logs/Simple.arrow");
+    EXPECT_EQ(tbl->num_rows(), static_cast<int64_t>(logs.size()));
+
+    auto ts_arr = std::static_pointer_cast<arrow::UInt64Array>(tbl->column(0)->chunk(0));
+    EXPECT_EQ(ts_arr->Value(0), 7777ULL);
+
+    auto a_arr = std::static_pointer_cast<arrow::Int32Array>(tbl->column(1)->chunk(0));
+    EXPECT_EQ(a_arr->Value(0), 1);
+    EXPECT_EQ(a_arr->Value(1), 2);
+    EXPECT_EQ(a_arr->Value(2), 3);
+
+    auto b_arr = std::static_pointer_cast<arrow::StringArray>(tbl->column(2)->chunk(0));
+    EXPECT_EQ(b_arr->GetString(0), "a");
+    EXPECT_EQ(b_arr->GetString(1), "b");
+    EXPECT_EQ(b_arr->GetString(2), "c");
+}
+
 /// @brief Ensure registering the same module twice throws an exception.
 /// @details Calls InitSimpleModule twice on the same logger.
 TEST_F(LoggerTest, DuplicateRegisterThrows) {
-    logger->Start();
     InitSimpleModule(logger);
     EXPECT_THROW(InitSimpleModule(logger), std::runtime_error);
+    logger->Start();
     logger->Stop();
 }
 
@@ -152,23 +195,26 @@ TEST_F(LoggerTest, DuplicateRegisterThrows) {
 /// @details Spawns several threads, each logging multiple SimpleLog entries,
 /// then verifies the total row count matches the expected number.
 TEST_F(LoggerTest, MultiThreadLogging) {
-    logger->Start();
     InitSimpleModule(logger);
+    logger->Start();
 
     const int perThread = 200;
     const int nThreads = 4;
     std::vector<boost::thread> threads;
+    std::atomic<bool> all_ok{ true };
 
     for (int t = 0; t < nThreads; ++t) {
-        threads.emplace_back([this, perThread]() {
+        threads.emplace_back([this, perThread, &all_ok]() {
             for (int i = 0; i < perThread; ++i) {
                 QTrading::Utils::GlobalTimestamp.store(1000 + i);
-                auto obj = std::make_shared<SimpleLog>(SimpleLog{ i, "x" });
-                logger->Log("Simple", obj);
+                if (!logger->Log("Simple", SimpleLog{ i, "x" })) {
+                    all_ok.store(false, std::memory_order_relaxed);
+                }
             }
             });
     }
     for (auto& th : threads) th.join();
+    EXPECT_TRUE(all_ok.load(std::memory_order_relaxed));
 
     logger->Stop();
 
@@ -180,15 +226,15 @@ TEST_F(LoggerTest, MultiThreadLogging) {
 /// @details Registers "Simple" and "Other", logs to each, and checks
 /// that both Arrow files exist with the correct timestamps.
 TEST_F(LoggerTest, MultiModule) {
-    logger->Start();
     InitSimpleModule(logger);
     InitOtherModule(logger);
+    logger->Start();
 
     QTrading::Utils::GlobalTimestamp.store(1111);
-    logger->Log("Simple", std::make_shared<SimpleLog>(SimpleLog{ 1, "a" }));
+    EXPECT_TRUE(logger->Log("Simple", SimpleLog{ 1, "a" }));
 
     QTrading::Utils::GlobalTimestamp.store(2222);
-    logger->Log("Other", std::make_shared<OtherLog>(OtherLog{ 3.14 }));
+    EXPECT_TRUE(logger->Log("Other", OtherLog{ 3.14 }));
 
     logger->Stop();
 
