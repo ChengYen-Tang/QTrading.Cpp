@@ -81,6 +81,12 @@ namespace QTrading::Infra::Exchanges {
 			if (position_channel && !position_channel->IsClosed()) position_channel->Close();
 			if (order_channel && !order_channel->IsClosed())    order_channel->Close();
 		}
+
+		/// @brief Cancel all open orders for a symbol (optional override).
+		virtual void cancel_open_orders(const std::string& symbol)
+		{
+			(void)symbol;
+		}
 	protected:
 		std::shared_ptr<Channel<TMarket>>             market_channel;      ///< Channel for market snapshots.
 		std::shared_ptr<Channel<std::vector<Position>>> position_channel;  ///< Channel for position updates.

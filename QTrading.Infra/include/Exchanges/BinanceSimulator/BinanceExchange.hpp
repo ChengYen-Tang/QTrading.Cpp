@@ -5,6 +5,7 @@
 #include <optional>
 #include <queue>
 #include <cstdint>
+#include <mutex>
 
 #include "Exchanges/IExchange.h"
 #include "Exchanges/BinanceSimulator/DataProvider/MarketData.hpp"
@@ -82,6 +83,7 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
         const std::vector<dto::Order>& get_all_open_orders() const override;
         /// @brief Close all channels and mark simulation complete.
         void  close() override;
+        void  cancel_open_orders(const std::string& symbol) override;
 
         struct StatusSnapshot {
             struct PriceSnapshot {
@@ -115,6 +117,7 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
         std::vector<MarketData>                     md_;      ///< CSV-backed data provider per symbol.
         std::vector<size_t>                         cursor_;  ///< Current read index per symbol.
         std::shared_ptr<Account>                    account;  ///< Simulated margin account engine.
+        mutable std::mutex                          account_mtx_;
 
         std::vector<dto::Position> last_pos_snapshot;   ///< Last-debounced snapshot of positions.
         std::vector<dto::Order>    last_ord_snapshot;   ///< Last-debounced snapshot of orders.

@@ -94,6 +94,7 @@ public:
         double price = 0.0);
 
     void cancel_order_by_id(int order_id);
+    void cancel_open_orders(const std::string& symbol);
 
     const std::vector<Order>& get_all_open_orders() const;
     const std::vector<Position>& get_all_positions() const;
@@ -112,6 +113,10 @@ public:
 
     void set_enable_console_output(bool enable);
     bool is_console_output_enabled() const;
+
+    // Limit the number of open orders checked per symbol per tick (0 = no limit).
+    void set_max_match_orders_per_symbol(size_t limit);
+    size_t max_match_orders_per_symbol() const;
 
 private:
     double balance_;
@@ -173,6 +178,7 @@ private:
     KlineVolumeSplitMode kline_volume_split_mode_{ KlineVolumeSplitMode::TakerBuyOnly };
 
     bool enable_console_output_{ false };
+    size_t max_match_orders_per_symbol_{ 256 };
 
     // Monotonic state version for O(1) change detection by exchange.
     uint64_t state_version_{ 0 };

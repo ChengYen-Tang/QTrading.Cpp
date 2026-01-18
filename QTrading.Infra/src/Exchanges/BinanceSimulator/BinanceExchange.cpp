@@ -174,6 +174,7 @@ bool BinanceExchange::place_order(const std::string& symbol,
     QTrading::Dto::Trading::PositionSide position_side,
     bool reduce_only)
 {
+    std::lock_guard<std::mutex> lk(account_mtx_);
     return account->place_order(symbol, quantity, price, side, position_side, reduce_only);
 }
 
@@ -183,16 +184,19 @@ bool BinanceExchange::place_order(const std::string& symbol,
     QTrading::Dto::Trading::PositionSide position_side,
     bool reduce_only)
 {
+    std::lock_guard<std::mutex> lk(account_mtx_);
     return account->place_order(symbol, quantity, side, position_side, reduce_only);
 }
 
 void BinanceExchange::close_position(const std::string& symbol, double price)
 {
+    std::lock_guard<std::mutex> lk(account_mtx_);
     account->close_position(symbol, price);
 }
 
 void BinanceExchange::close_position(const std::string& symbol)
 {
+    std::lock_guard<std::mutex> lk(account_mtx_);
     account->close_position(symbol);
 }
 
@@ -200,6 +204,7 @@ void BinanceExchange::close_position(const std::string& symbol,
     QTrading::Dto::Trading::PositionSide position_side,
     double price)
 {
+    std::lock_guard<std::mutex> lk(account_mtx_);
     account->close_position(symbol, position_side, price);
 }
 
@@ -208,6 +213,7 @@ void BinanceExchange::close_position(const std::string& symbol,
 bool BinanceExchange::step()
 {
     QTR_TRACE("ex", "step begin");
+    std::lock_guard<std::mutex> lk(account_mtx_);
 
     // Terminate simulation (end backtest) once wallet balance is depleted.
     if (account->get_balance().WalletBalance <= 0.0) {
@@ -304,6 +310,12 @@ void BinanceExchange::close()
     }
 
 	IExchange<MultiKlinePtr>::close();
+}
+
+void BinanceExchange::cancel_open_orders(const std::string& symbol)
+{
+    std::lock_guard<std::mutex> lk(account_mtx_);
+    account->cancel_open_orders(symbol);
 }
 
 /// @brief Determine the next global timestamp to emit.
@@ -625,6 +637,7 @@ void BinanceExchange::log_events(const MultiKlineDto& market,
 
 void BinanceExchange::FillStatusSnapshot(StatusSnapshot& out) const
 {
+    std::lock_guard<std::mutex> lk(account_mtx_);
     out.ts_exchange = last_step_ts_;
     if (account) {
         const auto bal = account->get_balance();

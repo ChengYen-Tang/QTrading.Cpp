@@ -215,9 +215,9 @@ int main()
             if (reason && *reason) {
                 std::cerr << "[Service] " << reason << std::endl;
             }
+            exchange->close();
             aggregator->stop();
             strategy->stop();
-            exchange->close();
         };
 
         // @brief Main simulation loop: advance exchange until no more data.
@@ -232,7 +232,15 @@ int main()
             QTR_TRACE("service", "exchange->step begin");
             const bool ok = exchange->step();
             QTR_TRACE("service", ok ? "exchange->step end ok" : "exchange->step end false");
-            if (!ok) break;
+            if (!ok) {
+#if defined(QTRADING_TRACE) && !defined(QTRADING_TRACE_VERBOSE)
+                exchange->FillStatusSnapshot(status);
+                PrintStatusLine(status);
+#else
+                std::cerr << "[Service] exchange->step returned false; exiting loop." << std::endl;
+#endif
+                break;
+            }
             if (StopRequested()) {
                 if (!stop_logged) {
                     stop_logged = true;

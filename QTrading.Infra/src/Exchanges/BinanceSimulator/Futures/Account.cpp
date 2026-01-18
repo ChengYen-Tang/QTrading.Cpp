@@ -224,6 +224,16 @@ bool Account::is_console_output_enabled() const
     return enable_console_output_;
 }
 
+void Account::set_max_match_orders_per_symbol(size_t limit)
+{
+    max_match_orders_per_symbol_ = limit;
+}
+
+size_t Account::max_match_orders_per_symbol() const
+{
+    return max_match_orders_per_symbol_;
+}
+
 static QTrading::Dto::Account::BalanceSnapshot build_snapshot(
     double wallet_balance,
     const std::vector<Position>& positions,
@@ -874,7 +884,12 @@ void Account::update_positions(const std::unordered_map<std::string, KlineDto>& 
             plan.fills.reserve(indices.size());
             plan.has_data = true;
 
+            const size_t max_checks = max_match_orders_per_symbol_;
+            size_t checked = 0;
             for (size_t idx : indices) {
+                if (max_checks > 0 && checked >= max_checks) {
+                    break;
+                }
                 if (total_vol <= 0.0) break;
 
                 const auto [can_fill, is_taker] = policies_.can_fill_and_taker
@@ -904,6 +919,7 @@ void Account::update_positions(const std::unordered_map<std::string, KlineDto>& 
                     : PriceExecutionModel{ market_execution_slippage_, limit_execution_slippage_ }.execution_price(ord, k);
 
                 plan.fills.push_back(FillPlanEntry{ idx, fill_qty, fill_price, is_taker });
+                ++checked;
             }
 
             plan.remaining_vol = total_vol;
@@ -1227,6 +1243,26 @@ void Account::cancel_order_by_id(int order_id) {
 
     // Preserve original order: erase the one element and rebuild indices.
     open_orders_.erase(open_orders_.begin() + static_cast<std::ptrdiff_t>(it->second));
+    rebuild_open_order_index_();
+    mark_open_orders_dirty_();
+    ++state_version_;
+}
+
+void Account::cancel_open_orders(const std::string& symbol) {
+    if (open_orders_.empty()) {
+        return;
+    }
+
+    const size_t before = open_orders_.size();
+    open_orders_.erase(
+        std::remove_if(open_orders_.begin(), open_orders_.end(),
+            [&](const Order& o) { return o.symbol == symbol; }),
+        open_orders_.end());
+
+    if (open_orders_.size() == before) {
+        return;
+    }
+
     rebuild_open_order_index_();
     mark_open_orders_dirty_();
     ++state_version_;

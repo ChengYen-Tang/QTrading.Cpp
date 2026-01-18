@@ -74,6 +74,7 @@ void UTBotStrategy::process_symbol(const std::string& sym,
     if (srcPrev > prevTrail && srcCur < prevTrail) newPos = -1;
 
     if (newPos != S.pos) {
+        ex->cancel_open_orders(sym);
 		ex->close_position(sym);  // close existing position
         if (newPos == 1) (void)ex->place_order(sym, qty, 0.0, OrderSide::Buy, PositionSide::Both, false);
         if (newPos == -1) (void)ex->place_order(sym, qty, 0.0, OrderSide::Sell, PositionSide::Both, false);
