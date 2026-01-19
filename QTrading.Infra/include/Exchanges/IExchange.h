@@ -73,6 +73,24 @@ namespace QTrading::Infra::Exchanges {
 		/// @return Reference to a vector of Order DTOs.
 		virtual const std::vector<Order>& get_all_open_orders() const = 0;
 
+		/// @brief Set leverage for a symbol (optional override).
+		/// @param symbol Trading symbol.
+		/// @param new_leverage Desired leverage (>0).
+		virtual void set_symbol_leverage(const std::string& symbol, double new_leverage)
+		{
+			(void)symbol;
+			(void)new_leverage;
+		}
+
+		/// @brief Get leverage for a symbol (optional override).
+		/// @param symbol Trading symbol.
+		/// @return Current leverage (default 1.0 if unsupported).
+		virtual double get_symbol_leverage(const std::string& symbol) const
+		{
+			(void)symbol;
+			return 1.0;
+		}
+
 		/// @brief Close all public channels (market, positions, orders).
 		virtual void close()
 		{

@@ -300,8 +300,20 @@ const std::vector<dto::Order>& BinanceExchange::get_all_open_orders() const {
     return account->get_all_open_orders();
 }
 
+void BinanceExchange::set_symbol_leverage(const std::string& symbol, double new_leverage)
+{
+    std::lock_guard<std::mutex> lk(account_mtx_);
+    account->set_symbol_leverage(symbol, new_leverage);
+}
+
+double BinanceExchange::get_symbol_leverage(const std::string& symbol) const
+{
+    std::lock_guard<std::mutex> lk(account_mtx_);
+    return account->get_symbol_leverage(symbol);
+}
+
 /// @brief Close the simulator: drain CSVs and close all channels.
-/// @details Advances each symbol’s cursor to the end before closing.
+/// @details Advances each symbol's cursor to the end before closing.
 void BinanceExchange::close()
 {
     for (size_t i = 0; i < md_.size(); ++i) {

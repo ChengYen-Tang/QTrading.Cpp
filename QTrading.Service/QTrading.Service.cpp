@@ -1,7 +1,11 @@
-﻿#include "QTrading.Service.h"
+#include "QTrading.Service.h"
 #include "Exchanges/BinanceSimulator/BinanceExchange.hpp"
-#include "Aggregator/BinanceHourAggregator.hpp"
-#include "Trend/UTBotStrategy.hpp"
+#include "Execution/MarketExecutionEngine.hpp"
+#include "Intent/BasisIntentBuilder.hpp"
+#include "Monitoring/SimpleMonitoring.hpp"
+#include "Risk/SimpleRiskEngine.hpp"
+#include "Signal/BasisSignalEngine.hpp"
+#include "Universe/FixedUniverseSelector.hpp"
 #include "SinkLogger.hpp"
 #include "FileLogger/FeatherV2Sink.hpp"
 #include "Enum/LogModule.hpp"
@@ -14,6 +18,7 @@
 #include "FileLogger/FeatherV2/MarketEvent.hpp"
 #include "FileLogger/FeatherV2/RunMetadata.hpp"
 #include "Diagnostics/Trace.hpp"
+#include "Dto/Trading/Side.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -30,6 +35,7 @@
 using namespace std;
 using namespace QTrading::Log;
 using BinanceExchange = QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+using MarketPtr = QTrading::Infra::Exchanges::BinanceSim::MultiKlinePtr;
 
 namespace {
 
@@ -61,6 +67,13 @@ void HandleSignal(int)
 bool StopRequested()
 {
     return g_stop_requested.load(std::memory_order_relaxed);
+}
+
+QTrading::Dto::Trading::OrderSide ToOrderSide(QTrading::Execution::OrderAction action)
+{
+    return (action == QTrading::Execution::OrderAction::Buy)
+        ? QTrading::Dto::Trading::OrderSide::Buy
+        : QTrading::Dto::Trading::OrderSide::Sell;
 }
 
 #if defined(QTRADING_TRACE) && !defined(QTRADING_TRACE_VERBOSE)
@@ -96,17 +109,15 @@ void PrintStatusLine(const BinanceExchange::StatusSnapshot& snap)
 } // namespace
 
 /// @file QTrading.Service.cpp
-/// @brief Defines the application entry point and wires together exchange, aggregator, strategy, and logger.
+/// @brief Defines the application entry point and wires together exchange and arbitrage pipeline modules.
 
 /// @brief Main entry point for QTrading simulation.
 /// @details 
 ///   1. Configure CSV input for each symbol  
 ///   2. Set up FeatherV2 logger and register modules  
-///   3. Instantiate exchange simulator, hourly aggregator, and UT-Bot strategy  
-///   4. Wire data flow: Exchange → Aggregator → Strategy → Exchange  
-///   5. Start background threads  
-///   6. Run simulation loop until market data is exhausted  
-///   7. Perform clean shutdown  
+///   3. Instantiate exchange simulator and arbitrage pipeline  
+///   4. Run simulation loop until market data is exhausted  
+///   5. Perform clean shutdown  
 /// @return Returns 0 on successful completion.
 int main()
 {
@@ -124,8 +135,8 @@ int main()
     try {
         /// @brief Mapping from symbol string to CSV file path.
         std::vector<std::pair<std::string, std::string>> symbolCsv = {
-            {"BTCUSDT", R"(\\Nas.kttw.xyz\docker\BinanceDataCollector\Data\Kline\UsdFutures\BTCUSDT.csv)"}
-            //{"ETHUSDT", R"(\\Nas.kttw.xyz\docker\BinanceDataCollector\Data\Kline\UsdFutures\ETHUSDT.csv)"}
+            {"BTCUSDT_SPOT", R"(\\Nas.kttw.xyz\docker\BinanceDataCollector\Data\Kline\Spot\BTCUSDT.csv)"},
+            {"BTCUSDT_PERP", R"(\\Nas.kttw.xyz\docker\BinanceDataCollector\Data\Kline\UsdFutures\BTCUSDT.csv)"}
         };
         const uint64_t run_id = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count());
@@ -147,9 +158,9 @@ int main()
             if (meta) {
                 meta << "{\n"
                      << "  \"run_id\": " << run_id << ",\n"
-                     << "  \"strategy_name\": \"" << JsonEscape("UTBotStrategy") << "\",\n"
-                     << "  \"strategy_version\": \"" << JsonEscape("1.0") << "\",\n"
-                     << "  \"strategy_params\": \"" << JsonEscape("atr=1.0;multiplier=1.0;use_trailing=false") << "\",\n"
+                     << "  \"strategy_name\": \"" << JsonEscape("BasisArbMVP") << "\",\n"
+                     << "  \"strategy_version\": \"" << JsonEscape("0.1") << "\",\n"
+                     << "  \"strategy_params\": \"" << JsonEscape("notional=1000;leverage=2") << "\",\n"
                      << "  \"dataset\": \"" << JsonEscape(dataset) << "\"\n"
                      << "}\n";
             }
@@ -167,9 +178,9 @@ int main()
         {
             FileLogger::FeatherV2::RunMetadataDto meta{};
             meta.run_id = run_id;
-            meta.strategy_name = "UTBotStrategy";
-            meta.strategy_version = "1.0";
-            meta.strategy_params = "atr=1.0;multiplier=1.0;use_trailing=false";
+            meta.strategy_name = "BasisArbMVP";
+            meta.strategy_version = "0.1";
+            meta.strategy_params = "notional=1000;leverage=2";
             meta.dataset = dataset;
             logger->Log(LogModuleToString(LogModule::RunMetadata), std::move(meta));
         }
@@ -181,21 +192,19 @@ int main()
         std::cerr << "[Service] exchange constructed" << std::endl;
         std::cerr.flush();
 
-        // @brief Aggregator that builds 1-hour bars and keeps last N hours.
-        auto aggregator = std::make_unique<QTrading::DataPreprocess::Aggregator::BinanceHourAggregator>(exchange, 10);
-
-        // @brief UT-Bot strategy consuming hourly bars to generate orders.
-        auto strategy = std::make_unique<QTrading::Strategy::UTBotStrategy>(exchange, 1.0, 1.0, false);
-
-        // @brief Wire the pipeline: Exchange → Aggregator → Strategy.
-        strategy->attach_in_channel(aggregator->get_market_channel());
-        strategy->attach_exchange(exchange);
-
-        std::cerr << "[Service] starting threads..." << std::endl;
-        std::cerr.flush();
-        // @brief Start background threads for aggregator and strategy.
-        aggregator->start();
-        strategy->start();
+        // @brief Assemble arbitrage pipeline (currently null implementations).
+        QTrading::Universe::FixedUniverseSelector universe_selector({ "BTCUSDT_SPOT", "BTCUSDT_PERP" });
+        QTrading::Signal::BasisSignalEngine signal_engine({
+            "BTCUSDT_SPOT",
+            "BTCUSDT_PERP",
+            120,
+            2.0,
+            0.5
+        });
+        QTrading::Intent::BasisIntentBuilder intent_builder({ "BTCUSDT_SPOT", "BTCUSDT_PERP" });
+        QTrading::Risk::SimpleRiskEngine risk_engine({ 1000.0, 2.0, 3.0 });
+        QTrading::Execution::MarketExecutionEngine execution_engine(exchange, { 10.0 });
+        QTrading::Monitoring::SimpleMonitoring monitoring({ 5 });
 
         std::cerr << "[Service] entering main loop..." << std::endl;
         std::cerr.flush();
@@ -216,8 +225,6 @@ int main()
                 std::cerr << "[Service] " << reason << std::endl;
             }
             exchange->close();
-            aggregator->stop();
-            strategy->stop();
         };
 
         // @brief Main simulation loop: advance exchange until no more data.
@@ -249,12 +256,36 @@ int main()
                 break;
             }
 
-            if (!strategy->wait_for_done_for(std::chrono::seconds(5))) {
-                std::cerr << "[Service][WARN] wait_for_done timeout. steps=" << steps
-                          << " ex_market_closed=" << exchange->get_market_channel()->IsClosed()
-                          << " agg_closed=" << aggregator->get_market_channel()->IsClosed()
-                          << std::endl;
+            auto marketOpt = exchange->get_market_channel()->Receive();
+            if (!marketOpt) {
+                std::cerr << "[Service] market channel closed; exiting loop." << std::endl;
                 break;
+            }
+            const auto& market = marketOpt.value();
+
+            (void)universe_selector.select();
+            auto signal = signal_engine.on_market(market);
+            auto intent = intent_builder.build(signal, market);
+
+            QTrading::Risk::AccountState account{};
+            account.positions = exchange->get_all_positions();
+            account.open_orders = exchange->get_all_open_orders();
+
+            auto risk = risk_engine.position(intent, account, market);
+            auto orders = execution_engine.plan(risk, signal, market);
+
+            for (const auto& order : orders) {
+                double price = (order.type == QTrading::Execution::OrderType::Limit)
+                    ? order.price
+                    : 0.0;
+                (void)exchange->place_order(order.symbol, order.qty, price, ToOrderSide(order.action),
+                    QTrading::Dto::Trading::PositionSide::Both, order.reduce_only);
+            }
+
+            for (const auto& alert : monitoring.check(account)) {
+                if (alert.action == "CANCEL_OPEN_ORDERS") {
+                    exchange->cancel_open_orders(alert.symbol);
+                }
             }
 
             ++steps;
@@ -268,14 +299,13 @@ int main()
 #else
                 std::cout << "[Service] steps=" << steps
                           << " ex_market_closed=" << exchange->get_market_channel()->IsClosed()
-                          << " agg_closed=" << aggregator->get_market_channel()->IsClosed()
                           << std::endl;
 #endif
                 last_progress = now;
             }
         }
 
-        // @brief Clean shutdown: stop threads, close channels, stop logger.
+        // @brief Clean shutdown: close channels, stop logger.
         Shutdown("shutting down modules...");
         logger->Stop();
 

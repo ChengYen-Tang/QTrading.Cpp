@@ -81,6 +81,10 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
         const std::vector<dto::Position>& get_all_positions()   const override;
         /// @copydoc IExchange::get_all_open_orders
         const std::vector<dto::Order>& get_all_open_orders() const override;
+        /// @copydoc IExchange::set_symbol_leverage
+        void set_symbol_leverage(const std::string& symbol, double new_leverage) override;
+        /// @copydoc IExchange::get_symbol_leverage
+        double get_symbol_leverage(const std::string& symbol) const override;
         /// @brief Close all channels and mark simulation complete.
         void  close() override;
         void  cancel_open_orders(const std::string& symbol) override;
