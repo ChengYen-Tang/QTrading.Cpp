@@ -118,6 +118,27 @@ public:
     void set_max_match_orders_per_symbol(size_t limit);
     size_t max_match_orders_per_symbol() const;
 
+    struct FillEvent {
+        int order_id{};
+        std::string symbol;
+        QTrading::Dto::Trading::OrderSide side{};
+        QTrading::Dto::Trading::PositionSide position_side{};
+        bool reduce_only{};
+        double order_qty{};
+        double order_price{};
+        double exec_qty{};
+        double exec_price{};
+        double remaining_qty{};
+        bool is_taker{};
+        double fee{};
+        double fee_rate{};
+        int closing_position_id{};
+        QTrading::Dto::Account::BalanceSnapshot balance_snapshot{};
+        std::vector<Position> positions_snapshot{};
+    };
+
+    std::vector<FillEvent> drain_fill_events();
+
 private:
     double balance_;
     double wallet_balance_;
@@ -189,6 +210,7 @@ private:
     mutable QTrading::Dto::Account::BalanceSnapshot balance_cache_{};
     mutable uint64_t balance_cache_version_{ static_cast<uint64_t>(-1) };
     uint64_t balance_version_{ 0 };
+    std::vector<FillEvent> fill_events_{};
 
     int generate_order_id();
     int generate_position_id();

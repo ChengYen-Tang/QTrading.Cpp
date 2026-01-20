@@ -780,6 +780,7 @@ void Account::update_positions(const std::unordered_map<std::string, KlineDto>& 
     bool open_orders_changed = false;
     // Reset per-tick scratch allocator before building fill buffers.
     tick_memory_.release();
+    fill_events_.clear();
     std::pmr::vector<unsigned char> keep_open_order{ &tick_memory_ };
     std::pmr::vector<Order> next_open_orders{ &tick_memory_ };
     std::vector<Order> single_leftover;
@@ -966,6 +967,8 @@ void Account::update_positions(const std::unordered_map<std::string, KlineDto>& 
             const double fill_qty = entry.fill_qty;
             const double fill_price = entry.fill_price;
             const bool is_taker = entry.is_taker;
+            const double order_qty = ord.quantity;
+            const double order_price = ord.price;
 
             const double notional = fill_qty * fill_price;
             const double feeRate = fee_model.fee_rate(is_taker);
@@ -983,10 +986,40 @@ void Account::update_positions(const std::unordered_map<std::string, KlineDto>& 
                 processOpeningOrder(ord, fill_qty, fill_price, notional, fee, feeRate, single_leftover);
             }
 
+            double remaining_qty = 0.0;
             if (!single_leftover.empty()) {
                 ord = single_leftover.front();
                 keep_open_order[entry.idx] = true;
+                remaining_qty = ord.quantity;
             }
+
+            FillEvent fill{};
+            fill.order_id = ord.id;
+            fill.symbol = ord.symbol;
+            fill.side = ord.side;
+            fill.position_side = ord.position_side;
+            fill.reduce_only = ord.reduce_only;
+            fill.order_qty = order_qty;
+            fill.order_price = order_price;
+            fill.exec_qty = fill_qty;
+            fill.exec_price = fill_price;
+            fill.remaining_qty = remaining_qty;
+            fill.is_taker = is_taker;
+            fill.fee = fee;
+            fill.fee_rate = feeRate;
+            fill.closing_position_id = ord.closing_position_id;
+            auto itp = symbol_kline.find(fill.symbol);
+            if (itp != symbol_kline.end()) {
+                const double cp = itp->second.ClosePrice;
+                for (auto& pos : positions_) {
+                    if (pos.symbol != fill.symbol) continue;
+                    pos.unrealized_pnl = (cp - pos.entry_price) * pos.quantity * (pos.is_long ? 1.0 : -1.0);
+                }
+            }
+            mark_balance_dirty_();
+            fill.balance_snapshot = get_balance();
+            fill.positions_snapshot = positions_;
+            fill_events_.push_back(std::move(fill));
         }
     }
 
@@ -1123,6 +1156,34 @@ void Account::update_positions(const std::unordered_map<std::string, KlineDto>& 
             leftover.reserve(1);
             processClosingOrder(liqOrd, close_qty, liq_price, fee, leftover);
 
+            FillEvent fill{};
+            fill.order_id = liqOrd.id;
+            fill.symbol = liqOrd.symbol;
+            fill.side = liqOrd.side;
+            fill.position_side = liqOrd.position_side;
+            fill.reduce_only = liqOrd.reduce_only;
+            fill.order_qty = liqOrd.quantity;
+            fill.order_price = liqOrd.price;
+            fill.exec_qty = close_qty;
+            fill.exec_price = liq_price;
+            fill.remaining_qty = 0.0;
+            fill.is_taker = true;
+            fill.fee = fee;
+            fill.fee_rate = fee_model.taker_fee;
+            fill.closing_position_id = liqOrd.closing_position_id;
+            auto itp = symbol_kline.find(fill.symbol);
+            if (itp != symbol_kline.end()) {
+                const double cp = itp->second.ClosePrice;
+                for (auto& p : positions_) {
+                    if (p.symbol != fill.symbol) continue;
+                    p.unrealized_pnl = (cp - p.entry_price) * p.quantity * (p.is_long ? 1.0 : -1.0);
+                }
+            }
+            mark_balance_dirty_();
+            fill.balance_snapshot = get_balance();
+            fill.positions_snapshot = positions_;
+            fill_events_.push_back(std::move(fill));
+
             positions_.erase(
                 std::remove_if(positions_.begin(), positions_.end(),
                     [](const Position& p) { return p.quantity <= 1e-8; }),
@@ -1192,6 +1253,13 @@ void Account::update_positions(const std::unordered_map<std::string, KlineDto>& 
     if (dirty) {
         ++state_version_;
     }
+}
+
+std::vector<Account::FillEvent> Account::drain_fill_events()
+{
+    std::vector<FillEvent> out;
+    out.swap(fill_events_);
+    return out;
 }
 
 /// @brief Process a closing order fill: update position, free margin, realize PnL.

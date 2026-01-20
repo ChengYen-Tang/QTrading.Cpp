@@ -468,17 +468,34 @@ void BinanceExchange::log_events(const MultiKlineDto& market,
     }
 
     const auto balance = account->get_balance();
+    const auto fill_events = account->drain_fill_events();
+    std::unordered_set<int> filled_order_ids;
+    if (!fill_events.empty()) {
+        filled_order_ids.reserve(fill_events.size() * 2);
+    }
+
     if (account_event_module_id_ != Logger::kInvalidModuleId) {
+        double last_wallet_for_fill = last_wallet_balance_.value_or(
+            fill_events.empty() ? balance.WalletBalance : fill_events.front().balance_snapshot.WalletBalance);
+
+        for (const auto& f : fill_events) {
+            AccountEventDto e;
+            e.request_id = static_cast<uint64_t>(f.order_id);
+            e.source_order_id = f.order_id;
+            e.event_type = static_cast<int32_t>(AccountEventType::BalanceSnapshot);
+            e.wallet_delta = f.balance_snapshot.WalletBalance - last_wallet_for_fill;
+            e.wallet_balance_after = f.balance_snapshot.WalletBalance;
+            e.margin_balance_after = f.balance_snapshot.MarginBalance;
+            e.available_balance_after = f.balance_snapshot.AvailableBalance;
+            account_event_buffer_.push(std::move(e));
+            last_wallet_for_fill = f.balance_snapshot.WalletBalance;
+        }
+
         AccountEventDto e;
         e.request_id = 0;
         e.source_order_id = -1;
         e.event_type = static_cast<int32_t>(AccountEventType::BalanceSnapshot);
-        if (last_wallet_balance_.has_value()) {
-            e.wallet_delta = balance.WalletBalance - *last_wallet_balance_;
-        }
-        else {
-            e.wallet_delta = 0.0;
-        }
+        e.wallet_delta = balance.WalletBalance - last_wallet_for_fill;
         e.wallet_balance_after = balance.WalletBalance;
         e.margin_balance_after = balance.MarginBalance;
         e.available_balance_after = balance.AvailableBalance;
@@ -490,7 +507,6 @@ void BinanceExchange::log_events(const MultiKlineDto& market,
 
     const bool need_position_events = position_event_module_id_ != Logger::kInvalidModuleId;
     const bool need_order_events = order_event_module_id_ != Logger::kInvalidModuleId;
-
     if (need_position_events || need_order_events) {
         std::unordered_map<int, const dto::Position*> prev_pos_by_id;
         prev_pos_by_id.reserve(last_pos_snapshot.size());
@@ -529,6 +545,28 @@ void BinanceExchange::log_events(const MultiKlineDto& market,
 
         constexpr double kQtyEps = 1e-8;
         if (need_position_events) {
+            for (const auto& f : fill_events) {
+                for (const auto& p : f.positions_snapshot) {
+                    PositionEventDto e;
+                    e.request_id = static_cast<uint64_t>(f.order_id);
+                    e.source_order_id = f.order_id;
+                    e.position_id = p.id;
+                    e.symbol = p.symbol;
+                    e.is_long = p.is_long;
+                    e.event_type = static_cast<int32_t>(PositionEventType::Snapshot);
+                    e.qty = p.quantity;
+                    e.entry_price = p.entry_price;
+                    e.notional = p.notional;
+                    e.unrealized_pnl = p.unrealized_pnl;
+                    e.initial_margin = p.initial_margin;
+                    e.maintenance_margin = p.maintenance_margin;
+                    e.leverage = p.leverage;
+                    e.fee = p.fee;
+                    e.fee_rate = p.fee_rate;
+                    position_event_buffer_.push(std::move(e));
+                }
+            }
+
             for (const auto& kv : cur_pos_by_id) {
                 const auto& cur = *kv.second;
                 auto it = prev_pos_by_id.find(kv.first);
@@ -588,12 +626,6 @@ void BinanceExchange::log_events(const MultiKlineDto& market,
                 cur_ord_by_id.emplace(o.id, &o);
             }
 
-            std::unordered_set<int> position_order_ids;
-            position_order_ids.reserve(cur_positions.size());
-            for (const auto& p : cur_positions) {
-                position_order_ids.insert(p.order_id);
-            }
-
             auto push_order_event = [&](const dto::Order& o, OrderEventType type,
                 double exec_qty, double exec_price, double remaining_qty) {
                 OrderEventDto e;
@@ -616,6 +648,28 @@ void BinanceExchange::log_events(const MultiKlineDto& market,
                 order_event_buffer_.push(std::move(e));
             };
 
+            for (const auto& f : fill_events) {
+                OrderEventDto e;
+                e.request_id = static_cast<uint64_t>(f.order_id);
+                e.order_id = f.order_id;
+                e.symbol = f.symbol;
+                e.event_type = static_cast<int32_t>(OrderEventType::Filled);
+                e.side = static_cast<int32_t>(f.side);
+                e.position_side = static_cast<int32_t>(f.position_side);
+                e.reduce_only = f.reduce_only;
+                e.qty = f.order_qty;
+                e.price = f.order_price;
+                e.exec_qty = f.exec_qty;
+                e.exec_price = f.exec_price;
+                e.remaining_qty = f.remaining_qty;
+                e.is_taker = f.is_taker;
+                e.fee = f.fee;
+                e.fee_rate = f.fee_rate;
+                e.reject_reason = 0;
+                order_event_buffer_.push(std::move(e));
+                filled_order_ids.insert(f.order_id);
+            }
+
             for (const auto& kv : cur_ord_by_id) {
                 if (prev_ord_by_id.find(kv.first) == prev_ord_by_id.end()) {
                     const auto& o = *kv.second;
@@ -628,16 +682,10 @@ void BinanceExchange::log_events(const MultiKlineDto& market,
                     continue;
                 }
                 const auto& o = *kv.second;
-                bool filled = position_order_ids.find(o.id) != position_order_ids.end();
-                if (!filled && o.closing_position_id != -1) {
-                    filled = changed_position_ids.find(o.closing_position_id) != changed_position_ids.end();
+                if (filled_order_ids.find(o.id) != filled_order_ids.end()) {
+                    continue;
                 }
-                if (filled) {
-                    push_order_event(o, OrderEventType::Filled, o.quantity, 0.0, 0.0);
-                }
-                else {
-                    push_order_event(o, OrderEventType::Canceled, 0.0, 0.0, o.quantity);
-                }
+                push_order_event(o, OrderEventType::Canceled, 0.0, 0.0, o.quantity);
             }
 
             LogBatchPooled(logger.get(), order_event_module_id_, order_event_buffer_.events);

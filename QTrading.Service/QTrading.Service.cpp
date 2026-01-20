@@ -170,6 +170,14 @@ int main()
                      << "}\n";
             }
         }
+        {
+            std::ofstream dataset_file("logs/dataset_paths.json", std::ios::out | std::ios::trunc);
+            if (dataset_file) {
+                dataset_file << "{\n"
+                             << "  \"dataset\": \"" << JsonEscape(dataset) << "\"\n"
+                             << "}\n";
+            }
+        }
         logger->RegisterModule(LogModuleToString(LogModule::Account), FileLogger::FeatherV2::AccountLog::Schema, FileLogger::FeatherV2::AccountLog::Serializer);
         logger->RegisterModule(LogModuleToString(LogModule::Position), FileLogger::FeatherV2::Position::Schema, FileLogger::FeatherV2::Position::Serializer);
         logger->RegisterModule(LogModuleToString(LogModule::Order), FileLogger::FeatherV2::Order::Schema, FileLogger::FeatherV2::Order::Serializer);
