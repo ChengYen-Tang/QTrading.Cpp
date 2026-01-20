@@ -1,4 +1,4 @@
-#include "QTrading.Service.h"
+﻿#include "QTrading.Service.h"
 #include "Exchanges/BinanceSimulator/BinanceExchange.hpp"
 #include "Execution/MarketExecutionEngine.hpp"
 #include "Intent/BasisIntentBuilder.hpp"
@@ -55,6 +55,11 @@ std::string JsonEscape(const std::string& input)
         }
     }
     return out;
+}
+
+std::string Utf8Path(const char8_t* path)
+{
+    return std::string(reinterpret_cast<const char*>(path));
 }
 
 std::atomic<bool> g_stop_requested{ false };
@@ -135,8 +140,8 @@ int main()
     try {
         /// @brief Mapping from symbol string to CSV file path.
         std::vector<std::pair<std::string, std::string>> symbolCsv = {
-            {"BTCUSDT_SPOT", R"(\\Nas.kttw.xyz\docker\BinanceDataCollector\Data\Kline\Spot\BTCUSDT.csv)"},
-            {"BTCUSDT_PERP", R"(\\Nas.kttw.xyz\docker\BinanceDataCollector\Data\Kline\UsdFutures\BTCUSDT.csv)"}
+            {"BTCUSDT_SPOT", Utf8Path(u8R"(\\Nas.kttw.xyz\docker\BinanceDataCollector\Data\Kline\Spot\BTCUSDT.csv)")},
+            {"BTCUSDT_PERP", Utf8Path(u8R"(\\Nas.kttw.xyz\docker\BinanceDataCollector\Data\Kline\UsdFutures\BTCUSDT.csv)")}
         };
         const uint64_t run_id = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count());

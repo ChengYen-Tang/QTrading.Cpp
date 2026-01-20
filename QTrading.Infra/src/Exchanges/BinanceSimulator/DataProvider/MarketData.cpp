@@ -1,14 +1,45 @@
 ﻿#include "Exchanges/BinanceSimulator/DataProvider/MarketData.hpp"
-#include <boost/iostreams/device/file.hpp>
-#include <boost/iostreams/stream.hpp>
-
 #include <algorithm>
 #include <charconv>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
 #include <stdexcept>
 #include <string_view>
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 namespace {
+
+#ifdef _WIN32
+static std::wstring utf8_to_wide(const std::string& utf8)
+{
+    if (utf8.empty()) {
+        return std::wstring();
+    }
+
+    auto convert = [](UINT codepage, const std::string& input) -> std::wstring {
+        const int len = MultiByteToWideChar(codepage, 0, input.data(),
+            static_cast<int>(input.size()), nullptr, 0);
+        if (len <= 0) {
+            return std::wstring();
+        }
+        std::wstring out(static_cast<size_t>(len), L'\0');
+        MultiByteToWideChar(codepage, 0, input.data(),
+            static_cast<int>(input.size()), out.data(), len);
+        return out;
+    };
+
+    std::wstring out = convert(CP_UTF8, utf8);
+    if (!out.empty()) {
+        return out;
+    }
+
+    return convert(CP_ACP, utf8);
+}
+#endif
 
 static inline std::string_view next_field(std::string_view& s)
 {
@@ -114,14 +145,15 @@ MarketData::MarketData(const std::string& symbol, const std::string& csv_file) :
 ///        Lines with insufficient tokens or parse errors are skipped.
 /// @param csv_file Path to CSV file.
 void MarketData::load_csv(const std::string& csv_file) {
-    namespace io = boost::iostreams;
-
-    io::file_source file_source(csv_file);
-    if (!file_source.is_open()) {
+#ifdef _WIN32
+    const std::filesystem::path path(utf8_to_wide(csv_file));
+#else
+    const std::filesystem::path path(csv_file);
+#endif
+    std::ifstream file(path);
+    if (!file.is_open()) {
         throw std::runtime_error("Cannot open file: " + csv_file);
     }
-
-    io::stream<io::file_source> file(file_source);
 
     // Simple reserve heuristic: for backtests, 1-minute data is large.
     // Reserve some upfront to reduce reallocations; will grow as needed.
