@@ -24,6 +24,7 @@
 #include <chrono>
 #include <csignal>
 #include <exception>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -156,6 +157,10 @@ int main()
         }
 
         // @brief Shared logger writing Feather-V2 IPC files to `logs/`.
+        {
+            std::error_code ec;
+            std::filesystem::remove_all("logs", ec);
+        }
         std::shared_ptr<SinkLogger> logger = std::make_shared<SinkLogger>("logs");
         logger->AddSink(std::make_unique<FileLogger::FeatherV2Sink>("logs"));
         {

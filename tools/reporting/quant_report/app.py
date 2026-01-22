@@ -602,6 +602,24 @@ def render_trade_stats(account_evt: ArrowData, order_evt: ArrowData):
 
     st.dataframe(fill_rows.tail(50), use_container_width=True)
 
+    # Per-position realized PnL (excluding fees) using closing_position_id.
+    if oe is not None and not oe.empty and "closing_position_id" in oe.columns:
+        fills = oe[oe.get("event_type", -1) == 3].copy()
+        if not fills.empty:
+            fee_by_order = fills.groupby("order_id")["fee"].sum() if "fee" in fills.columns else pd.Series(dtype="float64")
+            acc_by_order = acc_fills.groupby("source_order_id")["wallet_delta"].sum() if "wallet_delta" in acc_fills.columns else pd.Series(dtype="float64")
+            joined = pd.concat([acc_by_order, fee_by_order], axis=1)
+            joined.columns = ["wallet_delta_sum", "fee_sum"]
+            joined = joined.fillna(0.0)
+            joined["realized_ex_fee"] = joined["wallet_delta_sum"] + joined["fee_sum"]
+            order_pos = fills[["order_id", "closing_position_id"]].dropna().drop_duplicates()
+            pos_pnl = order_pos.merge(joined, left_on="order_id", right_index=True, how="left")
+            pos_pnl = pos_pnl.groupby("closing_position_id")["realized_ex_fee"].sum().reset_index()
+            st.subheader("Position PnL (Ex Fees)")
+            st.metric("Total Realized PnL (Ex Fees)", f"{pos_pnl['realized_ex_fee'].sum():,.2f}")
+            st.dataframe(pos_pnl.sort_values("realized_ex_fee").head(20), use_container_width=True)
+            st.dataframe(pos_pnl.sort_values("realized_ex_fee", ascending=False).head(20), use_container_width=True)
+
 
 def render_rolling_stats(account_evt: ArrowData):
     df = account_evt.df

@@ -38,6 +38,7 @@ namespace QTrading::Log::FileLogger::FeatherV2 {
         double exec_price{};
 
         double remaining_qty{};
+        int64_t closing_position_id{};
 
         bool is_taker{};
         double fee{};
@@ -66,6 +67,7 @@ namespace QTrading::Log::FileLogger::FeatherV2 {
                 arrow::field("exec_qty", arrow::float64()),
                 arrow::field("exec_price", arrow::float64()),
                 arrow::field("remaining_qty", arrow::float64()),
+                arrow::field("closing_position_id", arrow::int64()),
                 arrow::field("is_taker", arrow::boolean()),
                 arrow::field("fee", arrow::float64()),
                 arrow::field("fee_rate", arrow::float64()),
@@ -93,11 +95,12 @@ namespace QTrading::Log::FileLogger::FeatherV2 {
             detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(13), e.exec_qty);
             detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(14), e.exec_price);
             detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(15), e.remaining_qty);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::BooleanBuilder>(16), e.is_taker);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(17), e.fee);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(18), e.fee_rate);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::Int32Builder>(19), e.reject_reason);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::UInt64Builder>(20), e.ts_local);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::Int64Builder>(16), e.closing_position_id);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::BooleanBuilder>(17), e.is_taker);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(18), e.fee);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(19), e.fee_rate);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::Int32Builder>(20), e.reject_reason);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::UInt64Builder>(21), e.ts_local);
         }
     } // namespace OrderEvent
 

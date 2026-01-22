@@ -641,6 +641,7 @@ void BinanceExchange::log_events(const MultiKlineDto& market,
                 e.exec_qty = exec_qty;
                 e.exec_price = exec_price;
                 e.remaining_qty = remaining_qty;
+                e.closing_position_id = o.closing_position_id;
                 e.is_taker = false;
                 e.fee = 0.0;
                 e.fee_rate = 0.0;
@@ -662,6 +663,7 @@ void BinanceExchange::log_events(const MultiKlineDto& market,
                 e.exec_qty = f.exec_qty;
                 e.exec_price = f.exec_price;
                 e.remaining_qty = f.remaining_qty;
+                e.closing_position_id = f.closing_position_id;
                 e.is_taker = f.is_taker;
                 e.fee = f.fee;
                 e.fee_rate = f.fee_rate;
