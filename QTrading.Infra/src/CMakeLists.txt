@@ -3,6 +3,7 @@
   Exchanges/BinanceSimulator/Futures/Account.Opening.cpp
   Exchanges/BinanceSimulator/Futures/AccountPolicies.cpp
   Exchanges/BinanceSimulator/DataProvider/MarketData.cpp
+  Exchanges/BinanceSimulator/DataProvider/FundingRateData.cpp
   Exchanges/BinanceSimulator/BinanceExchange.cpp
 )
 

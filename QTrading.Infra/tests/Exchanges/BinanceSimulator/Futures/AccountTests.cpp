@@ -1061,3 +1061,35 @@ TEST(AccountTest, TickVolumeSplit_Heuristic_CloseNearLowBiasesBuyOrders) {
     EXPECT_NEAR(longQty, 6.0, 1e-12);
     EXPECT_NEAR(shortQty, 1.0, 1e-12);
 }
+
+TEST(AccountTest, ApplyFunding_LongPays) {
+    Account account(10000.0, 0);
+
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+
+    ASSERT_TRUE(account.place_order("BTCUSDT", 1.0, OrderSide::Buy, PositionSide::Both));
+    account.update_positions(oneKline("BTCUSDT", 100.0, 100.0, 100.0, 100.0, 1000.0));
+
+    const double before = account.get_wallet_balance();
+    (void)account.apply_funding("BTCUSDT", 1733497260000, 0.001, 10000.0);
+    const double after = account.get_wallet_balance();
+
+    EXPECT_NEAR(after, before - 10.0, 1e-8);
+}
+
+TEST(AccountTest, ApplyFunding_ShortReceives) {
+    Account account(10000.0, 0);
+
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+
+    ASSERT_TRUE(account.place_order("BTCUSDT", 1.0, OrderSide::Sell, PositionSide::Both));
+    account.update_positions(oneKline("BTCUSDT", 100.0, 100.0, 100.0, 100.0, 1000.0));
+
+    const double before = account.get_wallet_balance();
+    (void)account.apply_funding("BTCUSDT", 1733497260000, 0.001, 10000.0);
+    const double after = account.get_wallet_balance();
+
+    EXPECT_NEAR(after, before + 10.0, 1e-8);
+}

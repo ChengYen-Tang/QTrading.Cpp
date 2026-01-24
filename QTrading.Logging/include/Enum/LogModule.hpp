@@ -11,6 +11,7 @@ namespace QTrading::Log {
         PositionEvent,
         AccountEvent,
         MarketEvent,
+        FundingEvent,
         RunMetadata
     };
 
@@ -25,6 +26,7 @@ namespace QTrading::Log {
         static const std::string position_event = "PositionEvent";
         static const std::string account_event = "AccountEvent";
         static const std::string market_event = "MarketEvent";
+        static const std::string funding_event = "FundingEvent";
         static const std::string run_metadata = "RunMetadata";
         static const std::string unknown = "Unknown";
 
@@ -36,6 +38,7 @@ namespace QTrading::Log {
         case LogModule::PositionEvent: return position_event;
         case LogModule::AccountEvent:  return account_event;
         case LogModule::MarketEvent:   return market_event;
+        case LogModule::FundingEvent:  return funding_event;
         case LogModule::RunMetadata:   return run_metadata;
         default:                  return unknown;
         }

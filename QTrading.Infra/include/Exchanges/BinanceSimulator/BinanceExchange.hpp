@@ -6,9 +6,11 @@
 #include <queue>
 #include <cstdint>
 #include <mutex>
+#include <memory>
 
 #include "Exchanges/IExchange.h"
 #include "Exchanges/BinanceSimulator/DataProvider/MarketData.hpp"
+#include "Exchanges/BinanceSimulator/DataProvider/FundingRateData.hpp"
 #include "Exchanges/BinanceSimulator/Futures/Account.hpp"
 #include "Dto/Market/Binance/MultiKline.hpp"
 #include "Dto/Trading/Side.hpp"
@@ -17,6 +19,7 @@
 #include "Logging/OrderEventBuffer.hpp"
 #include "Logging/PositionEventBuffer.hpp"
 #include "Logging/MarketEventBuffer.hpp"
+#include "Logging/FundingEventBuffer.hpp"
 #include "Queue/ChannelFactory.hpp"
 #include "Logger.hpp"
 
@@ -31,6 +34,15 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
     ///  - Debounces position/order channels: only sends updates when state changes.
     class BinanceExchange final : public QTrading::Infra::Exchanges::IExchange<MultiKlinePtr> {
     public:
+        struct SymbolDataset {
+            std::string symbol;
+            std::string kline_csv;
+            std::optional<std::string> funding_csv;
+
+            SymbolDataset(std::string sym, std::string kline, std::optional<std::string> funding)
+                : symbol(std::move(sym)), kline_csv(std::move(kline)), funding_csv(std::move(funding)) {}
+        };
+
         /// @brief Construct with CSV mappings, logger, initial balance and VIP level.
         /// @param symbolCsv Vector of (symbol, csv_file) pairs.
         /// @param logger Shared pointer to a Logger instance.
@@ -42,11 +54,31 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
             int     vip_level = 0,
             uint64_t run_id = 0);
 
+        /// @brief Construct with kline + optional funding CSV mappings.
+        /// @param datasets Vector of (symbol, kline_csv, optional funding_csv).
+        /// @param logger Shared pointer to a Logger instance.
+        /// @param init_balance Starting account balance.
+        /// @param vip_level VIP level for fee tier (0–9).
+        BinanceExchange(const std::vector<SymbolDataset>& datasets,
+            std::shared_ptr<QTrading::Log::Logger> logger,
+            double  init_balance = 1'000'000.0,
+            int     vip_level = 0,
+            uint64_t run_id = 0);
+
         /// @brief Construct with CSV mappings, logger, and existing Account.
         /// @param symbolCsv Vector of (symbol, csv_file) pairs.
         /// @param logger Shared pointer to a Logger instance.
         /// @param account Shared pointer to a preconfigured Account.
         BinanceExchange(const std::vector<std::pair<std::string, std::string>>& symbolCsv,
+            std::shared_ptr<QTrading::Log::Logger> logger,
+            std::shared_ptr<Account> account,
+            uint64_t run_id = 0);
+
+        /// @brief Construct with datasets, logger, and existing Account.
+        /// @param datasets Vector of (symbol, kline_csv, optional funding_csv).
+        /// @param logger Shared pointer to a Logger instance.
+        /// @param account Shared pointer to a preconfigured Account.
+        BinanceExchange(const std::vector<SymbolDataset>& datasets,
             std::shared_ptr<QTrading::Log::Logger> logger,
             std::shared_ptr<Account> account,
             uint64_t run_id = 0);
@@ -117,9 +149,13 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
         QTrading::Log::Logger::ModuleId position_event_module_id_{ QTrading::Log::Logger::kInvalidModuleId };
         QTrading::Log::Logger::ModuleId order_event_module_id_{ QTrading::Log::Logger::kInvalidModuleId };
         QTrading::Log::Logger::ModuleId market_event_module_id_{ QTrading::Log::Logger::kInvalidModuleId };
+        QTrading::Log::Logger::ModuleId funding_event_module_id_{ QTrading::Log::Logger::kInvalidModuleId };
         std::vector<std::string>                    symbols_; ///< Stable symbol list.
         std::vector<MarketData>                     md_;      ///< CSV-backed data provider per symbol.
         std::vector<size_t>                         cursor_;  ///< Current read index per symbol.
+        std::vector<std::unique_ptr<FundingRateData>> funding_md_; ///< Optional funding data per symbol.
+        std::vector<size_t>                         funding_cursor_; ///< Funding read index per symbol.
+        std::vector<uint8_t>                        has_funding_;
         std::shared_ptr<Account>                    account;  ///< Simulated margin account engine.
         mutable std::mutex                          account_mtx_;
 
@@ -133,6 +169,7 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
         QTrading::Infra::Logging::PositionEventBuffer position_event_buffer_{};
         QTrading::Infra::Logging::OrderEventBuffer order_event_buffer_{};
         QTrading::Infra::Logging::MarketEventBuffer market_event_buffer_{};
+        QTrading::Infra::Logging::FundingEventBuffer funding_event_buffer_{};
 
         // Multiway merge state: next timestamp for each symbol + a min-heap.
         struct HeapItem {
@@ -174,7 +211,11 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
         /// @brief Log per-step market/account/order/position events with run/step/event sequencing.
         void log_events(const QTrading::Dto::Market::Binance::MultiKlineDto& market,
             const std::vector<dto::Position>& cur_positions,
-            const std::vector<dto::Order>& cur_orders);
+            const std::vector<dto::Order>& cur_orders,
+            const std::vector<QTrading::Log::FileLogger::FeatherV2::FundingEventDto>& funding_events);
+
+        void collect_funding_events(uint64_t ts,
+            std::vector<QTrading::Log::FileLogger::FeatherV2::FundingEventDto>& out);
 
         double progress_pct_() const;
 

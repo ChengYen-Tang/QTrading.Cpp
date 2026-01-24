@@ -16,6 +16,7 @@
 #include "FileLogger/FeatherV2/OrderEvent.hpp"
 #include "FileLogger/FeatherV2/PositionEvent.hpp"
 #include "FileLogger/FeatherV2/MarketEvent.hpp"
+#include "FileLogger/FeatherV2/FundingEvent.hpp"
 #include "FileLogger/FeatherV2/RunMetadata.hpp"
 #include "Diagnostics/Trace.hpp"
 #include "Dto/Trading/Side.hpp"
@@ -140,20 +141,24 @@ int main()
 
     try {
         /// @brief Mapping from symbol string to CSV file path.
-        std::vector<std::pair<std::string, std::string>> symbolCsv = {
-            {"BTCUSDT_SPOT", Utf8Path(u8R"(\\Nas.kttw.xyz\docker\BinanceDataCollector\Data\Kline\Spot\BTCUSDT.csv)")},
-            {"BTCUSDT_PERP", Utf8Path(u8R"(\\Nas.kttw.xyz\docker\BinanceDataCollector\Data\Kline\UsdFutures\BTCUSDT.csv)")}
+        std::vector<BinanceExchange::SymbolDataset> symbolCsv = {
+            {"BTCUSDT_SPOT", Utf8Path(u8R"(\\synology\MarketData\Kline\Spot\BTCUSDT.csv)"), std::nullopt},
+            {"BTCUSDT_PERP", Utf8Path(u8R"(\\synology\MarketData\Kline\UsdFutures\BTCUSDT.csv)"), std::nullopt}
         };
         const uint64_t run_id = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count());
         std::string dataset;
-        for (const auto& [sym, csv] : symbolCsv) {
+        for (const auto& ds : symbolCsv) {
             if (!dataset.empty()) {
                 dataset += ";";
             }
-            dataset += sym;
+            dataset += ds.symbol;
             dataset += "=";
-            dataset += csv;
+            dataset += ds.kline_csv;
+            if (ds.funding_csv.has_value() && !ds.funding_csv->empty()) {
+                dataset += "|";
+                dataset += *ds.funding_csv;
+            }
         }
 
         // @brief Shared logger writing Feather-V2 IPC files to `logs/`.
@@ -190,6 +195,7 @@ int main()
         logger->RegisterModule(LogModuleToString(LogModule::PositionEvent), FileLogger::FeatherV2::PositionEvent::Schema(), FileLogger::FeatherV2::PositionEvent::Serializer);
         logger->RegisterModule(LogModuleToString(LogModule::OrderEvent), FileLogger::FeatherV2::OrderEvent::Schema(), FileLogger::FeatherV2::OrderEvent::Serializer);
         logger->RegisterModule(LogModuleToString(LogModule::MarketEvent), FileLogger::FeatherV2::MarketEvent::Schema(), FileLogger::FeatherV2::MarketEvent::Serializer);
+        logger->RegisterModule(LogModuleToString(LogModule::FundingEvent), FileLogger::FeatherV2::FundingEvent::Schema(), FileLogger::FeatherV2::FundingEvent::Serializer);
         logger->RegisterModule(LogModuleToString(LogModule::RunMetadata), FileLogger::FeatherV2::RunMetadata::Schema(), FileLogger::FeatherV2::RunMetadata::Serializer);
         logger->Start();
 

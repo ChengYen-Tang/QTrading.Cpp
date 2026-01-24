@@ -5,6 +5,7 @@
 #include <unordered_map>
 #include <tuple>
 #include <memory_resource>
+#include <cstdint>
 #include "Dto/Order.hpp"
 #include "Dto/Position.hpp"
 #include "Dto/Market/Binance/Kline.hpp"
@@ -85,6 +86,20 @@ public:
 
     void update_positions(const std::unordered_map<std::string, std::pair<double, double>>& symbol_price_volume);
     void update_positions(const std::unordered_map<std::string, QTrading::Dto::Market::Binance::KlineDto>& symbol_kline);
+
+    struct FundingApplyResult {
+        int position_id{};
+        bool is_long{};
+        double quantity{};
+        double funding{};
+    };
+
+    /// @brief Apply funding to all positions for the given symbol.
+    /// @param symbol Trading symbol.
+    /// @param funding_time Funding timestamp (ms since epoch).
+    /// @param rate Funding rate.
+    /// @param mark_price Mark price used to compute notional.
+    std::vector<FundingApplyResult> apply_funding(const std::string& symbol, uint64_t funding_time, double rate, double mark_price);
 
     void close_position(const std::string& symbol, double price);
     void close_position(const std::string& symbol);

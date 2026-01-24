@@ -1255,6 +1255,40 @@ void Account::update_positions(const std::unordered_map<std::string, KlineDto>& 
     }
 }
 
+std::vector<Account::FundingApplyResult> Account::apply_funding(
+    const std::string& symbol, uint64_t /*funding_time*/, double rate, double mark_price)
+{
+    std::vector<FundingApplyResult> results;
+    if (!std::isfinite(mark_price) || mark_price <= 0.0) {
+        return results;
+    }
+
+    double total_delta = 0.0;
+
+    for (auto& pos : positions_) {
+        if (pos.symbol != symbol) continue;
+        if (pos.quantity <= 0.0) continue;
+
+        const double notional = std::abs(pos.quantity) * mark_price;
+        if (notional <= 0.0) continue;
+
+        const double dir = pos.is_long ? -1.0 : 1.0;
+        const double funding = notional * rate * dir;
+        total_delta += funding;
+        results.push_back(FundingApplyResult{ pos.id, pos.is_long, pos.quantity, funding });
+    }
+
+    if (results.empty()) {
+        return results;
+    }
+
+    wallet_balance_ += total_delta;
+    balance_ += total_delta;
+    mark_balance_dirty_();
+    ++state_version_;
+    return results;
+}
+
 std::vector<Account::FillEvent> Account::drain_fill_events()
 {
     std::vector<FillEvent> out;

@@ -1,5 +1,6 @@
-﻿add_executable(QTrading.Infra.Tests
+add_executable(QTrading.Infra.Tests
   Exchanges/BinanceSimulator/DataProvider/MarketDataTests.cpp
+  Exchanges/BinanceSimulator/DataProvider/FundingRateDataTests.cpp
   Exchanges/BinanceSimulator/Futures/AccountTests.cpp
   Exchanges/BinanceSimulator/Futures/AccountPolicyInjectionTests.cpp
   Exchanges/BinanceSimulator/BinanceExchangeTests.cpp

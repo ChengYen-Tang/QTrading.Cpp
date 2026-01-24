@@ -1,6 +1,7 @@
-﻿#include <gtest/gtest.h>
+#include <gtest/gtest.h>
 #include <fstream>
 #include <filesystem>
+#include <optional>
 
 #include "Exchanges/BinanceSimulator/BinanceExchange.hpp"
 
@@ -20,10 +21,10 @@ class MockLogger : public QTrading::Log::Logger {
         void Consume() override {}
 };
 
-/// @brief Test fixture – provides tmpDir + helper to generate minimal CSV files.
+/// @brief Test fixture - provides tmpDir + helper to generate minimal CSV files.
 class BinanceExchangeFixture : public ::testing::Test {
 protected:
-    fs::path tmpDir;          // …/<gtest name>/ directory
+    fs::path tmpDir;          // .../<gtest name>/ directory
     std::shared_ptr<QTrading::Log::Logger> logger;
 
     /// @brief Write a minimal Binance 1-minute CSV.
@@ -53,6 +54,22 @@ protected:
             << std::get<10>(r) << '\n';// takerBQ
     }
 
+    /// @brief Write a minimal funding CSV (FundingTime,Rate,MarkPrice).
+    void writeFundingCsv(const std::string& fileName,
+        const std::vector<std::tuple<uint64_t, double, std::optional<double>>>& rows)
+    {
+        std::ofstream f(tmpDir / fileName, std::ios::trunc);
+        f << "FundingTime,Rate,MarkPrice\n";
+        for (const auto& r : rows) {
+            f << std::get<0>(r) << ','  // FundingTime
+              << std::get<1>(r) << ','; // Rate
+            if (std::get<2>(r).has_value()) {
+                f << *std::get<2>(r);
+            }
+            f << '\n';
+        }
+    }
+
     /// @brief Creates tmpDir and starts the mock logger.
     void SetUp() override
     {
@@ -73,7 +90,7 @@ protected:
     }
 };
 
-/// @brief Test syncing of multiple symbols with missing‐data holes (std::nullopt).
+/// @brief Test syncing of multiple symbols with missing-data holes (std::nullopt).
 TEST_F(BinanceExchangeFixture, SymbolsSynchronisedWithHoles)
 {
     /* Prepare data:
@@ -185,3 +202,83 @@ TEST_F(BinanceExchangeFixture, SnapshotConsistent)
     EXPECT_EQ(ex.get_all_positions().size(), 1u);
     EXPECT_TRUE(ex.get_all_open_orders().empty());
 }
+
+TEST_F(BinanceExchangeFixture, FundingAppliedAndDeduped)
+{
+    writeCsv("btc.csv", {
+        {      0, 100,100,100,100,1000, 30000,100,1,0,0 },
+        {  60000, 110,110,110,110,1000, 90000,100,1,0,0 },
+        { 120000, 120,120,120,120,1000,150000,100,1,0,0 }
+        });
+
+    writeFundingCsv("btc_funding.csv", {
+        {  60000,  0.001, std::nullopt },
+        { 120000, -0.002, 100.0 }
+        });
+
+    BinanceExchange ex(
+        { {"BTCUSDT", (tmpDir / "btc.csv").string(),
+            std::optional<std::string>((tmpDir / "btc_funding.csv").string())} },
+        logger,
+        /*balance*/ 1000.0);
+
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+
+    ASSERT_TRUE(ex.place_order("BTCUSDT", 1.0, 0.0, OrderSide::Buy, PositionSide::Both, false));
+    auto mCh = ex.get_market_channel();
+
+    BinanceExchange::StatusSnapshot snap{};
+
+    ASSERT_TRUE(ex.step());
+    mCh->Receive();
+    ex.FillStatusSnapshot(snap);
+    const double base = snap.wallet_balance;
+
+    ASSERT_TRUE(ex.step());
+    mCh->Receive();
+    ex.FillStatusSnapshot(snap);
+    const double after1 = snap.wallet_balance;
+    EXPECT_NEAR(after1 - base, -0.11, 1e-6);
+
+    ASSERT_TRUE(ex.step());
+    mCh->Receive();
+    ex.FillStatusSnapshot(snap);
+    const double after2 = snap.wallet_balance;
+    EXPECT_NEAR(after2 - base, 0.09, 1e-6);
+
+    EXPECT_FALSE(ex.step());
+}
+
+TEST_F(BinanceExchangeFixture, NoFundingPathKeepsBalance)
+{
+    writeCsv("btc.csv", {
+        {      0, 100,100,100,100,1000, 30000,100,1,0,0 },
+        {  60000, 110,110,110,110,1000, 90000,100,1,0,0 }
+        });
+
+    BinanceExchange ex({ {"BTCUSDT",(tmpDir / "btc.csv").string()} }, logger, /*balance*/ 1000.0);
+
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+
+    ASSERT_TRUE(ex.place_order("BTCUSDT", 1.0, 0.0, OrderSide::Buy, PositionSide::Both, false));
+    auto mCh = ex.get_market_channel();
+
+    BinanceExchange::StatusSnapshot snap{};
+
+    ASSERT_TRUE(ex.step());
+    mCh->Receive();
+    ex.FillStatusSnapshot(snap);
+    const double base = snap.wallet_balance;
+
+    ASSERT_TRUE(ex.step());
+    mCh->Receive();
+    ex.FillStatusSnapshot(snap);
+    const double after = snap.wallet_balance;
+
+    EXPECT_NEAR(after, base, 1e-8);
+}
+
+
+

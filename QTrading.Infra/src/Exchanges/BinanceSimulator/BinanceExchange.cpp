@@ -20,6 +20,7 @@ using namespace QTrading::Log;
 using QTrading::Log::FileLogger::FeatherV2::AccountEventDto;
 using QTrading::Log::FileLogger::FeatherV2::AccountEventType;
 using QTrading::Log::FileLogger::FeatherV2::MarketEventDto;
+using QTrading::Log::FileLogger::FeatherV2::FundingEventDto;
 using QTrading::Log::FileLogger::FeatherV2::OrderEventDto;
 using QTrading::Log::FileLogger::FeatherV2::OrderEventType;
 using QTrading::Log::FileLogger::FeatherV2::PositionEventDto;
@@ -87,6 +88,17 @@ uint64_t now_ms()
         std::chrono::system_clock::now().time_since_epoch()).count());
 }
 
+std::vector<BinanceExchange::SymbolDataset> to_datasets(
+    const std::vector<std::pair<std::string, std::string>>& symbolCsv)
+{
+    std::vector<BinanceExchange::SymbolDataset> out;
+    out.reserve(symbolCsv.size());
+    for (const auto& [sym, csv] : symbolCsv) {
+        out.push_back(BinanceExchange::SymbolDataset{ sym, csv, std::nullopt });
+    }
+    return out;
+}
+
 } // namespace
 
 /// @brief Simulator for Binance futures exchange.
@@ -96,7 +108,13 @@ BinanceExchange::BinanceExchange(
     const std::vector<std::pair<std::string, std::string>>& symbolCsv,
     std::shared_ptr<QTrading::Log::Logger> logger,
     double init_balance, int vip_level, uint64_t run_id)
-    : BinanceExchange(symbolCsv, logger, std::make_shared<Account>(init_balance, vip_level), run_id) { }
+    : BinanceExchange(to_datasets(symbolCsv), logger, std::make_shared<Account>(init_balance, vip_level), run_id) { }
+
+BinanceExchange::BinanceExchange(
+    const std::vector<SymbolDataset>& datasets,
+    std::shared_ptr<QTrading::Log::Logger> logger,
+    double init_balance, int vip_level, uint64_t run_id)
+    : BinanceExchange(datasets, logger, std::make_shared<Account>(init_balance, vip_level), run_id) { }
 
 /// @brief Primary constructor with an external Account instance.
 /// @param symbolCsv  Vector of (symbol, csv_file) pairs to drive market data.
@@ -104,6 +122,15 @@ BinanceExchange::BinanceExchange(
 /// @param account    Shared Account simulation object.
 BinanceExchange::BinanceExchange(
     const std::vector<std::pair<std::string, std::string>>& symbolCsv,
+    std::shared_ptr<QTrading::Log::Logger> logger,
+    std::shared_ptr<Account> account,
+    uint64_t run_id)
+    : BinanceExchange(to_datasets(symbolCsv), logger, account, run_id)
+{
+}
+
+BinanceExchange::BinanceExchange(
+    const std::vector<SymbolDataset>& datasets,
     std::shared_ptr<QTrading::Log::Logger> logger,
     std::shared_ptr<Account> account,
     uint64_t run_id)
@@ -117,6 +144,7 @@ BinanceExchange::BinanceExchange(
         position_event_module_id_ = logger->GetModuleId(LogModuleToString(LogModule::PositionEvent));
         order_event_module_id_ = logger->GetModuleId(LogModuleToString(LogModule::OrderEvent));
         market_event_module_id_ = logger->GetModuleId(LogModuleToString(LogModule::MarketEvent));
+        funding_event_module_id_ = logger->GetModuleId(LogModuleToString(LogModule::FundingEvent));
     }
     if (run_id == 0) {
         run_id = now_ms();
@@ -128,17 +156,17 @@ BinanceExchange::BinanceExchange(
 
     // Load each CSV in parallel (safe: each MarketData instance is independent).
     std::vector<std::future<MarketData>> jobs;
-    symbols_.reserve(symbolCsv.size());
-    md_.reserve(symbolCsv.size());
-    cursor_.assign(symbolCsv.size(), 0);
-    next_ts_by_symbol_.assign(symbolCsv.size(), 0);
-    has_next_ts_.assign(symbolCsv.size(), 0);
-    kline_counts_.reserve(symbolCsv.size());
-    jobs.reserve(symbolCsv.size());
+    symbols_.reserve(datasets.size());
+    md_.reserve(datasets.size());
+    cursor_.assign(datasets.size(), 0);
+    next_ts_by_symbol_.assign(datasets.size(), 0);
+    has_next_ts_.assign(datasets.size(), 0);
+    kline_counts_.reserve(datasets.size());
+    jobs.reserve(datasets.size());
 
-    for (const auto& [sym, csv] : symbolCsv) {
-        symbols_.push_back(sym);
-        jobs.emplace_back(std::async(std::launch::async, [sym, csv]() {
+    for (const auto& ds : datasets) {
+        symbols_.push_back(ds.symbol);
+        jobs.emplace_back(std::async(std::launch::async, [sym = ds.symbol, csv = ds.kline_csv]() {
             return MarketData(sym, csv);
             }));
     }
@@ -158,6 +186,17 @@ BinanceExchange::BinanceExchange(
     }
     last_close_by_symbol_.assign(symbols_.size(), 0.0);
     has_last_close_.assign(symbols_.size(), 0);
+
+    funding_md_.resize(datasets.size());
+    funding_cursor_.assign(datasets.size(), 0);
+    has_funding_.assign(datasets.size(), 0);
+    for (size_t i = 0; i < datasets.size(); ++i) {
+        const auto& ds = datasets[i];
+        if (ds.funding_csv.has_value() && !ds.funding_csv->empty()) {
+            funding_md_[i] = std::make_unique<FundingRateData>(ds.symbol, *ds.funding_csv);
+            has_funding_[i] = 1;
+        }
+    }
 
     /// @details Create bounded channels:
     ///          - market_channel: 8-element sliding window of MultiKlineDto
@@ -247,6 +286,9 @@ bool BinanceExchange::step()
     market_channel->Send(dto);
     QTR_TRACE("ex", "market_channel Send end");
 
+    std::vector<FundingEventDto> funding_events;
+    collect_funding_events(ts, funding_events);
+
     log_status();
     log_ctx_.ts_local = now_ms();
 
@@ -272,7 +314,7 @@ bool BinanceExchange::step()
         }
     }
 
-    log_events(*dto, curP, curO);
+    log_events(*dto, curP, curO, funding_events);
 
     if (cur_ver != last_account_version_) {
         if (pos_changed) {
@@ -426,7 +468,8 @@ void BinanceExchange::log_status() {
 
 void BinanceExchange::log_events(const MultiKlineDto& market,
     const std::vector<dto::Position>& cur_positions,
-    const std::vector<dto::Order>& cur_orders)
+    const std::vector<dto::Order>& cur_orders,
+    const std::vector<FundingEventDto>& funding_events)
 {
     if (!logger) {
         return;
@@ -436,6 +479,7 @@ void BinanceExchange::log_events(const MultiKlineDto& market,
     position_event_buffer_.reset(log_ctx_);
     order_event_buffer_.reset(log_ctx_);
     market_event_buffer_.reset(log_ctx_);
+    funding_event_buffer_.reset(log_ctx_);
 
     if (market_event_module_id_ != Logger::kInvalidModuleId) {
         market_event_buffer_.reserve(symbols_.size());
@@ -460,6 +504,15 @@ void BinanceExchange::log_events(const MultiKlineDto& market,
         }
 
         LogBatchPooled(logger.get(), market_event_module_id_, market_event_buffer_.events);
+    }
+
+    if (funding_event_module_id_ != Logger::kInvalidModuleId && !funding_events.empty()) {
+        funding_event_buffer_.reserve(funding_events.size());
+        for (const auto& e : funding_events) {
+            FundingEventDto ev = e;
+            funding_event_buffer_.push(std::move(ev));
+        }
+        LogBatchPooled(logger.get(), funding_event_module_id_, funding_event_buffer_.events);
     }
 
     const uint64_t cur_ver = account->get_state_version();
@@ -695,6 +748,65 @@ void BinanceExchange::log_events(const MultiKlineDto& market,
     }
 
     last_event_version_ = cur_ver;
+}
+
+void BinanceExchange::collect_funding_events(uint64_t ts, std::vector<FundingEventDto>& out)
+{
+    out.clear();
+    if (funding_md_.empty()) {
+        return;
+    }
+
+    out.reserve(symbols_.size());
+
+    for (size_t i = 0; i < funding_md_.size(); ++i) {
+        if (i >= symbols_.size()) break;
+        if (!has_funding_[i] || !funding_md_[i]) {
+            continue;
+        }
+
+        auto& data = *funding_md_[i];
+        size_t& cur = funding_cursor_[i];
+
+        while (cur < data.get_count()) {
+            const auto& fr = data.get_funding(cur);
+            if (fr.FundingTime > ts) {
+                break;
+            }
+
+            double price = 0.0;
+            bool has_price = false;
+            if (fr.MarkPrice.has_value()) {
+                price = fr.MarkPrice.value();
+                has_price = true;
+            }
+            else if (i < last_close_by_symbol_.size() && has_last_close_[i]) {
+                price = last_close_by_symbol_[i];
+                has_price = true;
+            }
+
+            std::vector<Account::FundingApplyResult> applied;
+            if (has_price && account) {
+                applied = account->apply_funding(symbols_[i], fr.FundingTime, fr.Rate, price);
+            }
+
+            for (const auto& r : applied) {
+                FundingEventDto e;
+                e.symbol = symbols_[i];
+                e.funding_time = fr.FundingTime;
+                e.rate = fr.Rate;
+                e.has_mark_price = has_price;
+                e.mark_price = has_price ? price : 0.0;
+                e.position_id = static_cast<int64_t>(r.position_id);
+                e.is_long = r.is_long;
+                e.quantity = r.quantity;
+                e.funding = r.funding;
+                out.emplace_back(std::move(e));
+            }
+
+            ++cur;
+        }
+    }
 }
 
 void BinanceExchange::FillStatusSnapshot(StatusSnapshot& out) const
