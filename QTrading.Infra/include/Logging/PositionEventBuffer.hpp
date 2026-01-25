@@ -1,6 +1,6 @@
 #pragma once
 
-#include <vector>
+#include <memory_resource>
 
 #include "Logging/StepLogContext.hpp"
 #include "FileLogger/FeatherV2/PositionEvent.hpp"
@@ -9,7 +9,10 @@ namespace QTrading::Infra::Logging {
 
     struct PositionEventBuffer {
         StepLogContext* ctx{};
-        std::vector<QTrading::Log::FileLogger::FeatherV2::PositionEventDto> events;
+        std::pmr::vector<QTrading::Log::FileLogger::FeatherV2::PositionEventDto> events;
+
+        explicit PositionEventBuffer(std::pmr::memory_resource* mr = std::pmr::get_default_resource())
+            : events(mr) {}
 
         void reset(StepLogContext& c)
         {

@@ -1,6 +1,6 @@
 #pragma once
 
-#include <vector>
+#include <memory_resource>
 
 #include "Logging/StepLogContext.hpp"
 #include "FileLogger/FeatherV2/FundingEvent.hpp"
@@ -9,7 +9,10 @@ namespace QTrading::Infra::Logging {
 
     struct FundingEventBuffer {
         StepLogContext* ctx{};
-        std::vector<QTrading::Log::FileLogger::FeatherV2::FundingEventDto> events;
+        std::pmr::vector<QTrading::Log::FileLogger::FeatherV2::FundingEventDto> events;
+
+        explicit FundingEventBuffer(std::pmr::memory_resource* mr = std::pmr::get_default_resource())
+            : events(mr) {}
 
         void reset(StepLogContext& c)
         {

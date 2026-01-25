@@ -115,22 +115,36 @@ TEST_F(BinanceExchangeFixture, SymbolsSynchronisedWithHoles)
     auto dto1 = mCh->Receive();
     ASSERT_TRUE(dto1.has_value());
     EXPECT_EQ(dto1->get()->Timestamp, 0u);
-    EXPECT_TRUE(dto1->get()->klines.at("BTCUSDT").has_value());
-    EXPECT_FALSE(dto1->get()->klines.at("ETHUSDT").has_value());
+    ASSERT_TRUE(dto1->get()->symbols);
+    const auto symbols = dto1->get()->symbols;
+    auto find_id = [&](const std::string& sym) -> std::size_t {
+        for (std::size_t i = 0; i < symbols->size(); ++i) {
+            if ((*symbols)[i] == sym) {
+                return i;
+            }
+        }
+        return symbols->size();
+    };
+    const auto btc_id = find_id("BTCUSDT");
+    const auto eth_id = find_id("ETHUSDT");
+    ASSERT_LT(btc_id, symbols->size());
+    ASSERT_LT(eth_id, symbols->size());
+    EXPECT_TRUE(dto1->get()->klines_by_id[btc_id].has_value());
+    EXPECT_FALSE(dto1->get()->klines_by_id[eth_id].has_value());
 
     // ---------- step #2  (t = 30 000) -----
     ASSERT_TRUE(ex.step());
     auto dto2 = mCh->Receive();
     EXPECT_EQ(dto2->get()->Timestamp, 30000u);
-    EXPECT_FALSE(dto2->get()->klines.at("BTCUSDT").has_value());
-    EXPECT_TRUE(dto2->get()->klines.at("ETHUSDT").has_value());
+    EXPECT_FALSE(dto2->get()->klines_by_id[btc_id].has_value());
+    EXPECT_TRUE(dto2->get()->klines_by_id[eth_id].has_value());
 
     // ---------- step #3  (t = 60 000) -----
     ASSERT_TRUE(ex.step());
     auto dto3 = mCh->Receive();
     EXPECT_EQ(dto3->get()->Timestamp, 60000u);
-    EXPECT_TRUE(dto3->get()->klines.at("BTCUSDT").has_value());
-    EXPECT_TRUE(dto3->get()->klines.at("ETHUSDT").has_value());
+    EXPECT_TRUE(dto3->get()->klines_by_id[btc_id].has_value());
+    EXPECT_TRUE(dto3->get()->klines_by_id[eth_id].has_value());
 
     // ---------- step #4  (EOF) ------------
     EXPECT_FALSE(ex.step());          // nothing left

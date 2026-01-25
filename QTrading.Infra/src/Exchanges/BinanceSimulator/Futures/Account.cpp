@@ -830,14 +830,15 @@ void Account::update_positions(const std::unordered_map<std::string, KlineDto>& 
         bool is_taker;
     };
     struct SymbolPlan {
-        std::vector<FillPlanEntry> fills;
+        std::pmr::vector<FillPlanEntry> fills;
         double remaining_vol{ 0.0 };
         double remaining_buy_liq{ 0.0 };
         double remaining_sell_liq{ 0.0 };
         bool has_data{ false };
+        explicit SymbolPlan(std::pmr::memory_resource* mr) : fills(mr) {}
     };
 
-    std::vector<SymbolWork> symbol_work;
+    std::pmr::vector<SymbolWork> symbol_work{ &tick_memory_ };
     symbol_work.reserve(per_symbol_active_ids_.size());
     for (size_t sym_id : per_symbol_active_ids_) {
         if (sym_id >= kline_by_id_.size() || kline_by_id_[sym_id] == nullptr) {
@@ -850,7 +851,11 @@ void Account::update_positions(const std::unordered_map<std::string, KlineDto>& 
         symbol_work.push_back(SymbolWork{ sym_id, &indices });
     }
 
-    std::vector<SymbolPlan> symbol_plans(symbol_work.size());
+    std::pmr::vector<SymbolPlan> symbol_plans{ &tick_memory_ };
+    symbol_plans.reserve(symbol_work.size());
+    for (size_t i = 0; i < symbol_work.size(); ++i) {
+        symbol_plans.emplace_back(&tick_memory_);
+    }
 
     auto build_plan = [&](size_t begin, size_t end) {
         for (size_t i = begin; i < end; ++i) {
@@ -1265,7 +1270,15 @@ std::vector<Account::FundingApplyResult> Account::apply_funding(
 
     double total_delta = 0.0;
 
-    for (auto& pos : positions_) {
+    auto it = position_indices_by_symbol_.find(symbol);
+    if (it == position_indices_by_symbol_.end()) {
+        return results;
+    }
+
+    const auto& indices = it->second;
+    for (size_t idx : indices) {
+        if (idx >= positions_.size()) continue;
+        auto& pos = positions_[idx];
         if (pos.symbol != symbol) continue;
         if (pos.quantity <= 0.0) continue;
 

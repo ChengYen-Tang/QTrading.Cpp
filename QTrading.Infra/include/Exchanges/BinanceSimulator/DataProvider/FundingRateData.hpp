@@ -29,6 +29,9 @@ public:
     /// @return Size of the internal funding vector.
     size_t get_count() const;
 
+    /// @brief Upper bound index for a funding time (first index with FundingTime > ts).
+    size_t upper_bound_ts(uint64_t ts) const;
+
     /// @brief Iterator over mutable FundingRateDto entries.
     using iterator = std::vector<FundingRateDto>::iterator;
     /// @brief Iterator over const FundingRateDto entries.

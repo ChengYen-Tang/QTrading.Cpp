@@ -46,7 +46,11 @@ MarketPtr MakeMarket(unsigned long long ts, const std::string& symbol, double cl
     auto dto = std::make_shared<QTrading::Dto::Market::Binance::MultiKlineDto>();
     dto->Timestamp = ts;
     QTrading::Dto::Market::Binance::KlineDto k(ts, 0, 0, 0, close, 0, ts, 0, 0, 0, 0);
-    dto->klines[symbol] = k;
+    auto symbols = std::make_shared<std::vector<std::string>>();
+    symbols->push_back(symbol);
+    dto->symbols = symbols;
+    dto->klines_by_id.resize(symbols->size());
+    dto->klines_by_id[0] = k;
     return dto;
 }
 

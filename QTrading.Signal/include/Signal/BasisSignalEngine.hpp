@@ -31,6 +31,9 @@ public:
 private:
     Config cfg_;
     std::deque<double> spread_window_;
+    bool has_symbol_ids_{ false };
+    std::size_t spot_id_{ 0 };
+    std::size_t perp_id_{ 0 };
 
     static double mean(const std::deque<double>& values);
     static double stddev(const std::deque<double>& values, double m);

@@ -7,6 +7,11 @@
 #include <cstdint>
 #include <mutex>
 #include <memory>
+#include <condition_variable>
+#include <deque>
+#include <thread>
+#include <atomic>
+#include <memory_resource>
 
 #include "Exchanges/IExchange.h"
 #include "Exchanges/BinanceSimulator/DataProvider/MarketData.hpp"
@@ -82,6 +87,7 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
             std::shared_ptr<QTrading::Log::Logger> logger,
             std::shared_ptr<Account> account,
             uint64_t run_id = 0);
+        ~BinanceExchange();
 
         /// @copydoc IExchange::place_order
         bool place_order(const std::string& symbol,
@@ -150,7 +156,10 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
         QTrading::Log::Logger::ModuleId order_event_module_id_{ QTrading::Log::Logger::kInvalidModuleId };
         QTrading::Log::Logger::ModuleId market_event_module_id_{ QTrading::Log::Logger::kInvalidModuleId };
         QTrading::Log::Logger::ModuleId funding_event_module_id_{ QTrading::Log::Logger::kInvalidModuleId };
+        bool enable_event_logging_{ true };
+        bool enable_klines_map_{ false };
         std::vector<std::string>                    symbols_; ///< Stable symbol list.
+        std::shared_ptr<const std::vector<std::string>> symbols_shared_;
         std::vector<MarketData>                     md_;      ///< CSV-backed data provider per symbol.
         std::vector<size_t>                         cursor_;  ///< Current read index per symbol.
         std::vector<std::unique_ptr<FundingRateData>> funding_md_; ///< Optional funding data per symbol.
@@ -161,15 +170,36 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
 
         std::vector<dto::Position> last_pos_snapshot;   ///< Last-debounced snapshot of positions.
         std::vector<dto::Order>    last_ord_snapshot;   ///< Last-debounced snapshot of orders.
+        std::vector<dto::Position> last_event_pos_snapshot_;
+        std::vector<dto::Order>    last_event_ord_snapshot_;
         std::optional<double>      last_wallet_balance_;
         uint64_t                   last_event_version_{ static_cast<uint64_t>(-1) };
 
         QTrading::Infra::Logging::StepLogContext log_ctx_{};
-        QTrading::Infra::Logging::AccountEventBuffer account_event_buffer_{};
-        QTrading::Infra::Logging::PositionEventBuffer position_event_buffer_{};
-        QTrading::Infra::Logging::OrderEventBuffer order_event_buffer_{};
-        QTrading::Infra::Logging::MarketEventBuffer market_event_buffer_{};
-        QTrading::Infra::Logging::FundingEventBuffer funding_event_buffer_{};
+        std::pmr::unsynchronized_pool_resource log_event_pool_{ std::pmr::new_delete_resource() };
+        QTrading::Infra::Logging::AccountEventBuffer account_event_buffer_{ &log_event_pool_ };
+        QTrading::Infra::Logging::PositionEventBuffer position_event_buffer_{ &log_event_pool_ };
+        QTrading::Infra::Logging::OrderEventBuffer order_event_buffer_{ &log_event_pool_ };
+        QTrading::Infra::Logging::MarketEventBuffer market_event_buffer_{ &log_event_pool_ };
+        QTrading::Infra::Logging::FundingEventBuffer funding_event_buffer_{ &log_event_pool_ };
+        std::vector<QTrading::Log::FileLogger::FeatherV2::FundingEventDto> funding_events_scratch_;
+
+        struct LogTask {
+            QTrading::Infra::Logging::StepLogContext ctx;
+            MultiKlinePtr market;
+            std::vector<dto::Position> positions;
+            std::vector<dto::Order> orders;
+            std::vector<QTrading::Log::FileLogger::FeatherV2::FundingEventDto> funding_events;
+            QTrading::Dto::Account::BalanceSnapshot balance;
+            std::vector<Account::FillEvent> fill_events;
+            uint64_t cur_ver{ 0 };
+        };
+
+        std::mutex log_mtx_;
+        std::condition_variable log_cv_;
+        std::deque<LogTask> log_queue_;
+        std::thread log_thread_;
+        std::atomic<bool> log_stop_{ false };
 
         // Multiway merge state: next timestamp for each symbol + a min-heap.
         struct HeapItem {
@@ -207,12 +237,24 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
         void     build_multikline(uint64_t ts,
             QTrading::Dto::Market::Binance::MultiKlineDto& out);
         /// @brief Log current account balance, positions and orders via logger.
-        inline void log_status();
+        void log_status_snapshot(const QTrading::Dto::Account::BalanceSnapshot& balance,
+            const std::vector<dto::Position>& positions,
+            const std::vector<dto::Order>& orders,
+            uint64_t cur_ver);
         /// @brief Log per-step market/account/order/position events with run/step/event sequencing.
-        void log_events(const QTrading::Dto::Market::Binance::MultiKlineDto& market,
+        void log_events(QTrading::Infra::Logging::StepLogContext ctx,
+            const QTrading::Dto::Market::Binance::MultiKlineDto& market,
             const std::vector<dto::Position>& cur_positions,
             const std::vector<dto::Order>& cur_orders,
-            const std::vector<QTrading::Log::FileLogger::FeatherV2::FundingEventDto>& funding_events);
+            const std::vector<QTrading::Log::FileLogger::FeatherV2::FundingEventDto>& funding_events,
+            const QTrading::Dto::Account::BalanceSnapshot& balance,
+            std::vector<Account::FillEvent>&& fill_events,
+            uint64_t cur_ver);
+
+        void start_log_thread_();
+        void stop_log_thread_();
+        void log_worker_();
+        void enqueue_log_task_(LogTask&& task);
 
         void collect_funding_events(uint64_t ts,
             std::vector<QTrading::Log::FileLogger::FeatherV2::FundingEventDto>& out);

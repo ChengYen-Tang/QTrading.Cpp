@@ -183,6 +183,14 @@ size_t FundingRateData::get_count() const {
     return rates.size();
 }
 
+size_t FundingRateData::upper_bound_ts(uint64_t ts) const {
+    const auto it = std::upper_bound(rates.begin(), rates.end(), ts,
+        [](uint64_t value, const FundingRateDto& entry) {
+            return value < entry.FundingTime;
+        });
+    return static_cast<size_t>(std::distance(rates.begin(), it));
+}
+
 FundingRateData::iterator FundingRateData::begin() {
     return rates.begin();
 }

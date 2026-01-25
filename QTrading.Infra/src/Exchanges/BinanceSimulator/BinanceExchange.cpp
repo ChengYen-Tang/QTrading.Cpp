@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <future>
 #include <memory>
 #include <memory_resource>
@@ -48,10 +49,10 @@ QTrading::Log::PayloadPtr make_log_payload(Args&&... args)
     return QTrading::Log::MakePayload<T>(&log_pool(), std::forward<Args>(args)...);
 }
 
-template <typename T>
+template <typename T, typename Alloc>
 void LogBatchPooled(QTrading::Log::Logger* logger,
     QTrading::Log::Logger::ModuleId module_id,
-    const std::vector<T>& items)
+    const std::vector<T, Alloc>& items)
 {
     if (!logger || module_id == QTrading::Log::Logger::kInvalidModuleId || items.empty()) {
         return;
@@ -65,10 +66,10 @@ void LogBatchPooled(QTrading::Log::Logger* logger,
     logger->LogBatchAt(module_id, payloads.data(), payloads.size(), ts);
 }
 
-template <typename T>
+template <typename T, typename Alloc>
 void LogBatchPooled(QTrading::Log::Logger* logger,
     QTrading::Log::Logger::ModuleId module_id,
-    std::vector<T>& items)
+    std::vector<T, Alloc>& items)
 {
     if (!logger || module_id == QTrading::Log::Logger::kInvalidModuleId || items.empty()) {
         return;
@@ -146,6 +147,16 @@ BinanceExchange::BinanceExchange(
         market_event_module_id_ = logger->GetModuleId(LogModuleToString(LogModule::MarketEvent));
         funding_event_module_id_ = logger->GetModuleId(LogModuleToString(LogModule::FundingEvent));
     }
+    if (const char* env = std::getenv("QTRADING_DISABLE_EVENT_LOGS")) {
+        if (env[0] == '1' || env[0] == 't' || env[0] == 'T' || env[0] == 'y' || env[0] == 'Y') {
+            enable_event_logging_ = false;
+        }
+    }
+    if (const char* env = std::getenv("QTRADING_ENABLE_KLINES_MAP")) {
+        if (env[0] == '1' || env[0] == 't' || env[0] == 'T' || env[0] == 'y' || env[0] == 'Y') {
+            enable_klines_map_ = true;
+        }
+    }
     if (run_id == 0) {
         run_id = now_ms();
     }
@@ -170,6 +181,7 @@ BinanceExchange::BinanceExchange(
             return MarketData(sym, csv);
             }));
     }
+    symbols_shared_ = std::make_shared<std::vector<std::string>>(symbols_);
 
     // Collect results deterministically by input order and initialize heap state.
     for (size_t i = 0; i < jobs.size(); ++i) {
@@ -204,6 +216,73 @@ BinanceExchange::BinanceExchange(
     market_channel = ChannelFactory::CreateBoundedChannel<MultiKlinePtr>(8, OverflowPolicy::DropOldest);
     position_channel = ChannelFactory::CreateUnboundedChannel<std::vector<dto::Position>>();
     order_channel = ChannelFactory::CreateUnboundedChannel<std::vector<dto::Order>>();
+
+    if (logger) {
+        start_log_thread_();
+    }
+}
+
+BinanceExchange::~BinanceExchange()
+{
+    stop_log_thread_();
+}
+
+void BinanceExchange::start_log_thread_()
+{
+    if (log_thread_.joinable()) {
+        return;
+    }
+    log_stop_.store(false, std::memory_order_release);
+    log_thread_ = std::thread([this]() { log_worker_(); });
+}
+
+void BinanceExchange::stop_log_thread_()
+{
+    if (!log_thread_.joinable()) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lk(log_mtx_);
+        log_stop_.store(true, std::memory_order_release);
+    }
+    log_cv_.notify_all();
+    log_thread_.join();
+}
+
+void BinanceExchange::enqueue_log_task_(LogTask&& task)
+{
+    if (!logger) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lk(log_mtx_);
+        log_queue_.emplace_back(std::move(task));
+    }
+    log_cv_.notify_one();
+}
+
+void BinanceExchange::log_worker_()
+{
+    while (true) {
+        LogTask task;
+        {
+            std::unique_lock<std::mutex> lk(log_mtx_);
+            log_cv_.wait(lk, [this]() {
+                return log_stop_.load(std::memory_order_acquire) || !log_queue_.empty();
+                });
+            if (log_stop_.load(std::memory_order_acquire) && log_queue_.empty()) {
+                return;
+            }
+            task = std::move(log_queue_.front());
+            log_queue_.pop_front();
+        }
+
+        log_status_snapshot(task.balance, task.positions, task.orders, task.cur_ver);
+        if (enable_event_logging_) {
+            log_events(task.ctx, *task.market, task.positions, task.orders, task.funding_events,
+                task.balance, std::move(task.fill_events), task.cur_ver);
+        }
+    }
 }
 
 bool BinanceExchange::place_order(const std::string& symbol,
@@ -252,16 +331,6 @@ void BinanceExchange::close_position(const std::string& symbol,
 bool BinanceExchange::step()
 {
     QTR_TRACE("ex", "step begin");
-    std::lock_guard<std::mutex> lk(account_mtx_);
-
-    // Terminate simulation (end backtest) once wallet balance is depleted.
-    if (account->get_balance().WalletBalance <= 0.0) {
-        QTR_TRACE("ex", "balance depleted -> close channels");
-        market_channel->Close();
-        position_channel->Close();
-        order_channel->Close();
-        return false;
-    }
 
     uint64_t ts;
     /// @details Find the next minimum timestamp among all symbols.
@@ -273,28 +342,48 @@ bool BinanceExchange::step()
         return false;
     }
 
-    /// @details Publish multi-symbol market data at timestamp `ts`.
-    last_step_ts_ = ts;
-    log_ctx_.ts_exchange = ts;
-    log_ctx_.step_seq += 1;
-    log_ctx_.event_seq = 0;
-    set_global_timestamp(ts);
-    auto dto = make_pooled<MultiKlineDto>();
-    build_multikline(ts, *dto);
+    QTrading::Dto::Account::BalanceSnapshot balance{};
+    std::vector<Account::FillEvent> fill_events;
+    std::vector<dto::Position> curP;
+    std::vector<dto::Order> curO;
+    uint64_t cur_ver = 0;
+    MultiKlinePtr dto;
+
+    {
+        std::lock_guard<std::mutex> lk(account_mtx_);
+
+        // Terminate simulation (end backtest) once wallet balance is depleted.
+        if (account->get_balance().WalletBalance <= 0.0) {
+            QTR_TRACE("ex", "balance depleted -> close channels");
+            market_channel->Close();
+            position_channel->Close();
+            order_channel->Close();
+            return false;
+        }
+
+        /// @details Publish multi-symbol market data at timestamp `ts`.
+        last_step_ts_ = ts;
+        log_ctx_.ts_exchange = ts;
+        log_ctx_.step_seq += 1;
+        log_ctx_.event_seq = 0;
+        set_global_timestamp(ts);
+        dto = make_pooled<MultiKlineDto>();
+        build_multikline(ts, *dto);
+
+        collect_funding_events(ts, funding_events_scratch_);
+
+        cur_ver = account->get_state_version();
+        curP = account->get_all_positions();
+        curO = account->get_all_open_orders();
+        balance = account->get_balance();
+        fill_events = account->drain_fill_events();
+    }
+
+    log_ctx_.ts_local = now_ms();
 
     QTR_TRACE("ex", "market_channel Send begin");
     market_channel->Send(dto);
     QTR_TRACE("ex", "market_channel Send end");
-
-    std::vector<FundingEventDto> funding_events;
-    collect_funding_events(ts, funding_events);
-
-    log_status();
-    log_ctx_.ts_local = now_ms();
-
-    const uint64_t cur_ver = account->get_state_version();
-    const auto& curP = account->get_all_positions();
-    const auto& curO = account->get_all_open_orders();
 
     bool pos_changed = false;
     bool ord_changed = false;
@@ -314,7 +403,18 @@ bool BinanceExchange::step()
         }
     }
 
-    log_events(*dto, curP, curO, funding_events);
+    if (logger) {
+        LogTask task;
+        task.ctx = log_ctx_;
+        task.market = dto;
+        task.positions = curP;
+        task.orders = curO;
+        task.funding_events = funding_events_scratch_;
+        task.balance = balance;
+        task.fill_events = std::move(fill_events);
+        task.cur_ver = cur_ver;
+        enqueue_log_task_(std::move(task));
+    }
 
     if (cur_ver != last_account_version_) {
         if (pos_changed) {
@@ -398,8 +498,13 @@ bool BinanceExchange::next_timestamp(uint64_t& ts)
 void BinanceExchange::build_multikline(uint64_t ts, MultiKlineDto& out)
 {
     out.Timestamp = ts;
+    out.symbols = symbols_shared_;
     out.klines.clear();
-    out.klines.reserve(md_.size());
+    if (enable_klines_map_) {
+        out.klines.reserve(md_.size());
+    }
+    out.klines_by_id.clear();
+    out.klines_by_id.resize(symbols_.size());
 
     kline_snap_cache_.clear();
     kline_snap_cache_.reserve(md_.size());
@@ -412,7 +517,10 @@ void BinanceExchange::build_multikline(uint64_t ts, MultiKlineDto& out)
             data.get_kline(idx).Timestamp == ts)
         {
             const auto& k = data.get_kline(idx);
-            out.klines.emplace(sym, k);
+            if (enable_klines_map_) {
+                out.klines.emplace(sym, k);
+            }
+            out.klines_by_id[i] = k;
             kline_snap_cache_.emplace(sym, k);
             last_close_by_symbol_[i] = k.ClosePrice;
             has_last_close_[i] = 1;
@@ -430,7 +538,9 @@ void BinanceExchange::build_multikline(uint64_t ts, MultiKlineDto& out)
             }
         }
         else {
-            out.klines.emplace(sym, std::nullopt);
+            if (enable_klines_map_) {
+                out.klines.emplace(sym, std::nullopt);
+            }
         }
     }
     if (!kline_snap_cache_.empty())
@@ -439,56 +549,63 @@ void BinanceExchange::build_multikline(uint64_t ts, MultiKlineDto& out)
 
 /// @brief Log account balance, positions, and orders via the Logger.
 /// @details Uses Arrow Feather-V2 for efficient batch logging.
-void BinanceExchange::log_status() {
-    if (!logger) {
-        return;
-    }
-
-    const uint64_t cur_ver = account->get_state_version();
-    if (cur_ver == last_logged_version_) {
-        return;
-    }
-
-    if (account_module_id_ != Logger::kInvalidModuleId) {
-        auto snap = account->get_balance();
-        logger->Log(account_module_id_, make_log_payload<AccountLog>(
-            AccountLog{ snap.WalletBalance, snap.UnrealizedPnl, snap.MarginBalance }));
-    }
-    if (position_module_id_ != Logger::kInvalidModuleId) {
-        const auto& curP = account->get_all_positions();
-        LogBatchPooled(logger.get(), position_module_id_, curP);
-    }
-    if (order_module_id_ != Logger::kInvalidModuleId) {
-        const auto& curO = account->get_all_open_orders();
-        LogBatchPooled(logger.get(), order_module_id_, curO);
-    }
-
-    last_logged_version_ = cur_ver;
-}
-
-void BinanceExchange::log_events(const MultiKlineDto& market,
-    const std::vector<dto::Position>& cur_positions,
-    const std::vector<dto::Order>& cur_orders,
-    const std::vector<FundingEventDto>& funding_events)
+void BinanceExchange::log_status_snapshot(const QTrading::Dto::Account::BalanceSnapshot& balance,
+    const std::vector<dto::Position>& positions,
+    const std::vector<dto::Order>& orders,
+    uint64_t cur_ver)
 {
     if (!logger) {
         return;
     }
 
-    account_event_buffer_.reset(log_ctx_);
-    position_event_buffer_.reset(log_ctx_);
-    order_event_buffer_.reset(log_ctx_);
-    market_event_buffer_.reset(log_ctx_);
-    funding_event_buffer_.reset(log_ctx_);
+    if (cur_ver == last_logged_version_) {
+        return;
+    }
+
+    if (account_module_id_ != Logger::kInvalidModuleId) {
+        logger->Log(account_module_id_, make_log_payload<AccountLog>(
+            AccountLog{ balance.WalletBalance, balance.UnrealizedPnl, balance.MarginBalance }));
+    }
+    if (position_module_id_ != Logger::kInvalidModuleId) {
+        LogBatchPooled(logger.get(), position_module_id_, positions);
+    }
+    if (order_module_id_ != Logger::kInvalidModuleId) {
+        LogBatchPooled(logger.get(), order_module_id_, orders);
+    }
+
+    last_logged_version_ = cur_ver;
+}
+
+void BinanceExchange::log_events(QTrading::Infra::Logging::StepLogContext ctx,
+    const MultiKlineDto& market,
+    const std::vector<dto::Position>& cur_positions,
+    const std::vector<dto::Order>& cur_orders,
+    const std::vector<FundingEventDto>& funding_events,
+    const QTrading::Dto::Account::BalanceSnapshot& balance,
+    std::vector<Account::FillEvent>&& fill_events,
+    uint64_t cur_ver)
+{
+    if (!logger) {
+        return;
+    }
+    if (!enable_event_logging_) {
+        return;
+    }
+
+    account_event_buffer_.reset(ctx);
+    position_event_buffer_.reset(ctx);
+    order_event_buffer_.reset(ctx);
+    market_event_buffer_.reset(ctx);
+    funding_event_buffer_.reset(ctx);
 
     if (market_event_module_id_ != Logger::kInvalidModuleId) {
         market_event_buffer_.reserve(symbols_.size());
-        for (const auto& sym : symbols_) {
+        for (size_t i = 0; i < symbols_.size(); ++i) {
+            const auto& sym = symbols_[i];
             MarketEventDto e;
             e.symbol = sym;
-            auto it = market.klines.find(sym);
-            if (it != market.klines.end() && it->second.has_value()) {
-                const auto& k = it->second.value();
+            if (i < market.klines_by_id.size() && market.klines_by_id[i].has_value()) {
+                const auto& k = market.klines_by_id[i].value();
                 e.has_kline = true;
                 e.open = k.OpenPrice;
                 e.high = k.HighPrice;
@@ -515,13 +632,10 @@ void BinanceExchange::log_events(const MultiKlineDto& market,
         LogBatchPooled(logger.get(), funding_event_module_id_, funding_event_buffer_.events);
     }
 
-    const uint64_t cur_ver = account->get_state_version();
     if (cur_ver == last_event_version_) {
         return;
     }
 
-    const auto balance = account->get_balance();
-    const auto fill_events = account->drain_fill_events();
     std::unordered_set<int> filled_order_ids;
     if (!fill_events.empty()) {
         filled_order_ids.reserve(fill_events.size() * 2);
@@ -562,8 +676,8 @@ void BinanceExchange::log_events(const MultiKlineDto& market,
     const bool need_order_events = order_event_module_id_ != Logger::kInvalidModuleId;
     if (need_position_events || need_order_events) {
         std::unordered_map<int, const dto::Position*> prev_pos_by_id;
-        prev_pos_by_id.reserve(last_pos_snapshot.size());
-        for (const auto& p : last_pos_snapshot) {
+        prev_pos_by_id.reserve(last_event_pos_snapshot_.size());
+        for (const auto& p : last_event_pos_snapshot_) {
             prev_pos_by_id.emplace(p.id, &p);
         }
 
@@ -574,7 +688,7 @@ void BinanceExchange::log_events(const MultiKlineDto& market,
         }
 
         std::unordered_set<int> changed_position_ids;
-        changed_position_ids.reserve(cur_positions.size() + last_pos_snapshot.size());
+        changed_position_ids.reserve(cur_positions.size() + last_event_pos_snapshot_.size());
 
         auto push_position_event = [&](const dto::Position& p, PositionEventType type) {
             PositionEventDto e;
@@ -668,8 +782,8 @@ void BinanceExchange::log_events(const MultiKlineDto& market,
 
         if (need_order_events) {
             std::unordered_map<int, const dto::Order*> prev_ord_by_id;
-            prev_ord_by_id.reserve(last_ord_snapshot.size());
-            for (const auto& o : last_ord_snapshot) {
+            prev_ord_by_id.reserve(last_event_ord_snapshot_.size());
+            for (const auto& o : last_event_ord_snapshot_) {
                 prev_ord_by_id.emplace(o.id, &o);
             }
 
@@ -747,6 +861,8 @@ void BinanceExchange::log_events(const MultiKlineDto& market,
         }
     }
 
+    last_event_pos_snapshot_ = cur_positions;
+    last_event_ord_snapshot_ = cur_orders;
     last_event_version_ = cur_ver;
 }
 
@@ -768,11 +884,9 @@ void BinanceExchange::collect_funding_events(uint64_t ts, std::vector<FundingEve
         auto& data = *funding_md_[i];
         size_t& cur = funding_cursor_[i];
 
-        while (cur < data.get_count()) {
+        const size_t end = data.upper_bound_ts(ts);
+        while (cur < end) {
             const auto& fr = data.get_funding(cur);
-            if (fr.FundingTime > ts) {
-                break;
-            }
 
             double price = 0.0;
             bool has_price = false;
