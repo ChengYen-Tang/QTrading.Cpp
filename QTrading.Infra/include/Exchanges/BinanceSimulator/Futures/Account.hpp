@@ -194,8 +194,9 @@ private:
     std::vector<size_t> merge_indices_;
     std::vector<Position> merged_positions_;
 
-    // Last known mark/close price per symbol (from kline ClosePrice). Used for market-order notional estimation.
-    std::unordered_map<std::string, double> last_mark_price_;
+    // Last known mark/close price per symbol id (from kline ClosePrice).
+    // Used for market-order notional estimation.
+    std::vector<double> last_mark_price_by_id_;
 
     // For market orders, notional is estimated as qty * mark * (1 + buffer).
     double market_slippage_buffer_{ 0.005 };

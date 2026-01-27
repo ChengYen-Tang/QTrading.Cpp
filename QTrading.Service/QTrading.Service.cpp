@@ -142,8 +142,10 @@ int main()
     try {
         /// @brief Mapping from symbol string to CSV file path.
         std::vector<BinanceExchange::SymbolDataset> symbolCsv = {
-            {"BTCUSDT_SPOT", Utf8Path(u8R"(\\synology\MarketData\Kline\Spot\BTCUSDT.csv)"), std::nullopt},
-            {"BTCUSDT_PERP", Utf8Path(u8R"(\\synology\MarketData\Kline\UsdFutures\BTCUSDT.csv)"), std::nullopt}
+            {"BTCUSDT_SPOT", Utf8Path(u8R"(\\synology\MarketData\General\MarketData\Kline\Spot\BTCUSDT.csv)"), std::nullopt},
+            {"BTCUSDT_PERP",
+                Utf8Path(u8R"(\\synology\MarketData\General\MarketData\Kline\UsdFutures\BTCUSDT.csv)"),
+                Utf8Path(u8R"(\\synology\MarketData\General\MarketData\FundingRate\UsdFutures\BTCUSDT.csv)")}
         };
         const uint64_t run_id = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count());
@@ -161,52 +163,52 @@ int main()
             }
         }
 
-        // @brief Shared logger writing Feather-V2 IPC files to `logs/`.
-        {
-            std::error_code ec;
-            std::filesystem::remove_all("logs", ec);
-        }
+            // @brief Shared logger writing Feather-V2 IPC files to `logs/`.
+            {
+                std::error_code ec;
+                std::filesystem::remove_all("logs", ec);
+            }
         std::shared_ptr<SinkLogger> logger = std::make_shared<SinkLogger>("logs");
-        logger->AddSink(std::make_unique<FileLogger::FeatherV2Sink>("logs"));
-        {
-            std::ofstream meta("logs/run_metadata.json", std::ios::out | std::ios::trunc);
-            if (meta) {
-                meta << "{\n"
-                     << "  \"run_id\": " << run_id << ",\n"
-                     << "  \"strategy_name\": \"" << JsonEscape("BasisArbMVP") << "\",\n"
-                     << "  \"strategy_version\": \"" << JsonEscape("0.1") << "\",\n"
-                     << "  \"strategy_params\": \"" << JsonEscape("notional=1000;leverage=2") << "\",\n"
-                     << "  \"dataset\": \"" << JsonEscape(dataset) << "\"\n"
-                     << "}\n";
+            logger->AddSink(std::make_unique<FileLogger::FeatherV2Sink>("logs"));
+            {
+                std::ofstream meta("logs/run_metadata.json", std::ios::out | std::ios::trunc);
+                if (meta) {
+                    meta << "{\n"
+                         << "  \"run_id\": " << run_id << ",\n"
+                         << "  \"strategy_name\": \"" << JsonEscape("BasisArbMVP") << "\",\n"
+                         << "  \"strategy_version\": \"" << JsonEscape("0.1") << "\",\n"
+                         << "  \"strategy_params\": \"" << JsonEscape("notional=1000;leverage=2") << "\",\n"
+                         << "  \"dataset\": \"" << JsonEscape(dataset) << "\"\n"
+                         << "}\n";
+                }
             }
-        }
-        {
-            std::ofstream dataset_file("logs/dataset_paths.json", std::ios::out | std::ios::trunc);
-            if (dataset_file) {
-                dataset_file << "{\n"
-                             << "  \"dataset\": \"" << JsonEscape(dataset) << "\"\n"
-                             << "}\n";
+            {
+                std::ofstream dataset_file("logs/dataset_paths.json", std::ios::out | std::ios::trunc);
+                if (dataset_file) {
+                    dataset_file << "{\n"
+                                 << "  \"dataset\": \"" << JsonEscape(dataset) << "\"\n"
+                                 << "}\n";
+                }
             }
-        }
-        logger->RegisterModule(LogModuleToString(LogModule::Account), FileLogger::FeatherV2::AccountLog::Schema, FileLogger::FeatherV2::AccountLog::Serializer);
-        logger->RegisterModule(LogModuleToString(LogModule::Position), FileLogger::FeatherV2::Position::Schema, FileLogger::FeatherV2::Position::Serializer);
-        logger->RegisterModule(LogModuleToString(LogModule::Order), FileLogger::FeatherV2::Order::Schema, FileLogger::FeatherV2::Order::Serializer);
-        logger->RegisterModule(LogModuleToString(LogModule::AccountEvent), FileLogger::FeatherV2::AccountEvent::Schema(), FileLogger::FeatherV2::AccountEvent::Serializer);
-        logger->RegisterModule(LogModuleToString(LogModule::PositionEvent), FileLogger::FeatherV2::PositionEvent::Schema(), FileLogger::FeatherV2::PositionEvent::Serializer);
-        logger->RegisterModule(LogModuleToString(LogModule::OrderEvent), FileLogger::FeatherV2::OrderEvent::Schema(), FileLogger::FeatherV2::OrderEvent::Serializer);
-        logger->RegisterModule(LogModuleToString(LogModule::MarketEvent), FileLogger::FeatherV2::MarketEvent::Schema(), FileLogger::FeatherV2::MarketEvent::Serializer);
-        logger->RegisterModule(LogModuleToString(LogModule::FundingEvent), FileLogger::FeatherV2::FundingEvent::Schema(), FileLogger::FeatherV2::FundingEvent::Serializer);
-        logger->RegisterModule(LogModuleToString(LogModule::RunMetadata), FileLogger::FeatherV2::RunMetadata::Schema(), FileLogger::FeatherV2::RunMetadata::Serializer);
-        logger->Start();
+            logger->RegisterModule(LogModuleToString(LogModule::Account), FileLogger::FeatherV2::AccountLog::Schema, FileLogger::FeatherV2::AccountLog::Serializer);
+            logger->RegisterModule(LogModuleToString(LogModule::Position), FileLogger::FeatherV2::Position::Schema, FileLogger::FeatherV2::Position::Serializer);
+            logger->RegisterModule(LogModuleToString(LogModule::Order), FileLogger::FeatherV2::Order::Schema, FileLogger::FeatherV2::Order::Serializer);
+            logger->RegisterModule(LogModuleToString(LogModule::AccountEvent), FileLogger::FeatherV2::AccountEvent::Schema(), FileLogger::FeatherV2::AccountEvent::Serializer);
+            logger->RegisterModule(LogModuleToString(LogModule::PositionEvent), FileLogger::FeatherV2::PositionEvent::Schema(), FileLogger::FeatherV2::PositionEvent::Serializer);
+            logger->RegisterModule(LogModuleToString(LogModule::OrderEvent), FileLogger::FeatherV2::OrderEvent::Schema(), FileLogger::FeatherV2::OrderEvent::Serializer);
+            logger->RegisterModule(LogModuleToString(LogModule::MarketEvent), FileLogger::FeatherV2::MarketEvent::Schema(), FileLogger::FeatherV2::MarketEvent::Serializer);
+            logger->RegisterModule(LogModuleToString(LogModule::FundingEvent), FileLogger::FeatherV2::FundingEvent::Schema(), FileLogger::FeatherV2::FundingEvent::Serializer);
+            logger->RegisterModule(LogModuleToString(LogModule::RunMetadata), FileLogger::FeatherV2::RunMetadata::Schema(), FileLogger::FeatherV2::RunMetadata::Serializer);
+            logger->Start();
 
-        {
-            FileLogger::FeatherV2::RunMetadataDto meta{};
-            meta.run_id = run_id;
-            meta.strategy_name = "BasisArbMVP";
-            meta.strategy_version = "0.1";
-            meta.strategy_params = "notional=1000;leverage=2";
-            meta.dataset = dataset;
-            logger->Log(LogModuleToString(LogModule::RunMetadata), std::move(meta));
+            {
+                FileLogger::FeatherV2::RunMetadataDto meta{};
+                meta.run_id = run_id;
+                meta.strategy_name = "BasisArbMVP";
+                meta.strategy_version = "0.1";
+                meta.strategy_params = "notional=1000;leverage=2";
+                meta.dataset = dataset;
+                logger->Log(LogModuleToString(LogModule::RunMetadata), std::move(meta));
         }
 
         std::cerr << "[Service] constructing exchange..." << std::endl;
@@ -282,7 +284,7 @@ int main()
 
             auto marketOpt = exchange->get_market_channel()->Receive();
             if (!marketOpt) {
-                std::cerr << "[Service] market channel closed; exiting loop." << std::endl;
+                    std::cerr << "[Service] market channel closed; exiting loop." << std::endl;
                 break;
             }
             const auto& market = marketOpt.value();
@@ -331,7 +333,7 @@ int main()
 
         // @brief Clean shutdown: close channels, stop logger.
         Shutdown("shutting down modules...");
-        logger->Stop();
+            logger->Stop();
 
         QTR_TRACE("service", "main end");
         std::cout << "Simulation completed." << std::endl;

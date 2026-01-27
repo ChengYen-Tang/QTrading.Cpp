@@ -89,6 +89,7 @@ uint64_t now_ms()
         std::chrono::system_clock::now().time_since_epoch()).count());
 }
 
+
 std::vector<BinanceExchange::SymbolDataset> to_datasets(
     const std::vector<std::pair<std::string, std::string>>& symbolCsv)
 {
@@ -544,7 +545,9 @@ void BinanceExchange::build_multikline(uint64_t ts, MultiKlineDto& out)
         }
     }
     if (!kline_snap_cache_.empty())
+    {
         account->update_positions(kline_snap_cache_);
+    }
 }
 
 /// @brief Log account balance, positions, and orders via the Logger.

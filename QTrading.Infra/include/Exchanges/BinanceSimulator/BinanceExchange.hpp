@@ -256,6 +256,7 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
         void log_worker_();
         void enqueue_log_task_(LogTask&& task);
 
+    public:
         void collect_funding_events(uint64_t ts,
             std::vector<QTrading::Log::FileLogger::FeatherV2::FundingEventDto>& out);
 
