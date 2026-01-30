@@ -54,6 +54,18 @@ def _load_arrow_files(logs_dir: str) -> Dict[str, ArrowData]:
     return out
 
 
+def _list_run_dirs(logs_root: str) -> list[str]:
+    if not os.path.isdir(logs_root):
+        return []
+    run_dirs = []
+    for name in os.listdir(logs_root):
+        path = os.path.join(logs_root, name)
+        if os.path.isdir(path):
+            run_dirs.append(name)
+    run_dirs.sort(reverse=True)
+    return run_dirs
+
+
 def _load_run_metadata_json(logs_dir: str) -> Optional[dict]:
     path = os.path.join(logs_dir, "run_metadata.json")
     if not os.path.exists(path):
@@ -1063,11 +1075,21 @@ def main():
     st.title("QTrading Report")
 
     default_logs = args.logs or _parse_cli_logs_dir() or os.path.abspath(os.path.join(os.getcwd(), "..", "..", "logs"))
-    logs_dir = st.sidebar.text_input("Logs directory", value=default_logs)
+    logs_root = st.sidebar.text_input("Logs directory", value=default_logs)
 
-    if not os.path.isdir(logs_dir):
+    if not os.path.isdir(logs_root):
         st.warning("Logs directory does not exist.")
         return
+
+    run_dirs = _list_run_dirs(logs_root)
+    if run_dirs:
+        selected_run = st.sidebar.selectbox("Log run", run_dirs, index=0)
+        if st.session_state.get("_last_log_run") != selected_run:
+            st.cache_data.clear()
+            st.session_state["_last_log_run"] = selected_run
+        logs_dir = os.path.join(logs_root, selected_run)
+    else:
+        logs_dir = logs_root
 
     run_meta_json = _load_run_metadata_json(logs_dir)
     if run_meta_json:

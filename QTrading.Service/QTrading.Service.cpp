@@ -24,6 +24,7 @@
 #include <atomic>
 #include <chrono>
 #include <csignal>
+#include <ctime>
 #include <exception>
 #include <filesystem>
 #include <fstream>
@@ -163,15 +164,21 @@ int main()
             }
         }
 
-            // @brief Shared logger writing Feather-V2 IPC files to `logs/`.
+        std::filesystem::path logs_root = "logs";
+        auto now = std::chrono::system_clock::now();
+        auto now_time = std::chrono::system_clock::to_time_t(now);
+        std::tm tm{};
+        localtime_s(&tm, &now_time);
+        std::ostringstream run_dir_name;
+        run_dir_name << std::put_time(&tm, "%Y%m%d_%H%M%S");
+        std::filesystem::path run_dir = logs_root / run_dir_name.str();
+        std::filesystem::create_directories(run_dir);
+
+        // @brief Shared logger writing Feather-V2 IPC files to logs/<timestamp>/.
+        std::shared_ptr<SinkLogger> logger = std::make_shared<SinkLogger>(run_dir.string());
+        logger->AddSink(std::make_unique<FileLogger::FeatherV2Sink>(run_dir.string()));
             {
-                std::error_code ec;
-                std::filesystem::remove_all("logs", ec);
-            }
-        std::shared_ptr<SinkLogger> logger = std::make_shared<SinkLogger>("logs");
-            logger->AddSink(std::make_unique<FileLogger::FeatherV2Sink>("logs"));
-            {
-                std::ofstream meta("logs/run_metadata.json", std::ios::out | std::ios::trunc);
+                std::ofstream meta((run_dir / "run_metadata.json").string(), std::ios::out | std::ios::trunc);
                 if (meta) {
                     meta << "{\n"
                          << "  \"run_id\": " << run_id << ",\n"
@@ -183,7 +190,7 @@ int main()
                 }
             }
             {
-                std::ofstream dataset_file("logs/dataset_paths.json", std::ios::out | std::ios::trunc);
+                std::ofstream dataset_file((run_dir / "dataset_paths.json").string(), std::ios::out | std::ios::trunc);
                 if (dataset_file) {
                     dataset_file << "{\n"
                                  << "  \"dataset\": \"" << JsonEscape(dataset) << "\"\n"
