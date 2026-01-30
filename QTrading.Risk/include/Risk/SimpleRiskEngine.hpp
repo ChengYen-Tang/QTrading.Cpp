@@ -15,6 +15,8 @@ public:
         double notional_usdt = 1000.0;
         double leverage = 2.0;
         double max_leverage = 3.0;
+        /// @brief Skip rebalancing when |net| / gross exposure is below this ratio.
+        double rebalance_threshold_ratio = 0.05;
     };
 
     explicit SimpleRiskEngine(Config cfg);

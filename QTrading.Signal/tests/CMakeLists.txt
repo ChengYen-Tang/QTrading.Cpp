@@ -2,6 +2,7 @@ find_package(GTest CONFIG REQUIRED)
 
 add_executable(QTrading.Signal.Tests
   BasisSignalEngineTests.cpp
+  FundingCarrySignalEngineTests.cpp
 )
 
 target_include_directories(QTrading.Signal.Tests

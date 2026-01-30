@@ -3,6 +3,7 @@ project(QTrading.Intent LANGUAGES CXX)
 add_library(QTrading.Intent.Library
   src/IntentModule.cpp
   src/BasisIntentBuilder.cpp
+  src/FundingCarryIntentBuilder.cpp
 )
 
 target_include_directories(QTrading.Intent.Library PUBLIC

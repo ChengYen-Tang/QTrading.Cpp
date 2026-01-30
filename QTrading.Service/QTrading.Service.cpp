@@ -1,10 +1,10 @@
 ﻿#include "QTrading.Service.h"
 #include "Exchanges/BinanceSimulator/BinanceExchange.hpp"
 #include "Execution/MarketExecutionEngine.hpp"
-#include "Intent/BasisIntentBuilder.hpp"
+#include "Intent/FundingCarryIntentBuilder.hpp"
 #include "Monitoring/SimpleMonitoring.hpp"
 #include "Risk/SimpleRiskEngine.hpp"
-#include "Signal/BasisSignalEngine.hpp"
+#include "Signal/FundingCarrySignalEngine.hpp"
 #include "Universe/FixedUniverseSelector.hpp"
 #include "SinkLogger.hpp"
 #include "FileLogger/FeatherV2Sink.hpp"
@@ -175,9 +175,9 @@ int main()
                 if (meta) {
                     meta << "{\n"
                          << "  \"run_id\": " << run_id << ",\n"
-                         << "  \"strategy_name\": \"" << JsonEscape("BasisArbMVP") << "\",\n"
+                         << "  \"strategy_name\": \"" << JsonEscape("FundingCarryMVP") << "\",\n"
                          << "  \"strategy_version\": \"" << JsonEscape("0.1") << "\",\n"
-                         << "  \"strategy_params\": \"" << JsonEscape("notional=1000;leverage=2") << "\",\n"
+                         << "  \"strategy_params\": \"" << JsonEscape("notional=1000;leverage=2;receive_funding=true") << "\",\n"
                          << "  \"dataset\": \"" << JsonEscape(dataset) << "\"\n"
                          << "}\n";
                 }
@@ -204,9 +204,9 @@ int main()
             {
                 FileLogger::FeatherV2::RunMetadataDto meta{};
                 meta.run_id = run_id;
-                meta.strategy_name = "BasisArbMVP";
+                meta.strategy_name = "FundingCarryMVP";
                 meta.strategy_version = "0.1";
-                meta.strategy_params = "notional=1000;leverage=2";
+                meta.strategy_params = "notional=1000;leverage=2;receive_funding=true";
                 meta.dataset = dataset;
                 logger->Log(LogModuleToString(LogModule::RunMetadata), std::move(meta));
         }
@@ -220,14 +220,11 @@ int main()
 
         // @brief Assemble arbitrage pipeline (currently null implementations).
         QTrading::Universe::FixedUniverseSelector universe_selector({ "BTCUSDT_SPOT", "BTCUSDT_PERP" });
-        QTrading::Signal::BasisSignalEngine signal_engine({
+        QTrading::Signal::FundingCarrySignalEngine signal_engine({
             "BTCUSDT_SPOT",
-            "BTCUSDT_PERP",
-            120,
-            2.0,
-            0.5
+            "BTCUSDT_PERP"
         });
-        QTrading::Intent::BasisIntentBuilder intent_builder({ "BTCUSDT_SPOT", "BTCUSDT_PERP" });
+        QTrading::Intent::FundingCarryIntentBuilder intent_builder({ "BTCUSDT_SPOT", "BTCUSDT_PERP", true });
         QTrading::Risk::SimpleRiskEngine risk_engine({ 1000.0, 2.0, 3.0 });
         QTrading::Execution::MarketExecutionEngine execution_engine(exchange, { 10.0 });
         QTrading::Monitoring::SimpleMonitoring monitoring({ 5 });

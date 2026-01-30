@@ -403,11 +403,14 @@ def _format_ratio(value: Optional[float]) -> str:
 def render_summary(data: Dict[str, ArrowData]):
     account_evt = data.get("AccountEvent.arrow")
     order_evt = data.get("OrderEvent.arrow")
+    funding_evt = data.get("FundingEvent.arrow")
 
     start_balance = None
     end_balance = None
     wallet_delta_sum = None
     fee_sum = None
+    funding_sum = None
+    residual_price_pnl = None
 
     if account_evt and account_evt.df is not None and not account_evt.df.empty:
         df = account_evt.df
@@ -422,11 +425,21 @@ def render_summary(data: Dict[str, ArrowData]):
         if "fee" in df.columns:
             fee_sum = df["fee"].sum()
 
-    cols = st.columns(4)
+    if funding_evt and funding_evt.df is not None and not funding_evt.df.empty:
+        df = funding_evt.df
+        if "funding" in df.columns:
+            funding_sum = df["funding"].sum()
+
+    if wallet_delta_sum is not None and funding_sum is not None and fee_sum is not None:
+        residual_price_pnl = wallet_delta_sum - funding_sum - fee_sum
+
+    cols = st.columns(6)
     cols[0].metric("Start Balance", f"{start_balance:,.2f}" if start_balance is not None else "n/a")
     cols[1].metric("End Balance", f"{end_balance:,.2f}" if end_balance is not None else "n/a")
     cols[2].metric("Wallet Delta Sum", f"{wallet_delta_sum:,.2f}" if wallet_delta_sum is not None else "n/a")
-    cols[3].metric("Total Fees", f"{fee_sum:,.2f}" if fee_sum is not None else "n/a")
+    cols[3].metric("Funding Sum", f"{funding_sum:,.2f}" if funding_sum is not None else "n/a")
+    cols[4].metric("Total Fees", f"{fee_sum:,.2f}" if fee_sum is not None else "n/a")
+    cols[5].metric("Residual Price/Basis", f"{residual_price_pnl:,.2f}" if residual_price_pnl is not None else "n/a")
 
 
 def render_account_event(data: ArrowData):
@@ -448,23 +461,6 @@ def render_account_event(data: ArrowData):
     fig = px.line(df, x="datetime", y=chart_cols, title="Account Balances")
     st.plotly_chart(fig, use_container_width=True)
 
-    st.dataframe(df.tail(50), use_container_width=True)
-
-
-def render_account_log(data: ArrowData):
-    df = data.df
-    if df is None or df.empty:
-        st.info("No AccountLog data.")
-        return
-
-    df = _add_time_index(df, "timestamp")
-    y_cols = [c for c in ["balance", "unreal_pnl", "equity"] if c in df.columns]
-    if not y_cols:
-        st.info("AccountLog has no balance columns.")
-        return
-
-    fig = px.line(df, x="datetime", y=y_cols, title="Account Log")
-    st.plotly_chart(fig, use_container_width=True)
     st.dataframe(df.tail(50), use_container_width=True)
 
 
@@ -527,6 +523,167 @@ def render_market_event(data: ArrowData):
     st.dataframe(df.tail(50), use_container_width=True)
 
 
+def render_funding_event(data: ArrowData, position_data: ArrowData):
+    df = data.df
+    if df is None or df.empty:
+        st.info("No FundingEvent data.")
+        return
+
+    df = _add_time_index(df, "ts")
+    if "datetime" not in df.columns:
+        st.info("FundingEvent has no usable timestamp column.")
+        return
+
+    symbol = None
+    if "symbol" in df.columns:
+        symbols = sorted(df["symbol"].dropna().unique())
+        if symbols:
+            symbol = st.selectbox("Funding Symbol", symbols, key="funding_symbol")
+            df = df[df["symbol"] == symbol]
+
+    if df.empty or "funding" not in df.columns:
+        st.info("FundingEvent has no funding column.")
+        return
+
+    total_funding = df["funding"].sum()
+    avg_funding = df["funding"].mean()
+    event_count = len(df)
+
+    cols = st.columns(3)
+    cols[0].metric("Funding Events", f"{event_count:,}")
+    cols[1].metric("Total Funding", f"{total_funding:,.2f}")
+    cols[2].metric("Average Funding", f"{avg_funding:,.4f}")
+
+    funding_ts = df[["datetime", "funding"]].copy()
+    funding_ts = funding_ts.sort_values("datetime")
+    funding_ts["cum_funding"] = funding_ts["funding"].cumsum()
+
+    fig = px.line(
+        funding_ts,
+        x="datetime",
+        y="cum_funding",
+        title="Cumulative Funding",
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    daily = funding_ts.set_index("datetime")["funding"].resample("1D").sum().dropna()
+    if not daily.empty:
+        daily_df = daily.reset_index().rename(columns={"funding": "daily_funding"})
+        daily_fig = px.bar(daily_df, x="datetime", y="daily_funding", title="Daily Funding")
+        st.plotly_chart(daily_fig, use_container_width=True)
+
+    # Funding vs exposure (signed notional proxy) when mark price and quantity exist.
+    if {"quantity", "has_mark_price", "mark_price", "is_long"}.issubset(df.columns):
+        exp_df = df[df["has_mark_price"]].copy()
+        if not exp_df.empty:
+            signed_qty = exp_df["quantity"].astype(float) * exp_df["is_long"].map({True: 1.0, False: -1.0})
+            exp_df["signed_notional"] = signed_qty * exp_df["mark_price"].astype(float)
+
+            scatter = px.scatter(
+                exp_df,
+                x="signed_notional",
+                y="funding",
+                hover_data=["datetime", "symbol", "rate", "mark_price", "quantity", "is_long"],
+                title="Funding vs Signed Notional (Proxy Exposure)",
+            )
+            st.plotly_chart(scatter, use_container_width=True)
+
+            exp_daily = exp_df.set_index("datetime")[["funding", "signed_notional"]].resample("1D").sum().dropna()
+            if not exp_daily.empty:
+                exp_daily = exp_daily.reset_index()
+                exp_line = px.line(
+                    exp_daily,
+                    x="datetime",
+                    y=["funding", "signed_notional"],
+                    title="Daily Funding and Signed Notional",
+                )
+                st.plotly_chart(exp_line, use_container_width=True)
+
+    # Exposure from PositionEvent (more explainable).
+    pos_df = position_data.df
+    if pos_df is not None and not pos_df.empty and "notional" in pos_df.columns and "is_long" in pos_df.columns:
+        pos_df = _add_time_index(pos_df, "ts")
+        if "datetime" in pos_df.columns:
+            if symbol and "symbol" in pos_df.columns:
+                pos_df = pos_df[pos_df["symbol"] == symbol]
+            pos_df = pos_df.dropna(subset=["datetime"])
+            if not pos_df.empty:
+                pos_df["signed_notional"] = pos_df["notional"].astype(float) * pos_df["is_long"].map({True: 1.0, False: -1.0})
+                exposure_ts = pos_df.set_index("datetime")["signed_notional"].sort_index()
+                exposure_daily = exposure_ts.resample("1D").last().dropna()
+
+                if not exposure_daily.empty:
+                    exp_daily_df = exposure_daily.reset_index().rename(columns={"signed_notional": "daily_exposure"})
+                    exp_fig = px.line(exp_daily_df, x="datetime", y="daily_exposure", title="Daily Exposure (PositionEvent)")
+                    st.plotly_chart(exp_fig, use_container_width=True)
+
+                    funding_daily = funding_ts.set_index("datetime")["funding"].resample("1D").sum().dropna()
+                    merged = exp_daily_df.merge(
+                        funding_daily.reset_index().rename(columns={"funding": "daily_funding"}),
+                        on="datetime",
+                        how="inner",
+                    )
+                    if not merged.empty:
+                        merged["abs_exposure"] = merged["daily_exposure"].abs()
+                        merged["funding_yield"] = merged.apply(
+                            lambda r: (r["daily_funding"] / r["abs_exposure"]) if r["abs_exposure"] > 0 else None,
+                            axis=1,
+                        )
+                        yield_fig = px.line(
+                            merged,
+                            x="datetime",
+                            y="funding_yield",
+                            title="Daily Funding Yield (Funding / |Exposure|)",
+                        )
+                        st.plotly_chart(yield_fig, use_container_width=True)
+
+    # Spot/Perp alignment check (delta-neutral sanity check).
+    if symbol and pos_df is not None and not pos_df.empty and "symbol" in pos_df.columns:
+        spot_symbol = None
+        perp_symbol = None
+        if symbol.endswith("_PERP"):
+            perp_symbol = symbol
+            spot_symbol = symbol.replace("_PERP", "_SPOT")
+        if spot_symbol and perp_symbol:
+            spot_pos = position_data.df
+            spot_pos = _add_time_index(spot_pos, "ts")
+            spot_pos = spot_pos[(spot_pos["symbol"] == spot_symbol) & spot_pos["datetime"].notna()]
+            perp_pos = position_data.df
+            perp_pos = _add_time_index(perp_pos, "ts")
+            perp_pos = perp_pos[(perp_pos["symbol"] == perp_symbol) & perp_pos["datetime"].notna()]
+            if not spot_pos.empty and not perp_pos.empty:
+                spot_pos["signed_notional"] = spot_pos["notional"].astype(float) * spot_pos["is_long"].map({True: 1.0, False: -1.0})
+                perp_pos["signed_notional"] = perp_pos["notional"].astype(float) * perp_pos["is_long"].map({True: 1.0, False: -1.0})
+                spot_daily = spot_pos.set_index("datetime")["signed_notional"].resample("1D").last().dropna()
+                perp_daily = perp_pos.set_index("datetime")["signed_notional"].resample("1D").last().dropna()
+                merged = pd.concat([spot_daily, perp_daily], axis=1, join="inner")
+                merged.columns = ["spot_exposure", "perp_exposure"]
+                if not merged.empty:
+                    merged["net_exposure"] = merged["spot_exposure"] + merged["perp_exposure"]
+                    merged["gross_exposure"] = merged["spot_exposure"].abs() + merged["perp_exposure"].abs()
+                    merged["alignment_ratio"] = merged.apply(
+                        lambda r: (abs(r["net_exposure"]) / r["gross_exposure"]) if r["gross_exposure"] > 0 else None,
+                        axis=1,
+                    )
+
+                    st.subheader("Exposure Alignment (Spot vs Perp)")
+                    cols = st.columns(3)
+                    cols[0].metric("Avg |Net Exposure|", f"{merged['net_exposure'].abs().mean():,.2f}")
+                    cols[1].metric("Avg Gross Exposure", f"{merged['gross_exposure'].mean():,.2f}")
+                    cols[2].metric("Avg Alignment Ratio", f"{merged['alignment_ratio'].mean():.2%}")
+
+                    align_df = merged.reset_index()
+                    align_fig = px.line(
+                        align_df,
+                        x="datetime",
+                        y=["spot_exposure", "perp_exposure", "net_exposure"],
+                        title="Daily Exposure Alignment",
+                    )
+                    st.plotly_chart(align_fig, use_container_width=True)
+
+    st.dataframe(df.tail(100), use_container_width=True)
+
+
 def render_performance(account_evt: ArrowData):
     df = account_evt.df
     if df is None or df.empty:
@@ -569,6 +726,7 @@ def render_trade_stats(account_evt: ArrowData, order_evt: ArrowData):
     else:
         fill_rows = ae.iloc[0:0]
     fill_rows = fill_rows.sort_values("datetime")
+    acc_fills = fill_rows
 
     fee_sum = None
     fills = None
@@ -816,10 +974,11 @@ def render_order_details(order_evt: ArrowData):
     st.dataframe(df[existing].sort_values("datetime").tail(200), use_container_width=True)
 
 
-def render_overview(account_evt: ArrowData, order_evt: ArrowData, market_evt: ArrowData):
+def render_overview(account_evt: ArrowData, order_evt: ArrowData, market_evt: ArrowData, funding_evt: ArrowData):
     ae = account_evt.df
     oe = order_evt.df
     me = market_evt.df
+    fe = funding_evt.df
     if ae is None or ae.empty:
         st.info("No AccountEvent data.")
         return
@@ -837,6 +996,7 @@ def render_overview(account_evt: ArrowData, order_evt: ArrowData, market_evt: Ar
     start_equity = equity_df["equity"].iloc[0]
     end_equity = equity_df["equity"].iloc[-1]
     net_profit = end_equity - start_equity
+    total_return = perf["total_return"]
 
     # Trade metrics from fill snapshots.
     fill_rows = ae[(ae.get("request_id", 0) > 0) & (ae.get("source_order_id", -1) >= 0)] if "request_id" in ae.columns else ae.iloc[0:0]
@@ -844,78 +1004,39 @@ def render_overview(account_evt: ArrowData, order_evt: ArrowData, market_evt: Ar
     losses = fill_rows[fill_rows.get("wallet_delta", 0) < 0] if "wallet_delta" in fill_rows.columns else fill_rows.iloc[0:0]
     total_fills = len(fill_rows)
     win_rate = (len(wins) / total_fills) if total_fills > 0 else None
-    loss_rate = (len(losses) / total_fills) if total_fills > 0 else None
     avg_win = wins["wallet_delta"].mean() if not wins.empty else None
     avg_loss = losses["wallet_delta"].mean() if not losses.empty else None
-    pl_ratio = (avg_win / abs(avg_loss)) if avg_win is not None and avg_loss is not None and avg_loss != 0 else None
-    expectancy = ((win_rate or 0) * (avg_win or 0)) + ((loss_rate or 0) * (avg_loss or 0)) if total_fills > 0 else None
+
+    wallet_delta_sum = ae["wallet_delta"].sum() if "wallet_delta" in ae.columns else None
 
     total_fees = None
     if oe is not None and not oe.empty and "fee" in oe.columns and "event_type" in oe.columns:
         total_fees = oe[oe["event_type"] == 3]["fee"].sum()
 
-    # Benchmark metrics.
-    alpha = beta = info_ratio = tracking_error = treynor = None
-    if me is not None and not me.empty and "symbol" in me.columns:
-        market_evt_df = _add_time_index(me, "ts")
-        symbols = sorted(market_evt_df["symbol"].dropna().unique())
-        if symbols:
-            bench = symbols[0]
-            cache_key_mk = _cache_key_for(market_evt.path)
-            bm_metrics = _cached_benchmark_metrics(equity_df, market_evt_df, cache_key_eq, cache_key_mk, bench)
-            alpha = bm_metrics["alpha"]
-            beta = bm_metrics["beta"]
-            info_ratio = bm_metrics["info_ratio"]
-            tracking_error = bm_metrics["tracking_error"]
-            treynor = bm_metrics["treynor"]
+    funding_sum = None
+    if fe is not None and not fe.empty and "funding" in fe.columns:
+        funding_sum = fe["funding"].sum()
 
-    # Capacity/turnover.
-    turnover = capacity = None
-    lowest_capacity_asset = None
-    if oe is not None and not oe.empty and me is not None and not me.empty:
-        fills = oe[oe.get("event_type", -1) == 3].copy()
-        cache_key_ord = _cache_key_for(order_evt.path)
-        cache_key_mk = _cache_key_for(market_evt.path)
-        cap = _cached_capacity_turnover(
-            fills,
-            equity_df,
-            me,
-            cache_key_ord,
-            cache_key_eq,
-            cache_key_mk,
-            0.01,
-        )
-        turnover = cap.get("turnover")
-        capacity = cap.get("capacity")
-        lowest_capacity_asset = cap.get("lowest_capacity_asset")
+    residual_price_pnl = None
+    if wallet_delta_sum is not None and funding_sum is not None and total_fees is not None:
+        residual_price_pnl = wallet_delta_sum - funding_sum - total_fees
 
     overview = [
         ("Total Orders", f"{total_fills:,}"),
-        ("Average Win", _format_num(avg_win)),
-        ("Average Loss", _format_num(avg_loss)),
         ("Win Rate", _format_pct(win_rate)),
-        ("Loss Rate", _format_pct(loss_rate)),
-        ("Profit-Loss Ratio", _format_ratio(pl_ratio)),
-        ("Expectancy", _format_num(expectancy)),
         ("Start Equity", _format_num(start_equity)),
         ("End Equity", _format_num(end_equity)),
         ("Net Profit", _format_num(net_profit)),
-        ("Compounding Annual Return", _format_pct(perf["cagr"])),
-        ("Drawdown", _format_pct(perf["max_drawdown"])),
-        ("Drawdown Recovery (days)", f"{drawdown_recovery}" if drawdown_recovery is not None else "n/a"),
-        ("Sharpe Ratio", _format_ratio(perf["sharpe"])),
-        ("Sortino Ratio", _format_ratio(perf["sortino"])),
-        ("Annual Standard Deviation", _format_pct(perf["volatility"])),
-        ("Annual Variance", _format_ratio((perf["volatility"] or 0) ** 2) if perf["volatility"] is not None else "n/a"),
-        ("Alpha", _format_pct(alpha)),
-        ("Beta", _format_ratio(beta)),
-        ("Information Ratio", _format_ratio(info_ratio)),
-        ("Tracking Error", _format_ratio(tracking_error)),
-        ("Treynor Ratio", _format_ratio(treynor)),
+        ("Total Return", _format_pct(total_return)),
+        ("CAGR", _format_pct(perf["cagr"])),
+        ("Max Drawdown", _format_pct(perf["max_drawdown"])),
+        ("Sharpe", _format_ratio(perf["sharpe"])),
         ("Total Fees", _format_num(total_fees)),
-        ("Estimated Strategy Capacity", _format_num(capacity)),
-        ("Lowest Capacity Asset", str(lowest_capacity_asset) if lowest_capacity_asset is not None else "n/a"),
-        ("Portfolio Turnover", _format_ratio(turnover)),
+        ("Funding Sum", _format_num(funding_sum)),
+        ("Residual Price/Basis", _format_num(residual_price_pnl)),
+        ("Avg Win (fill delta)", _format_num(avg_win)),
+        ("Avg Loss (fill delta)", _format_num(avg_loss)),
+        ("Drawdown Recovery (days)", f"{drawdown_recovery}" if drawdown_recovery is not None else "n/a"),
     ]
 
     left = overview[::2]
@@ -970,12 +1091,11 @@ def main():
         "Overview",
         "Performance",
         "Trades",
+        "Funding",
         "Rolling",
         "Benchmark",
         "Capacity",
-        "Order Details",
         "AccountEvent",
-        "AccountLog",
         "OrderEvent",
         "PositionEvent",
         "MarketEvent",
@@ -987,6 +1107,7 @@ def main():
             arrow_data.get("AccountEvent.arrow", ArrowData("", "", 0, None)),
             arrow_data.get("OrderEvent.arrow", ArrowData("", "", 0, None)),
             arrow_data.get("MarketEvent.arrow", ArrowData("", "", 0, None)),
+            arrow_data.get("FundingEvent.arrow", ArrowData("", "", 0, None)),
         )
 
     with tabs[1]:
@@ -999,40 +1120,40 @@ def main():
         )
 
     with tabs[3]:
-        render_rolling_stats(arrow_data.get("AccountEvent.arrow", ArrowData("", "", 0, None)))
+        render_funding_event(
+            arrow_data.get("FundingEvent.arrow", ArrowData("", "", 0, None)),
+            arrow_data.get("PositionEvent.arrow", ArrowData("", "", 0, None)),
+        )
 
     with tabs[4]:
+        render_rolling_stats(arrow_data.get("AccountEvent.arrow", ArrowData("", "", 0, None)))
+
+    with tabs[5]:
         render_benchmark_stats(
             arrow_data.get("AccountEvent.arrow", ArrowData("", "", 0, None)),
             arrow_data.get("MarketEvent.arrow", ArrowData("", "", 0, None)),
         )
 
-    with tabs[5]:
+    with tabs[6]:
         render_capacity_turnover(
             arrow_data.get("AccountEvent.arrow", ArrowData("", "", 0, None)),
             arrow_data.get("OrderEvent.arrow", ArrowData("", "", 0, None)),
             arrow_data.get("MarketEvent.arrow", ArrowData("", "", 0, None)),
         )
 
-    with tabs[6]:
-        render_order_details(arrow_data.get("OrderEvent.arrow", ArrowData("", "", 0, None)))
-
     with tabs[7]:
         render_account_event(arrow_data.get("AccountEvent.arrow", ArrowData("", "", 0, None)))
 
     with tabs[8]:
-        render_account_log(arrow_data.get("Account.arrow", ArrowData("", "", 0, None)))
-
-    with tabs[9]:
         render_order_event(arrow_data.get("OrderEvent.arrow", ArrowData("", "", 0, None)))
 
-    with tabs[10]:
+    with tabs[9]:
         render_position_event(arrow_data.get("PositionEvent.arrow", ArrowData("", "", 0, None)))
 
-    with tabs[11]:
+    with tabs[10]:
         render_market_event(arrow_data.get("MarketEvent.arrow", ArrowData("", "", 0, None)))
 
-    with tabs[12]:
+    with tabs[11]:
         rows = []
         for item in arrow_data.values():
             rows.append({
