@@ -6,7 +6,7 @@ namespace QTrading::Dto::Market {
     /// @details Carries a global timestamp (milliseconds since epoch) common to all market messages.
     struct BaseMarketDto {
         /// @brief Timestamp in milliseconds since UNIX epoch.
-        unsigned long long Timestamp;
+        unsigned long long Timestamp{ 0 };
     };
 
 }  // namespace QTrading::Dto::Market

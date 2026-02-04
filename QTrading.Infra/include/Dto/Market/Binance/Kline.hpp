@@ -12,37 +12,37 @@ namespace QTrading::Dto::Market::Binance {
     ///          trade count, and both raw and chrono timestamps.
     struct KlineDto : BaseMarketDto {
         /// @brief Open price of the interval.
-        double OpenPrice;
+        double OpenPrice{ 0.0 };
 
         /// @brief Highest price reached.
-        double HighPrice;
+        double HighPrice{ 0.0 };
 
         /// @brief Lowest price reached.
-        double LowPrice;
+        double LowPrice{ 0.0 };
 
         /// @brief Close price of the interval.
-        double ClosePrice;
+        double ClosePrice{ 0.0 };
 
         /// @brief Traded base-asset volume.
-        double Volume;
+        double Volume{ 0.0 };
 
         /// @brief Close time as milliseconds since epoch.
-        unsigned long long CloseTime;
+        unsigned long long CloseTime{ 0 };
 
         /// @brief Close time as a std::chrono::system_clock::time_point.
-        system_clock::time_point CloseDateTime;
+        system_clock::time_point CloseDateTime{};
 
         /// @brief Traded quote-asset volume.
-        double QuoteVolume;
+        double QuoteVolume{ 0.0 };
 
         /// @brief Number of trades in this interval.
-        int TradeCount;
+        int TradeCount{ 0 };
 
         /// @brief Base-asset volume bought by takers.
-        double TakerBuyBaseVolume;
+        double TakerBuyBaseVolume{ 0.0 };
 
         /// @brief Quote-asset volume paid by takers.
-        double TakerBuyQuoteVolume;
+        double TakerBuyQuoteVolume{ 0.0 };
 
         /// @brief Constructs a fully-populated KlineDto.
         /// @param openTs     Open timestamp (ms since epoch) → sets BaseMarketDto::Timestamp.
