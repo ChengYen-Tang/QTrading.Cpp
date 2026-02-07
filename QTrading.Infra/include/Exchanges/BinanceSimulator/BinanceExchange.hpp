@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <unordered_map>
 #include <vector>
@@ -16,7 +16,7 @@
 #include "Exchanges/IExchange.h"
 #include "Exchanges/BinanceSimulator/DataProvider/MarketData.hpp"
 #include "Exchanges/BinanceSimulator/DataProvider/FundingRateData.hpp"
-#include "Exchanges/BinanceSimulator/Futures/Account.hpp"
+#include "Exchanges/BinanceSimulator/Account/Account.hpp"
 #include "Dto/Market/Binance/MultiKline.hpp"
 #include "Dto/Trading/Side.hpp"
 #include "Logging/StepLogContext.hpp"

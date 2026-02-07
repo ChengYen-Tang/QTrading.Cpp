@@ -1,10 +1,10 @@
-﻿#include <gtest/gtest.h>
+#include <gtest/gtest.h>
 #include <stdexcept>
 #include <string>
 #include <map>
 #include <vector>
 #include <iostream> // for CaptureStdout, CaptureStderr
-#include "Exchanges/BinanceSimulator/Futures/Account.hpp"
+#include "Exchanges/BinanceSimulator/Account/Account.hpp"
 #include "Dto/Trading/Side.hpp"
 
 static std::unordered_map<std::string, QTrading::Dto::Market::Binance::KlineDto> oneKline(
@@ -78,6 +78,35 @@ TEST(AccountTest, AccountInitConfigRejectsInvalidValues) {
         cfg.vip_level = -1;
         EXPECT_THROW((void)Account(cfg), std::runtime_error);
     }
+}
+
+TEST(AccountTest, DomainApisRouteByInstrumentType) {
+    Account::AccountInitConfig cfg;
+    cfg.spot_initial_cash = 1000.0;
+    cfg.perp_initial_wallet = 1000.0;
+    Account account(cfg);
+
+    using QTrading::Dto::Trading::InstrumentType;
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+
+    ASSERT_TRUE(account.spot.place_order("BTCUSDT", 1.0, 100.0, OrderSide::Buy));
+    ASSERT_TRUE(account.perp.place_order("ETHUSDT", 1.0, 100.0, OrderSide::Buy, PositionSide::Both));
+
+    auto kline = oneKline("BTCUSDT", 100.0, 100.0, 100.0, 100.0, 1000.0);
+    QTrading::Dto::Market::Binance::KlineDto eth_kline;
+    eth_kline.OpenPrice = 100.0;
+    eth_kline.HighPrice = 100.0;
+    eth_kline.LowPrice = 100.0;
+    eth_kline.ClosePrice = 100.0;
+    eth_kline.Volume = 1000.0;
+    kline["ETHUSDT"] = eth_kline;
+    account.update_positions(kline);
+
+    EXPECT_EQ(account.get_instrument_spec("BTCUSDT").type, InstrumentType::Spot);
+    EXPECT_EQ(account.get_instrument_spec("ETHUSDT").type, InstrumentType::Perp);
+    EXPECT_LT(account.spot.get_cash_balance(), 1000.0);
+    EXPECT_LT(account.perp.get_wallet_balance(), 1000.0);
 }
 
 /// @brief Verifies setting and getting symbol leverage, and error on invalid.

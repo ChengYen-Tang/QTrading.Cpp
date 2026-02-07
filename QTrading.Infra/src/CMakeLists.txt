@@ -1,7 +1,25 @@
-﻿add_library(QTrading.Infra.Library STATIC
-  Exchanges/BinanceSimulator/Futures/Account.cpp
-  Exchanges/BinanceSimulator/Futures/Account.Opening.cpp
-  Exchanges/BinanceSimulator/Futures/AccountPolicies.cpp
+add_library(QTrading.Infra.Library STATIC
+  Exchanges/BinanceSimulator/Account/Account.cpp
+  Exchanges/BinanceSimulator/Account/Account.IndexCache.cpp
+  Exchanges/BinanceSimulator/Account/Account.Opening.cpp
+  Exchanges/BinanceSimulator/Account/Account.UpdatePipeline.cpp
+  Exchanges/BinanceSimulator/Account/AccountPolicies.cpp
+  Exchanges/BinanceSimulator/Spot/Account.SpotLedger.cpp
+  Exchanges/BinanceSimulator/Spot/Account.SpotPlacement.cpp
+  Exchanges/BinanceSimulator/Spot/Account.SpotCloseCancel.cpp
+  Exchanges/BinanceSimulator/Spot/Account.SpotOrderFlow.cpp
+  Exchanges/BinanceSimulator/Spot/Account.SpotApi.cpp
+  Exchanges/BinanceSimulator/Spot/SpotLedgerEngine.cpp
+  Exchanges/BinanceSimulator/Spot/BinanceExchange.SpotApi.cpp
+  Exchanges/BinanceSimulator/Perp/Account.PerpLedger.cpp
+  Exchanges/BinanceSimulator/Perp/Account.PerpPlacement.cpp
+  Exchanges/BinanceSimulator/Perp/Account.PerpCloseCancel.cpp
+  Exchanges/BinanceSimulator/Perp/Account.PerpClosePlacement.cpp
+  Exchanges/BinanceSimulator/Perp/Account.PerpOrderFlow.cpp
+  Exchanges/BinanceSimulator/Perp/Account.PerpLiquidation.cpp
+  Exchanges/BinanceSimulator/Perp/Account.PerpApi.cpp
+  Exchanges/BinanceSimulator/Perp/PerpLedgerEngine.cpp
+  Exchanges/BinanceSimulator/Perp/BinanceExchange.PerpApi.cpp
   Exchanges/BinanceSimulator/DataProvider/MarketData.cpp
   Exchanges/BinanceSimulator/DataProvider/FundingRateData.cpp
   Exchanges/BinanceSimulator/BinanceExchange.cpp

@@ -1,6 +1,6 @@
-#include "Exchanges/BinanceSimulator/Futures/AccountPolicies.hpp"
+#include "Exchanges/BinanceSimulator/Account/AccountPolicies.hpp"
 
-#include "Exchanges/BinanceSimulator/Futures/Config.hpp"
+#include "Exchanges/BinanceSimulator/Account/Config.hpp"
 
 #include <algorithm>
 #include <cmath>

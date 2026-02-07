@@ -12,6 +12,8 @@
 #include "Dto/Account/BalanceSnapshot.hpp"
 #include "Dto/Trading/Side.hpp"
 #include "Dto/Trading/InstrumentSpec.hpp"
+#include "Exchanges/BinanceSimulator/Spot/SpotLedgerEngine.hpp"
+#include "Exchanges/BinanceSimulator/Perp/PerpLedgerEngine.hpp"
 #include <optional>
 #include <functional>
 
@@ -21,6 +23,73 @@ using namespace QTrading::dto;
 ///        Manages balance, margin, orders, and positions.
 class Account {
 public:
+    struct FundingApplyResult;
+
+    class SpotApi {
+    public:
+        explicit SpotApi(Account& owner);
+
+        QTrading::Dto::Account::BalanceSnapshot get_balance() const;
+        double get_cash_balance() const;
+
+        bool place_order(const std::string& symbol,
+            double quantity,
+            double price,
+            QTrading::Dto::Trading::OrderSide side,
+            bool reduce_only = false);
+
+        bool place_order(const std::string& symbol,
+            double quantity,
+            QTrading::Dto::Trading::OrderSide side,
+            bool reduce_only = false);
+
+        void close_position(const std::string& symbol, double price = 0.0);
+        void cancel_open_orders(const std::string& symbol);
+
+    private:
+        Account* owner_{ nullptr };
+    };
+
+    class PerpApi {
+    public:
+        explicit PerpApi(Account& owner);
+
+        QTrading::Dto::Account::BalanceSnapshot get_balance() const;
+        double get_wallet_balance() const;
+        double get_margin_balance() const;
+        double get_available_balance() const;
+
+        bool place_order(const std::string& symbol,
+            double quantity,
+            double price,
+            QTrading::Dto::Trading::OrderSide side,
+            QTrading::Dto::Trading::PositionSide position_side = QTrading::Dto::Trading::PositionSide::Both,
+            bool reduce_only = false);
+
+        bool place_order(const std::string& symbol,
+            double quantity,
+            QTrading::Dto::Trading::OrderSide side,
+            QTrading::Dto::Trading::PositionSide position_side = QTrading::Dto::Trading::PositionSide::Both,
+            bool reduce_only = false);
+
+        void close_position(const std::string& symbol, double price = 0.0);
+        void close_position(const std::string& symbol,
+            QTrading::Dto::Trading::PositionSide position_side,
+            double price = 0.0);
+        void cancel_open_orders(const std::string& symbol);
+        void set_symbol_leverage(const std::string& symbol, double new_leverage);
+        double get_symbol_leverage(const std::string& symbol) const;
+
+        std::vector<FundingApplyResult> apply_funding(
+            const std::string& symbol,
+            uint64_t funding_time,
+            double rate,
+            double mark_price);
+
+    private:
+        Account* owner_{ nullptr };
+    };
+
     struct AccountInitConfig {
         double spot_initial_cash{ 0.0 };
         double perp_initial_wallet{ 1'000'000.0 };
@@ -65,6 +134,9 @@ public:
     explicit Account(const AccountInitConfig& init_config);
     Account(const AccountInitConfig& init_config, Policies policies);
 
+    SpotApi spot;
+    PerpApi perp;
+
     QTrading::Dto::Account::BalanceSnapshot get_balance() const;
     QTrading::Dto::Account::BalanceSnapshot get_perp_balance() const;
     QTrading::Dto::Account::BalanceSnapshot get_spot_balance() const;
@@ -83,12 +155,17 @@ public:
     void set_position_mode(bool hedgeMode);
     bool is_hedge_mode() const;
 
+    // Legacy top-level APIs kept for compatibility.
+    // New call sites should prefer `account.perp.set_symbol_leverage(...)`
+    // and `account.perp.get_symbol_leverage(...)`.
     void set_symbol_leverage(const std::string& symbol, double newLeverage);
     double get_symbol_leverage(const std::string& symbol) const;
     void set_instrument_type(const std::string& symbol, QTrading::Dto::Trading::InstrumentType type);
     void set_instrument_spec(const std::string& symbol, const QTrading::Dto::Trading::InstrumentSpec& spec);
     QTrading::Dto::Trading::InstrumentSpec get_instrument_spec(const std::string& symbol) const;
 
+    // Legacy top-level order APIs kept for compatibility.
+    // New call sites should prefer `account.spot.*` / `account.perp.*`.
     bool place_order(const std::string& symbol,
         double quantity,
         double price,
@@ -119,6 +196,8 @@ public:
     /// @param mark_price Mark price used to compute notional.
     std::vector<FundingApplyResult> apply_funding(const std::string& symbol, uint64_t funding_time, double rate, double mark_price);
 
+    // Legacy top-level close/cancel APIs kept for compatibility.
+    // New call sites should prefer `account.spot.*` / `account.perp.*`.
     void close_position(const std::string& symbol, double price);
     void close_position(const std::string& symbol);
 
@@ -177,10 +256,8 @@ public:
     std::vector<FillEvent> drain_fill_events();
 
 private:
-    double balance_;
-    double wallet_balance_;
-    double used_margin_;
-    double spot_cash_balance_{ 0.0 };
+    SpotLedgerEngine spot_ledger_{};
+    PerpLedgerEngine perp_ledger_{};
 
     int vip_level_;
     bool hedge_mode_;
@@ -264,6 +341,30 @@ private:
     void merge_positions();
 
     bool handleOneWayReverseOrder(const std::string& symbol, double quantity, double price, QTrading::Dto::Trading::OrderSide side);
+    bool place_spot_order(const std::string& symbol,
+        double quantity,
+        double price,
+        QTrading::Dto::Trading::OrderSide side,
+        QTrading::Dto::Trading::PositionSide position_side,
+        bool reduce_only,
+        const QTrading::Dto::Trading::InstrumentSpec& instrument_spec);
+    bool place_perp_order(const std::string& symbol,
+        double quantity,
+        double price,
+        QTrading::Dto::Trading::OrderSide side,
+        QTrading::Dto::Trading::PositionSide position_side,
+        bool reduce_only,
+        const QTrading::Dto::Trading::InstrumentSpec& instrument_spec);
+    bool has_reducible_position_for_order_(const Order& ord) const;
+    void update_unrealized_for_symbol_(const std::string& symbol, double close_price);
+    bool has_open_perp_position_() const;
+    void apply_perp_liquidation_(double taker_fee, bool& open_orders_changed, bool& positions_changed);
+    void process_open_orders_pipeline_(double maker_fee, double taker_fee, bool& dirty, bool& open_orders_changed, bool& positions_changed);
+    void close_spot_position_(const std::string& symbol, double price);
+    void close_perp_position_(const std::string& symbol, double price);
+    void close_perp_position_side_(const std::string& symbol, QTrading::Dto::Trading::PositionSide position_side, double price);
+    bool cancel_spot_open_orders_(const std::string& symbol);
+    bool cancel_perp_open_orders_(const std::string& symbol);
 
     void processClosingOrder(Order& ord, double fill_qty, double fill_price, double fee, std::vector<Order>& leftover);
 
@@ -271,6 +372,15 @@ private:
 
     void processNormalOpeningOrder(Order& ord, double fill_qty, double fill_price, double notional,
         double fee, double feeRate, std::vector<Order>& leftover);
+
+    bool processSpotOpeningOrder(Order& ord, double fill_qty, double fill_price, double notional,
+        double fee, double feeRate, std::vector<Order>& leftover);
+    bool processPerpOpeningOrder(Order& ord, double fill_qty, double fill_price, double notional,
+        double fee, double feeRate, std::vector<Order>& leftover);
+    void applyOpeningFillToPosition(Order& ord, double fill_qty, double fill_price, double notional,
+        double init_margin, double maint_margin, double fee, double lev, double feeRate, bool is_spot_symbol);
+    void applySpotClosingCashflow(double close_qty, double fill_price, double fee, double& freed_margin, double& freed_maint);
+    void applyPerpClosingCashflow(double realized_pnl, double fee, double freed_margin);
 
     void processOpeningOrder(Order& ord, double fill_qty, double fill_price, double notional,
         double fee, double feeRate, std::vector<Order>& leftover);

@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
 
-#include "Exchanges/BinanceSimulator/Futures/Account.hpp"
-#include "Exchanges/BinanceSimulator/Futures/AccountPolicies.hpp"
+#include "Exchanges/BinanceSimulator/Account/Account.hpp"
+#include "Exchanges/BinanceSimulator/Account/AccountPolicies.hpp"
 
 using QTrading::Dto::Market::Binance::KlineDto;
 using QTrading::Dto::Trading::OrderSide;

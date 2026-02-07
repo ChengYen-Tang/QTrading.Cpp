@@ -388,6 +388,23 @@ TEST_F(BinanceExchangeFixture, ExplicitInstrumentTypeSpotWorksWithoutSuffixSymbo
     EXPECT_DOUBLE_EQ(ex.get_symbol_leverage("BTCUSDT"), 1.0);
 }
 
+TEST_F(BinanceExchangeFixture, LegacyLeverageWrapperMatchesPerpFacade)
+{
+    writeCsv("btc_perp.csv", {
+        {      0, 100,100,100,100,1000, 30000,100,1,0,0 },
+        {  60000, 100,100,100,100,1000, 90000,100,1,0,0 }
+        });
+
+    BinanceExchange ex({ {"BTCUSDT",(tmpDir / "btc_perp.csv").string()} }, logger, /*balance*/ 1000.0);
+
+    ex.set_symbol_leverage("BTCUSDT", 15.0);
+    EXPECT_DOUBLE_EQ(ex.get_symbol_leverage("BTCUSDT"), 15.0);
+    EXPECT_DOUBLE_EQ(ex.perp.get_symbol_leverage("BTCUSDT"), 15.0);
+
+    ex.perp.set_symbol_leverage("BTCUSDT", 8.0);
+    EXPECT_DOUBLE_EQ(ex.get_symbol_leverage("BTCUSDT"), 8.0);
+}
+
 TEST_F(BinanceExchangeFixture, StatusSnapshotExposesDualLedgerTotals)
 {
     writeCsv("btc_spot.csv", {
