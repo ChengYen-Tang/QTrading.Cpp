@@ -5,7 +5,6 @@
 #include <cstdlib>
 #include <optional>
 #include <string>
-#include <string_view>
 #include <unordered_map>
 
 namespace {
@@ -43,14 +42,6 @@ double SignedNotionalFromPosition(const QTrading::dto::Position& pos, double pri
 {
     const double sign = pos.is_long ? 1.0 : -1.0;
     return pos.quantity * price * sign;
-}
-
-bool EndsWith(std::string_view value, std::string_view suffix)
-{
-    if (suffix.size() > value.size()) {
-        return false;
-    }
-    return std::equal(suffix.rbegin(), suffix.rend(), value.rbegin());
 }
 
 void OverrideDoubleFromEnv(const char* name, double& value)
@@ -133,6 +124,30 @@ SimpleRiskEngine::SimpleRiskEngine(Config cfg)
     cfg_.basis_level_ema_alpha = ClampAlpha(cfg_.basis_level_ema_alpha);
     OverrideDoubleFromEnv("QTR_FC_GROSS_DEVIATION_TRIGGER_RATIO", cfg_.gross_deviation_trigger_ratio);
     OverrideDoubleFromEnv("QTR_FC_GROSS_DEVIATION_TRIGGER_NOTIONAL_THRESHOLD", cfg_.gross_deviation_trigger_notional_threshold);
+
+    for (const auto& kv : cfg_.instrument_types) {
+        instrument_registry_.Set(kv.first, kv.second);
+    }
+}
+
+bool SimpleRiskEngine::is_spot_instrument_(const std::string& instrument) const
+{
+    return instrument_registry_.Resolve(instrument).type == QTrading::Dto::Trading::InstrumentType::Spot;
+}
+
+bool SimpleRiskEngine::is_perp_instrument_(const std::string& instrument) const
+{
+    return instrument_registry_.Resolve(instrument).type == QTrading::Dto::Trading::InstrumentType::Perp;
+}
+
+double SimpleRiskEngine::leverage_for_instrument_(const std::string& instrument) const
+{
+    const auto& spec = instrument_registry_.Resolve(instrument);
+    if (spec.max_leverage <= 1.0) {
+        return 1.0;
+    }
+    const double target = std::max(1.0, cfg_.leverage);
+    return std::min(target, spec.max_leverage);
 }
 
 RiskTarget SimpleRiskEngine::position(const QTrading::Intent::TradeIntent& intent,
@@ -148,7 +163,7 @@ RiskTarget SimpleRiskEngine::position(const QTrading::Intent::TradeIntent& inten
     if (intent.legs.empty()) {
         for (const auto& pos : account.positions) {
             out.target_positions[pos.symbol] = 0.0;
-            out.leverage[pos.symbol] = cfg_.leverage;
+            out.leverage[pos.symbol] = leverage_for_instrument_(pos.symbol);
         }
         return out;
     }
@@ -170,7 +185,7 @@ RiskTarget SimpleRiskEngine::position(const QTrading::Intent::TradeIntent& inten
         price_by_symbol.reserve(intent.legs.size());
 
         for (const auto& leg : intent.legs) {
-            if (EndsWith(leg.instrument, "_PERP")) {
+            if (is_perp_instrument_(leg.instrument)) {
                 perp_found = true;
                 perp_is_short = (leg.side == QTrading::Intent::TradeSide::Short);
             }
@@ -180,10 +195,10 @@ RiskTarget SimpleRiskEngine::position(const QTrading::Intent::TradeIntent& inten
                 break;
             }
             price_by_symbol[leg.instrument] = *price;
-            if (EndsWith(leg.instrument, "_SPOT")) {
+            if (is_spot_instrument_(leg.instrument)) {
                 spot_price_snapshot = *price;
             }
-            if (EndsWith(leg.instrument, "_PERP")) {
+            if (is_perp_instrument_(leg.instrument)) {
                 perp_price_snapshot = *price;
             }
 
@@ -237,7 +252,7 @@ RiskTarget SimpleRiskEngine::position(const QTrading::Intent::TradeIntent& inten
             if (ratio < cfg_.rebalance_threshold_ratio) {
                 for (const auto& leg : intent.legs) {
                     out.target_positions[leg.instrument] = current_notional[leg.instrument];
-                    out.leverage[leg.instrument] = cfg_.leverage;
+                    out.leverage[leg.instrument] = leverage_for_instrument_(leg.instrument);
                 }
                 return out;
             }
@@ -312,7 +327,7 @@ RiskTarget SimpleRiskEngine::position(const QTrading::Intent::TradeIntent& inten
                     const double price = price_by_symbol[leg.instrument];
                     const double sign = (leg.side == QTrading::Intent::TradeSide::Long) ? 1.0 : -1.0;
                     out.target_positions[leg.instrument] = base_qty * price * sign;
-                    out.leverage[leg.instrument] = cfg_.leverage;
+                    out.leverage[leg.instrument] = leverage_for_instrument_(leg.instrument);
                 }
                 return out;
             }
@@ -324,7 +339,7 @@ RiskTarget SimpleRiskEngine::position(const QTrading::Intent::TradeIntent& inten
             ? leg_notional_usdt
             : -leg_notional_usdt;
         out.target_positions[leg.instrument] = signed_notional;
-        out.leverage[leg.instrument] = cfg_.leverage;
+        out.leverage[leg.instrument] = leverage_for_instrument_(leg.instrument);
     }
 
     return out;

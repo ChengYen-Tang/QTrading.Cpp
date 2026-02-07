@@ -9,6 +9,8 @@ import plotly.express as px
 import pyarrow as pa
 import streamlit as st
 
+ACCOUNT_LEDGER_MAP = {-1: "Unknown", 0: "Perp", 1: "Spot", 2: "Both"}
+
 
 @dataclass
 class ArrowData:
@@ -105,6 +107,13 @@ def _cache_key_for(path: str) -> str:
         return path
 
 
+def _first_existing_col(df: pd.DataFrame, candidates: list[str]) -> Optional[str]:
+    for name in candidates:
+        if name in df.columns:
+            return name
+    return None
+
+
 def _compute_equity_df(account_evt: pd.DataFrame) -> Optional[pd.DataFrame]:
     if account_evt is None or account_evt.empty:
         return None
@@ -116,17 +125,58 @@ def _compute_equity_df(account_evt: pd.DataFrame) -> Optional[pd.DataFrame]:
     df = _add_time_index(df, "ts")
     df = df[df["datetime"].notna()].sort_values("datetime")
 
-    equity_col = None
-    if "margin_balance_after" in df.columns:
-        equity_col = "margin_balance_after"
-    elif "wallet_balance_after" in df.columns:
-        equity_col = "wallet_balance_after"
+    equity_col = _first_existing_col(
+        df,
+        [
+            "total_ledger_value_after",
+            "perp_margin_balance_after",
+            "margin_balance_after",
+            "wallet_balance_after",
+        ],
+    )
     if equity_col is None:
         return None
 
     df["equity"] = df[equity_col]
+    df["equity_source"] = equity_col
     df["is_fill_snapshot"] = (df.get("request_id", 0) > 0)
     return df
+
+
+def _build_ledger_mix_df(account_evt: pd.DataFrame) -> Optional[pd.DataFrame]:
+    if account_evt is None or account_evt.empty:
+        return None
+
+    df = account_evt.copy()
+    if "ts" not in df.columns:
+        return None
+    df = _add_time_index(df, "ts")
+    df = df[df["datetime"].notna()].sort_values("datetime")
+
+    spot_col = _first_existing_col(df, ["spot_ledger_value_after", "spot_wallet_balance_after"])
+    perp_col = _first_existing_col(df, ["perp_margin_balance_after", "margin_balance_after", "wallet_balance_after"])
+    total_col = _first_existing_col(df, ["total_ledger_value_after"])
+    if spot_col is None or perp_col is None:
+        return None
+
+    out = pd.DataFrame({
+        "datetime": df["datetime"],
+        "spot_ledger": pd.to_numeric(df[spot_col], errors="coerce"),
+        "perp_ledger": pd.to_numeric(df[perp_col], errors="coerce"),
+    })
+    if total_col is not None:
+        out["total_ledger"] = pd.to_numeric(df[total_col], errors="coerce")
+    else:
+        out["total_ledger"] = out["spot_ledger"] + out["perp_ledger"]
+
+    out = out.dropna(subset=["datetime", "spot_ledger", "perp_ledger", "total_ledger"])
+    out = out[out["total_ledger"] > 0.0]
+    if out.empty:
+        return None
+
+    out["spot_ratio"] = out["spot_ledger"] / out["total_ledger"]
+    out["perp_ratio"] = out["perp_ledger"] / out["total_ledger"]
+    return out
 
 
 def _compute_drawdown(equity: pd.Series) -> pd.Series:
@@ -417,8 +467,10 @@ def render_summary(data: Dict[str, ArrowData]):
     order_evt = data.get("OrderEvent.arrow")
     funding_evt = data.get("FundingEvent.arrow")
 
-    start_balance = None
-    end_balance = None
+    start_equity = None
+    end_equity = None
+    end_spot_share = None
+    end_perp_share = None
     wallet_delta_sum = None
     fee_sum = None
     funding_sum = None
@@ -426,9 +478,22 @@ def render_summary(data: Dict[str, ArrowData]):
 
     if account_evt and account_evt.df is not None and not account_evt.df.empty:
         df = account_evt.df
-        if "wallet_balance_after" in df.columns:
-            start_balance = df["wallet_balance_after"].iloc[0]
-            end_balance = df["wallet_balance_after"].iloc[-1]
+        equity_df = _compute_equity_df(df)
+        if equity_df is not None and not equity_df.empty:
+            start_equity = equity_df["equity"].iloc[0]
+            end_equity = equity_df["equity"].iloc[-1]
+
+        spot_col = _first_existing_col(df, ["spot_ledger_value_after", "spot_wallet_balance_after"])
+        perp_col = _first_existing_col(df, ["perp_margin_balance_after", "margin_balance_after", "wallet_balance_after"])
+        total_col = _first_existing_col(df, ["total_ledger_value_after"])
+        if spot_col and perp_col:
+            spot_end = float(df[spot_col].iloc[-1])
+            perp_end = float(df[perp_col].iloc[-1])
+            total_end = float(df[total_col].iloc[-1]) if total_col else (spot_end + perp_end)
+            if total_end > 0:
+                end_spot_share = spot_end / total_end
+                end_perp_share = perp_end / total_end
+
         if "wallet_delta" in df.columns:
             wallet_delta_sum = df["wallet_delta"].sum()
 
@@ -445,13 +510,15 @@ def render_summary(data: Dict[str, ArrowData]):
     if wallet_delta_sum is not None and funding_sum is not None and fee_sum is not None:
         residual_price_pnl = wallet_delta_sum - funding_sum - fee_sum
 
-    cols = st.columns(6)
-    cols[0].metric("Start Balance", f"{start_balance:,.2f}" if start_balance is not None else "n/a")
-    cols[1].metric("End Balance", f"{end_balance:,.2f}" if end_balance is not None else "n/a")
-    cols[2].metric("Wallet Delta Sum", f"{wallet_delta_sum:,.2f}" if wallet_delta_sum is not None else "n/a")
-    cols[3].metric("Funding Sum", f"{funding_sum:,.2f}" if funding_sum is not None else "n/a")
-    cols[4].metric("Total Fees", f"{fee_sum:,.2f}" if fee_sum is not None else "n/a")
-    cols[5].metric("Residual Price/Basis", f"{residual_price_pnl:,.2f}" if residual_price_pnl is not None else "n/a")
+    cols = st.columns(8)
+    cols[0].metric("Start Equity", f"{start_equity:,.2f}" if start_equity is not None else "n/a")
+    cols[1].metric("End Equity", f"{end_equity:,.2f}" if end_equity is not None else "n/a")
+    cols[2].metric("End Spot Share", f"{end_spot_share:.2%}" if end_spot_share is not None else "n/a")
+    cols[3].metric("End Perp Share", f"{end_perp_share:.2%}" if end_perp_share is not None else "n/a")
+    cols[4].metric("Wallet Delta Sum", f"{wallet_delta_sum:,.2f}" if wallet_delta_sum is not None else "n/a")
+    cols[5].metric("Funding Sum", f"{funding_sum:,.2f}" if funding_sum is not None else "n/a")
+    cols[6].metric("Total Fees", f"{fee_sum:,.2f}" if fee_sum is not None else "n/a")
+    cols[7].metric("Residual Price/Basis", f"{residual_price_pnl:,.2f}" if residual_price_pnl is not None else "n/a")
 
 
 def render_account_event(data: ArrowData):
@@ -462,16 +529,49 @@ def render_account_event(data: ArrowData):
 
     df = _add_time_index(df, "ts")
 
+    if "ledger" in df.columns:
+        df["ledger_label"] = df["ledger"].map(ACCOUNT_LEDGER_MAP).fillna(df["ledger"].astype(str))
+
     chart_cols = []
-    for col in ["wallet_balance_after", "margin_balance_after", "available_balance_after"]:
-        if col in df.columns:
+    for col in [
+        "total_ledger_value_after",
+        "spot_ledger_value_after",
+        "perp_margin_balance_after",
+        "spot_wallet_balance_after",
+        "perp_wallet_balance_after",
+        "wallet_balance_after",
+        "margin_balance_after",
+        "available_balance_after",
+    ]:
+        if col in df.columns and col not in chart_cols:
             chart_cols.append(col)
     if not chart_cols:
         st.info("AccountEvent has no balance columns.")
         return
 
-    fig = px.line(df, x="datetime", y=chart_cols, title="Account Balances")
+    fig = px.line(df, x="datetime", y=chart_cols, title="Account Balances (Dual Ledger)")
     st.plotly_chart(fig, use_container_width=True)
+
+    spot_col = _first_existing_col(df, ["spot_ledger_value_after", "spot_wallet_balance_after"])
+    perp_col = _first_existing_col(df, ["perp_margin_balance_after", "margin_balance_after", "wallet_balance_after"])
+    total_col = _first_existing_col(df, ["total_ledger_value_after"])
+    if spot_col and perp_col:
+        mix = df[["datetime", spot_col, perp_col]].copy()
+        if total_col:
+            mix["total_ledger"] = df[total_col]
+        else:
+            mix["total_ledger"] = mix[spot_col] + mix[perp_col]
+        mix = mix[mix["total_ledger"] > 0]
+        if not mix.empty:
+            mix["spot_ratio"] = mix[spot_col] / mix["total_ledger"]
+            mix["perp_ratio"] = mix[perp_col] / mix["total_ledger"]
+            fig_ratio = px.line(
+                mix,
+                x="datetime",
+                y=["spot_ratio", "perp_ratio"],
+                title="Ledger Value Ratio (Spot vs Perp)",
+            )
+            st.plotly_chart(fig_ratio, use_container_width=True)
 
     st.dataframe(df.tail(50), use_container_width=True)
 
@@ -707,6 +807,9 @@ def render_performance(account_evt: ArrowData):
         st.info("AccountEvent has no usable equity data.")
         return
 
+    if "equity_source" in equity_df.columns and not equity_df.empty:
+        st.caption(f"Equity source: `{equity_df['equity_source'].iloc[0]}`")
+
     fig = px.line(equity_df, x="datetime", y="equity", title="Equity Curve")
     st.plotly_chart(fig, use_container_width=True)
 
@@ -769,6 +872,32 @@ def render_trade_stats(account_evt: ArrowData, order_evt: ArrowData):
         st.plotly_chart(fig, use_container_width=True)
 
         st.caption("Win rate uses wallet_delta per fill snapshot (fees included).")
+
+    if not fill_rows.empty and "wallet_delta" in fill_rows.columns:
+        breakdown = fill_rows.copy()
+        if "ledger" in breakdown.columns:
+            breakdown["ledger_label"] = breakdown["ledger"].map(ACCOUNT_LEDGER_MAP).fillna(
+                breakdown["ledger"].astype(str)
+            )
+        else:
+            breakdown["ledger_label"] = "Unknown"
+
+        by_ledger = (
+            breakdown.groupby("ledger_label", dropna=False)["wallet_delta"]
+            .agg(["count", "sum", "mean"])
+            .reset_index()
+            .rename(columns={"count": "fills", "sum": "wallet_delta_sum", "mean": "wallet_delta_mean"})
+        )
+        by_ledger = by_ledger.sort_values("wallet_delta_sum", ascending=False)
+        st.subheader("Ledger PnL Breakdown")
+        st.dataframe(by_ledger, use_container_width=True)
+        fig_ledger = px.bar(
+            by_ledger,
+            x="ledger_label",
+            y="wallet_delta_sum",
+            title="Wallet Delta by Ledger",
+        )
+        st.plotly_chart(fig_ledger, use_container_width=True)
 
     st.dataframe(fill_rows.tail(50), use_container_width=True)
 
@@ -1064,6 +1193,36 @@ def render_overview(account_evt: ArrowData, order_evt: ArrowData, market_evt: Ar
             "Value ": r[1],
         })
     st.dataframe(pd.DataFrame(table_rows), use_container_width=True)
+
+    ledger_mix = _build_ledger_mix_df(ae)
+    if ledger_mix is None or ledger_mix.empty:
+        return
+
+    st.subheader("Dual-Ledger KPIs")
+    end_row = ledger_mix.iloc[-1]
+    cols = st.columns(6)
+    cols[0].metric("End Spot Ledger", _format_num(float(end_row["spot_ledger"])))
+    cols[1].metric("End Perp Ledger", _format_num(float(end_row["perp_ledger"])))
+    cols[2].metric("End Total Ledger", _format_num(float(end_row["total_ledger"])))
+    cols[3].metric("End Spot Ratio", _format_pct(float(end_row["spot_ratio"])))
+    cols[4].metric("Avg Spot Ratio", _format_pct(float(ledger_mix["spot_ratio"].mean())))
+    cols[5].metric("Spot Ratio Vol", _format_pct(float(ledger_mix["spot_ratio"].std())))
+
+    fig_ledger = px.line(
+        ledger_mix,
+        x="datetime",
+        y=["spot_ledger", "perp_ledger", "total_ledger"],
+        title="Ledger Value Split",
+    )
+    st.plotly_chart(fig_ledger, use_container_width=True)
+
+    fig_ratio = px.line(
+        ledger_mix,
+        x="datetime",
+        y=["spot_ratio", "perp_ratio"],
+        title="Ledger Ratio (Spot vs Perp)",
+    )
+    st.plotly_chart(fig_ratio, use_container_width=True)
 
 
 def main():

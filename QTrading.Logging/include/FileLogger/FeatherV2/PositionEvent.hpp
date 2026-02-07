@@ -27,6 +27,7 @@ namespace QTrading::Log::FileLogger::FeatherV2 {
 
         int64_t position_id{};
         std::string symbol;
+        int32_t instrument_type{ -1 }; // Dto::Trading::InstrumentType, -1 means unknown.
         bool is_long{};
 
         int32_t event_type{};
@@ -55,6 +56,7 @@ namespace QTrading::Log::FileLogger::FeatherV2 {
                 arrow::field("source_order_id", arrow::int64()),
                 arrow::field("position_id", arrow::int64()),
                 arrow::field("symbol", arrow::utf8()),
+                arrow::field("instrument_type", arrow::int32()),
                 arrow::field("is_long", arrow::boolean()),
                 arrow::field("event_type", arrow::int32()),
                 arrow::field("qty", arrow::float64()),
@@ -81,18 +83,19 @@ namespace QTrading::Log::FileLogger::FeatherV2 {
             detail::AppendOrThrow(builder.GetFieldAs<arrow::Int64Builder>(5), e.source_order_id);
             detail::AppendOrThrow(builder.GetFieldAs<arrow::Int64Builder>(6), e.position_id);
             detail::AppendOrThrow(builder.GetFieldAs<arrow::StringBuilder>(7), e.symbol);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::BooleanBuilder>(8), e.is_long);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::Int32Builder>(9), e.event_type);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(10), e.qty);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(11), e.entry_price);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(12), e.notional);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(13), e.unrealized_pnl);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(14), e.initial_margin);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(15), e.maintenance_margin);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(16), e.leverage);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(17), e.fee);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(18), e.fee_rate);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::UInt64Builder>(19), e.ts_local);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::Int32Builder>(8), e.instrument_type);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::BooleanBuilder>(9), e.is_long);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::Int32Builder>(10), e.event_type);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(11), e.qty);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(12), e.entry_price);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(13), e.notional);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(14), e.unrealized_pnl);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(15), e.initial_margin);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(16), e.maintenance_margin);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(17), e.leverage);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(18), e.fee);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(19), e.fee_rate);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::UInt64Builder>(20), e.ts_local);
         }
     } // namespace PositionEvent
 

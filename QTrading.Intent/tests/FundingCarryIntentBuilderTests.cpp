@@ -42,3 +42,15 @@ TEST(FundingCarryIntentBuilderTests, EmptyLegsWhenInactive)
     auto intent = builder.build(signal, nullptr);
     EXPECT_TRUE(intent.legs.empty());
 }
+
+TEST(FundingCarryIntentBuilderTests, UsesConfiguredCustomSymbols)
+{
+    QTrading::Intent::FundingCarryIntentBuilder builder({ "BTCUSDT_CASH", "BTCUSDT_SWAP", true });
+    QTrading::Signal::SignalDecision signal;
+    signal.status = QTrading::Signal::SignalStatus::Active;
+
+    auto intent = builder.build(signal, nullptr);
+    ASSERT_EQ(intent.legs.size(), 2u);
+    EXPECT_EQ(intent.legs[0].instrument, "BTCUSDT_CASH");
+    EXPECT_EQ(intent.legs[1].instrument, "BTCUSDT_SWAP");
+}

@@ -1,4 +1,4 @@
-﻿#include "Exchanges/BinanceSimulator/BinanceExchange.hpp"
+#include "Exchanges/BinanceSimulator/BinanceExchange.hpp"
 #include "Enum/LogModule.hpp"
 #include "Dto/AccountLog.hpp"
 #include "Diagnostics/Trace.hpp"
@@ -89,6 +89,33 @@ uint64_t now_ms()
         std::chrono::system_clock::now().time_since_epoch()).count());
 }
 
+double spot_inventory_value_from_positions(const std::vector<dto::Position>& positions)
+{
+    double value = 0.0;
+    for (const auto& p : positions) {
+        if (p.instrument_type != QTrading::Dto::Trading::InstrumentType::Spot) {
+            continue;
+        }
+        if (p.quantity <= 0.0) {
+            continue;
+        }
+        value += (p.entry_price * p.quantity + p.unrealized_pnl);
+    }
+    return value;
+}
+
+int32_t ledger_from_instrument_type(QTrading::Dto::Trading::InstrumentType type)
+{
+    using Ledger = QTrading::Log::FileLogger::FeatherV2::AccountLedger;
+    if (type == QTrading::Dto::Trading::InstrumentType::Spot) {
+        return static_cast<int32_t>(Ledger::Spot);
+    }
+    if (type == QTrading::Dto::Trading::InstrumentType::Perp) {
+        return static_cast<int32_t>(Ledger::Perp);
+    }
+    return static_cast<int32_t>(Ledger::Unknown);
+}
+
 
 std::vector<BinanceExchange::SymbolDataset> to_datasets(
     const std::vector<std::pair<std::string, std::string>>& symbolCsv)
@@ -96,7 +123,13 @@ std::vector<BinanceExchange::SymbolDataset> to_datasets(
     std::vector<BinanceExchange::SymbolDataset> out;
     out.reserve(symbolCsv.size());
     for (const auto& [sym, csv] : symbolCsv) {
-        out.push_back(BinanceExchange::SymbolDataset{ sym, csv, std::nullopt });
+        // Legacy pair-based constructor is futures/perp-only by design.
+        out.push_back(BinanceExchange::SymbolDataset{
+            sym,
+            csv,
+            std::nullopt,
+            QTrading::Dto::Trading::InstrumentType::Perp
+        });
     }
     return out;
 }
@@ -113,10 +146,24 @@ BinanceExchange::BinanceExchange(
     : BinanceExchange(to_datasets(symbolCsv), logger, std::make_shared<Account>(init_balance, vip_level), run_id) { }
 
 BinanceExchange::BinanceExchange(
+    const std::vector<std::pair<std::string, std::string>>& symbolCsv,
+    std::shared_ptr<QTrading::Log::Logger> logger,
+    const Account::AccountInitConfig& account_init,
+    uint64_t run_id)
+    : BinanceExchange(to_datasets(symbolCsv), logger, std::make_shared<Account>(account_init), run_id) { }
+
+BinanceExchange::BinanceExchange(
     const std::vector<SymbolDataset>& datasets,
     std::shared_ptr<QTrading::Log::Logger> logger,
     double init_balance, int vip_level, uint64_t run_id)
     : BinanceExchange(datasets, logger, std::make_shared<Account>(init_balance, vip_level), run_id) { }
+
+BinanceExchange::BinanceExchange(
+    const std::vector<SymbolDataset>& datasets,
+    std::shared_ptr<QTrading::Log::Logger> logger,
+    const Account::AccountInitConfig& account_init,
+    uint64_t run_id)
+    : BinanceExchange(datasets, logger, std::make_shared<Account>(account_init), run_id) { }
 
 /// @brief Primary constructor with an external Account instance.
 /// @param symbolCsv  Vector of (symbol, csv_file) pairs to drive market data.
@@ -125,18 +172,22 @@ BinanceExchange::BinanceExchange(
 BinanceExchange::BinanceExchange(
     const std::vector<std::pair<std::string, std::string>>& symbolCsv,
     std::shared_ptr<QTrading::Log::Logger> logger,
-    std::shared_ptr<Account> account,
+    std::shared_ptr<Account> account_engine,
     uint64_t run_id)
-    : BinanceExchange(to_datasets(symbolCsv), logger, account, run_id)
+    : BinanceExchange(to_datasets(symbolCsv), logger, account_engine, run_id)
 {
 }
 
 BinanceExchange::BinanceExchange(
     const std::vector<SymbolDataset>& datasets,
     std::shared_ptr<QTrading::Log::Logger> logger,
-    std::shared_ptr<Account> account,
+    std::shared_ptr<Account> account_engine,
     uint64_t run_id)
-    : logger(logger), account(account)
+    : spot(*this),
+    perp(*this),
+    account(*this),
+    logger(logger),
+    account_engine_(account_engine)
 {
     if (logger) {
         account_module_id_ = logger->GetModuleId(LogModuleToString(LogModule::Account));
@@ -178,6 +229,9 @@ BinanceExchange::BinanceExchange(
 
     for (const auto& ds : datasets) {
         symbols_.push_back(ds.symbol);
+        if (account_engine_ && ds.instrument_type.has_value()) {
+            account_engine_->set_instrument_type(ds.symbol, *ds.instrument_type);
+        }
         jobs.emplace_back(std::async(std::launch::async, [sym = ds.symbol, csv = ds.kline_csv]() {
             return MarketData(sym, csv);
             }));
@@ -226,6 +280,130 @@ BinanceExchange::BinanceExchange(
 BinanceExchange::~BinanceExchange()
 {
     stop_log_thread_();
+}
+
+bool BinanceExchange::SpotApi::place_order(const std::string& symbol,
+    double quantity,
+    double price,
+    QTrading::Dto::Trading::OrderSide side,
+    bool reduce_only)
+{
+    std::lock_guard<std::mutex> lk(owner_.account_mtx_);
+    owner_.account_engine_->set_instrument_type(symbol, QTrading::Dto::Trading::InstrumentType::Spot);
+    return owner_.account_engine_->place_order(
+        symbol, quantity, price, side, QTrading::Dto::Trading::PositionSide::Both, reduce_only);
+}
+
+bool BinanceExchange::SpotApi::place_order(const std::string& symbol,
+    double quantity,
+    QTrading::Dto::Trading::OrderSide side,
+    bool reduce_only)
+{
+    std::lock_guard<std::mutex> lk(owner_.account_mtx_);
+    owner_.account_engine_->set_instrument_type(symbol, QTrading::Dto::Trading::InstrumentType::Spot);
+    return owner_.account_engine_->place_order(
+        symbol, quantity, side, QTrading::Dto::Trading::PositionSide::Both, reduce_only);
+}
+
+void BinanceExchange::SpotApi::close_position(const std::string& symbol, double price)
+{
+    std::lock_guard<std::mutex> lk(owner_.account_mtx_);
+    owner_.account_engine_->set_instrument_type(symbol, QTrading::Dto::Trading::InstrumentType::Spot);
+    owner_.account_engine_->close_position(symbol, QTrading::Dto::Trading::PositionSide::Both, price);
+}
+
+void BinanceExchange::SpotApi::cancel_open_orders(const std::string& symbol)
+{
+    std::lock_guard<std::mutex> lk(owner_.account_mtx_);
+    owner_.account_engine_->cancel_open_orders(symbol);
+}
+
+bool BinanceExchange::PerpApi::place_order(const std::string& symbol,
+    double quantity,
+    double price,
+    QTrading::Dto::Trading::OrderSide side,
+    QTrading::Dto::Trading::PositionSide position_side,
+    bool reduce_only)
+{
+    std::lock_guard<std::mutex> lk(owner_.account_mtx_);
+    owner_.account_engine_->set_instrument_type(symbol, QTrading::Dto::Trading::InstrumentType::Perp);
+    return owner_.account_engine_->place_order(symbol, quantity, price, side, position_side, reduce_only);
+}
+
+bool BinanceExchange::PerpApi::place_order(const std::string& symbol,
+    double quantity,
+    QTrading::Dto::Trading::OrderSide side,
+    QTrading::Dto::Trading::PositionSide position_side,
+    bool reduce_only)
+{
+    std::lock_guard<std::mutex> lk(owner_.account_mtx_);
+    owner_.account_engine_->set_instrument_type(symbol, QTrading::Dto::Trading::InstrumentType::Perp);
+    return owner_.account_engine_->place_order(symbol, quantity, side, position_side, reduce_only);
+}
+
+void BinanceExchange::PerpApi::close_position(const std::string& symbol, double price)
+{
+    std::lock_guard<std::mutex> lk(owner_.account_mtx_);
+    owner_.account_engine_->set_instrument_type(symbol, QTrading::Dto::Trading::InstrumentType::Perp);
+    owner_.account_engine_->close_position(symbol, price);
+}
+
+void BinanceExchange::PerpApi::close_position(const std::string& symbol,
+    QTrading::Dto::Trading::PositionSide position_side,
+    double price)
+{
+    std::lock_guard<std::mutex> lk(owner_.account_mtx_);
+    owner_.account_engine_->set_instrument_type(symbol, QTrading::Dto::Trading::InstrumentType::Perp);
+    owner_.account_engine_->close_position(symbol, position_side, price);
+}
+
+void BinanceExchange::PerpApi::cancel_open_orders(const std::string& symbol)
+{
+    std::lock_guard<std::mutex> lk(owner_.account_mtx_);
+    owner_.account_engine_->cancel_open_orders(symbol);
+}
+
+void BinanceExchange::PerpApi::set_symbol_leverage(const std::string& symbol, double new_leverage)
+{
+    std::lock_guard<std::mutex> lk(owner_.account_mtx_);
+    owner_.account_engine_->set_instrument_type(symbol, QTrading::Dto::Trading::InstrumentType::Perp);
+    owner_.account_engine_->set_symbol_leverage(symbol, new_leverage);
+}
+
+double BinanceExchange::PerpApi::get_symbol_leverage(const std::string& symbol) const
+{
+    std::lock_guard<std::mutex> lk(owner_.account_mtx_);
+    return owner_.account_engine_->get_symbol_leverage(symbol);
+}
+
+QTrading::Dto::Account::BalanceSnapshot BinanceExchange::AccountApi::get_spot_balance() const
+{
+    std::lock_guard<std::mutex> lk(owner_.account_mtx_);
+    return owner_.account_engine_->get_spot_balance();
+}
+
+QTrading::Dto::Account::BalanceSnapshot BinanceExchange::AccountApi::get_perp_balance() const
+{
+    std::lock_guard<std::mutex> lk(owner_.account_mtx_);
+    return owner_.account_engine_->get_perp_balance();
+}
+
+double BinanceExchange::AccountApi::get_total_cash_balance() const
+{
+    std::lock_guard<std::mutex> lk(owner_.account_mtx_);
+    return owner_.account_engine_->get_total_cash_balance();
+}
+
+bool BinanceExchange::AccountApi::transfer_spot_to_perp(double amount)
+{
+    std::lock_guard<std::mutex> lk(owner_.account_mtx_);
+    return owner_.account_engine_->transfer_spot_to_perp(amount);
+}
+
+bool BinanceExchange::AccountApi::transfer_perp_to_spot(double amount)
+{
+    std::lock_guard<std::mutex> lk(owner_.account_mtx_);
+    return owner_.account_engine_->transfer_perp_to_spot(amount);
 }
 
 void BinanceExchange::start_log_thread_()
@@ -278,53 +456,24 @@ void BinanceExchange::log_worker_()
             log_queue_.pop_front();
         }
 
-        log_status_snapshot(task.balance, task.positions, task.orders, task.cur_ver);
+        log_status_snapshot(
+            task.perp_balance,
+            task.spot_balance,
+            task.total_cash_balance,
+            task.spot_inventory_value,
+            task.positions,
+            task.orders,
+            task.cur_ver);
         if (enable_event_logging_) {
             log_events(task.ctx, *task.market, task.positions, task.orders, task.funding_events,
-                task.balance, std::move(task.fill_events), task.cur_ver);
+                task.perp_balance,
+                task.spot_balance,
+                task.total_cash_balance,
+                task.spot_inventory_value,
+                std::move(task.fill_events),
+                task.cur_ver);
         }
     }
-}
-
-bool BinanceExchange::place_order(const std::string& symbol,
-    double quantity,
-    double price,
-    QTrading::Dto::Trading::OrderSide side,
-    QTrading::Dto::Trading::PositionSide position_side,
-    bool reduce_only)
-{
-    std::lock_guard<std::mutex> lk(account_mtx_);
-    return account->place_order(symbol, quantity, price, side, position_side, reduce_only);
-}
-
-bool BinanceExchange::place_order(const std::string& symbol,
-    double quantity,
-    QTrading::Dto::Trading::OrderSide side,
-    QTrading::Dto::Trading::PositionSide position_side,
-    bool reduce_only)
-{
-    std::lock_guard<std::mutex> lk(account_mtx_);
-    return account->place_order(symbol, quantity, side, position_side, reduce_only);
-}
-
-void BinanceExchange::close_position(const std::string& symbol, double price)
-{
-    std::lock_guard<std::mutex> lk(account_mtx_);
-    account->close_position(symbol, price);
-}
-
-void BinanceExchange::close_position(const std::string& symbol)
-{
-    std::lock_guard<std::mutex> lk(account_mtx_);
-    account->close_position(symbol);
-}
-
-void BinanceExchange::close_position(const std::string& symbol,
-    QTrading::Dto::Trading::PositionSide position_side,
-    double price)
-{
-    std::lock_guard<std::mutex> lk(account_mtx_);
-    account->close_position(symbol, position_side, price);
 }
 
 /// @brief Advance one bar of simulation: emit market data & debounced updates.
@@ -343,7 +492,10 @@ bool BinanceExchange::step()
         return false;
     }
 
-    QTrading::Dto::Account::BalanceSnapshot balance{};
+    QTrading::Dto::Account::BalanceSnapshot perp_balance{};
+    QTrading::Dto::Account::BalanceSnapshot spot_balance{};
+    double total_cash_balance = 0.0;
+    double spot_inventory_value = 0.0;
     std::vector<Account::FillEvent> fill_events;
     std::vector<dto::Position> curP;
     std::vector<dto::Order> curO;
@@ -353,8 +505,16 @@ bool BinanceExchange::step()
     {
         std::lock_guard<std::mutex> lk(account_mtx_);
 
-        // Terminate simulation (end backtest) once wallet balance is depleted.
-        if (account->get_balance().WalletBalance <= 0.0) {
+        const auto initial_perp_balance = account_engine_->get_perp_balance();
+        const auto initial_spot_balance = account_engine_->get_spot_balance();
+        const bool no_positions = account_engine_->get_all_positions().empty();
+        const bool no_orders = account_engine_->get_all_open_orders().empty();
+
+        // Terminate simulation only when both ledgers are depleted and account is inactive.
+        if (initial_perp_balance.WalletBalance <= 0.0 &&
+            initial_spot_balance.WalletBalance <= 0.0 &&
+            no_positions &&
+            no_orders) {
             QTR_TRACE("ex", "balance depleted -> close channels");
             market_channel->Close();
             position_channel->Close();
@@ -373,11 +533,14 @@ bool BinanceExchange::step()
 
         collect_funding_events(ts, funding_events_scratch_);
 
-        cur_ver = account->get_state_version();
-        curP = account->get_all_positions();
-        curO = account->get_all_open_orders();
-        balance = account->get_balance();
-        fill_events = account->drain_fill_events();
+        cur_ver = account_engine_->get_state_version();
+        curP = account_engine_->get_all_positions();
+        curO = account_engine_->get_all_open_orders();
+        perp_balance = account_engine_->get_perp_balance();
+        spot_balance = account_engine_->get_spot_balance();
+        total_cash_balance = account_engine_->get_total_cash_balance();
+        spot_inventory_value = spot_inventory_value_from_positions(curP);
+        fill_events = account_engine_->drain_fill_events();
     }
 
     log_ctx_.ts_local = now_ms();
@@ -411,7 +574,10 @@ bool BinanceExchange::step()
         task.positions = curP;
         task.orders = curO;
         task.funding_events = funding_events_scratch_;
-        task.balance = balance;
+        task.perp_balance = perp_balance;
+        task.spot_balance = spot_balance;
+        task.total_cash_balance = total_cash_balance;
+        task.spot_inventory_value = spot_inventory_value;
         task.fill_events = std::move(fill_events);
         task.cur_ver = cur_ver;
         enqueue_log_task_(std::move(task));
@@ -434,25 +600,55 @@ bool BinanceExchange::step()
 /// @brief Get a snapshot of all current positions.
 /// @return Const reference to the vector of Position DTOs.
 const std::vector<dto::Position>& BinanceExchange::get_all_positions() const {
-    return account->get_all_positions();
+    return account_engine_->get_all_positions();
 }
 
 /// @brief Get a snapshot of all current open orders.
 /// @return Const reference to the vector of Order DTOs.
 const std::vector<dto::Order>& BinanceExchange::get_all_open_orders() const {
-    return account->get_all_open_orders();
+    return account_engine_->get_all_open_orders();
 }
 
 void BinanceExchange::set_symbol_leverage(const std::string& symbol, double new_leverage)
 {
     std::lock_guard<std::mutex> lk(account_mtx_);
-    account->set_symbol_leverage(symbol, new_leverage);
+    account_engine_->set_symbol_leverage(symbol, new_leverage);
 }
 
 double BinanceExchange::get_symbol_leverage(const std::string& symbol) const
 {
     std::lock_guard<std::mutex> lk(account_mtx_);
-    return account->get_symbol_leverage(symbol);
+    return account_engine_->get_symbol_leverage(symbol);
+}
+
+QTrading::Dto::Account::BalanceSnapshot BinanceExchange::get_spot_balance() const
+{
+    std::lock_guard<std::mutex> lk(account_mtx_);
+    return account_engine_->get_spot_balance();
+}
+
+QTrading::Dto::Account::BalanceSnapshot BinanceExchange::get_perp_balance() const
+{
+    std::lock_guard<std::mutex> lk(account_mtx_);
+    return account_engine_->get_perp_balance();
+}
+
+double BinanceExchange::get_total_cash_balance() const
+{
+    std::lock_guard<std::mutex> lk(account_mtx_);
+    return account_engine_->get_total_cash_balance();
+}
+
+bool BinanceExchange::transfer_spot_to_perp(double amount)
+{
+    std::lock_guard<std::mutex> lk(account_mtx_);
+    return account_engine_->transfer_spot_to_perp(amount);
+}
+
+bool BinanceExchange::transfer_perp_to_spot(double amount)
+{
+    std::lock_guard<std::mutex> lk(account_mtx_);
+    return account_engine_->transfer_perp_to_spot(amount);
 }
 
 /// @brief Close the simulator: drain CSVs and close all channels.
@@ -465,12 +661,6 @@ void BinanceExchange::close()
     }
 
 	IExchange<MultiKlinePtr>::close();
-}
-
-void BinanceExchange::cancel_open_orders(const std::string& symbol)
-{
-    std::lock_guard<std::mutex> lk(account_mtx_);
-    account->cancel_open_orders(symbol);
 }
 
 /// @brief Determine the next global timestamp to emit.
@@ -546,13 +736,16 @@ void BinanceExchange::build_multikline(uint64_t ts, MultiKlineDto& out)
     }
     if (!kline_snap_cache_.empty())
     {
-        account->update_positions(kline_snap_cache_);
+        account_engine_->update_positions(kline_snap_cache_);
     }
 }
 
 /// @brief Log account balance, positions, and orders via the Logger.
 /// @details Uses Arrow Feather-V2 for efficient batch logging.
-void BinanceExchange::log_status_snapshot(const QTrading::Dto::Account::BalanceSnapshot& balance,
+void BinanceExchange::log_status_snapshot(const QTrading::Dto::Account::BalanceSnapshot& perp_balance,
+    const QTrading::Dto::Account::BalanceSnapshot& spot_balance,
+    double total_cash_balance,
+    double spot_inventory_value,
     const std::vector<dto::Position>& positions,
     const std::vector<dto::Order>& orders,
     uint64_t cur_ver)
@@ -566,8 +759,23 @@ void BinanceExchange::log_status_snapshot(const QTrading::Dto::Account::BalanceS
     }
 
     if (account_module_id_ != Logger::kInvalidModuleId) {
+        const double spot_ledger_value = spot_balance.WalletBalance + spot_inventory_value;
+        const double total_ledger_value = perp_balance.Equity + spot_ledger_value;
         logger->Log(account_module_id_, make_log_payload<AccountLog>(
-            AccountLog{ balance.WalletBalance, balance.UnrealizedPnl, balance.MarginBalance }));
+            AccountLog{
+                perp_balance.WalletBalance,
+                perp_balance.UnrealizedPnl,
+                perp_balance.Equity,
+                perp_balance.WalletBalance,
+                perp_balance.AvailableBalance,
+                perp_balance.Equity,
+                spot_balance.WalletBalance,
+                spot_balance.AvailableBalance,
+                spot_inventory_value,
+                spot_ledger_value,
+                total_cash_balance,
+                total_ledger_value
+            }));
     }
     if (position_module_id_ != Logger::kInvalidModuleId) {
         LogBatchPooled(logger.get(), position_module_id_, positions);
@@ -584,7 +792,10 @@ void BinanceExchange::log_events(QTrading::Infra::Logging::StepLogContext ctx,
     const std::vector<dto::Position>& cur_positions,
     const std::vector<dto::Order>& cur_orders,
     const std::vector<FundingEventDto>& funding_events,
-    const QTrading::Dto::Account::BalanceSnapshot& balance,
+    const QTrading::Dto::Account::BalanceSnapshot& perp_balance,
+    const QTrading::Dto::Account::BalanceSnapshot& spot_balance,
+    double total_cash_balance,
+    double spot_inventory_value,
     std::vector<Account::FillEvent>&& fill_events,
     uint64_t cur_ver)
 {
@@ -646,34 +857,67 @@ void BinanceExchange::log_events(QTrading::Infra::Logging::StepLogContext ctx,
 
     if (account_event_module_id_ != Logger::kInvalidModuleId) {
         double last_wallet_for_fill = last_wallet_balance_.value_or(
-            fill_events.empty() ? balance.WalletBalance : fill_events.front().balance_snapshot.WalletBalance);
+            fill_events.empty() ? perp_balance.WalletBalance : fill_events.front().perp_balance_snapshot.WalletBalance);
 
         for (const auto& f : fill_events) {
+            const auto& perp_after = f.perp_balance_snapshot;
+            const auto& spot_after = f.spot_balance_snapshot;
+            const double fill_spot_inventory = spot_inventory_value_from_positions(f.positions_snapshot);
+            const double fill_spot_ledger = spot_after.WalletBalance + fill_spot_inventory;
+            const double fill_total_ledger = perp_after.Equity + fill_spot_ledger;
+
             AccountEventDto e;
             e.request_id = static_cast<uint64_t>(f.order_id);
             e.source_order_id = f.order_id;
+            e.symbol = f.symbol;
+            e.instrument_type = static_cast<int32_t>(f.instrument_type);
+            e.ledger = ledger_from_instrument_type(f.instrument_type);
             e.event_type = static_cast<int32_t>(AccountEventType::BalanceSnapshot);
-            e.wallet_delta = f.balance_snapshot.WalletBalance - last_wallet_for_fill;
-            e.wallet_balance_after = f.balance_snapshot.WalletBalance;
-            e.margin_balance_after = f.balance_snapshot.MarginBalance;
-            e.available_balance_after = f.balance_snapshot.AvailableBalance;
+            e.wallet_delta = perp_after.WalletBalance - last_wallet_for_fill;
+            e.wallet_balance_after = perp_after.WalletBalance;
+            e.margin_balance_after = perp_after.MarginBalance;
+            e.available_balance_after = perp_after.AvailableBalance;
+            e.perp_wallet_balance_after = perp_after.WalletBalance;
+            e.perp_margin_balance_after = perp_after.MarginBalance;
+            e.perp_available_balance_after = perp_after.AvailableBalance;
+            e.spot_wallet_balance_after = spot_after.WalletBalance;
+            e.spot_available_balance_after = spot_after.AvailableBalance;
+            e.spot_inventory_value_after = fill_spot_inventory;
+            e.spot_ledger_value_after = fill_spot_ledger;
+            e.total_cash_balance_after = f.total_cash_balance_snapshot;
+            e.total_ledger_value_after = fill_total_ledger;
             account_event_buffer_.push(std::move(e));
-            last_wallet_for_fill = f.balance_snapshot.WalletBalance;
+            last_wallet_for_fill = perp_after.WalletBalance;
         }
+
+        const double final_spot_ledger = spot_balance.WalletBalance + spot_inventory_value;
+        const double final_total_ledger = perp_balance.Equity + final_spot_ledger;
 
         AccountEventDto e;
         e.request_id = 0;
         e.source_order_id = -1;
+        e.symbol = "";
+        e.instrument_type = -1;
+        e.ledger = static_cast<int32_t>(QTrading::Log::FileLogger::FeatherV2::AccountLedger::Both);
         e.event_type = static_cast<int32_t>(AccountEventType::BalanceSnapshot);
-        e.wallet_delta = balance.WalletBalance - last_wallet_for_fill;
-        e.wallet_balance_after = balance.WalletBalance;
-        e.margin_balance_after = balance.MarginBalance;
-        e.available_balance_after = balance.AvailableBalance;
+        e.wallet_delta = perp_balance.WalletBalance - last_wallet_for_fill;
+        e.wallet_balance_after = perp_balance.WalletBalance;
+        e.margin_balance_after = perp_balance.MarginBalance;
+        e.available_balance_after = perp_balance.AvailableBalance;
+        e.perp_wallet_balance_after = perp_balance.WalletBalance;
+        e.perp_margin_balance_after = perp_balance.MarginBalance;
+        e.perp_available_balance_after = perp_balance.AvailableBalance;
+        e.spot_wallet_balance_after = spot_balance.WalletBalance;
+        e.spot_available_balance_after = spot_balance.AvailableBalance;
+        e.spot_inventory_value_after = spot_inventory_value;
+        e.spot_ledger_value_after = final_spot_ledger;
+        e.total_cash_balance_after = total_cash_balance;
+        e.total_ledger_value_after = final_total_ledger;
         account_event_buffer_.push(std::move(e));
 
         LogBatchPooled(logger.get(), account_event_module_id_, account_event_buffer_.events);
     }
-    last_wallet_balance_ = balance.WalletBalance;
+    last_wallet_balance_ = perp_balance.WalletBalance;
 
     const bool need_position_events = position_event_module_id_ != Logger::kInvalidModuleId;
     const bool need_order_events = order_event_module_id_ != Logger::kInvalidModuleId;
@@ -699,6 +943,7 @@ void BinanceExchange::log_events(QTrading::Infra::Logging::StepLogContext ctx,
             e.source_order_id = p.order_id;
             e.position_id = p.id;
             e.symbol = p.symbol;
+            e.instrument_type = static_cast<int32_t>(p.instrument_type);
             e.is_long = p.is_long;
             e.event_type = static_cast<int32_t>(type);
             e.qty = p.quantity;
@@ -722,6 +967,7 @@ void BinanceExchange::log_events(QTrading::Infra::Logging::StepLogContext ctx,
                     e.source_order_id = f.order_id;
                     e.position_id = p.id;
                     e.symbol = p.symbol;
+                    e.instrument_type = static_cast<int32_t>(p.instrument_type);
                     e.is_long = p.is_long;
                     e.event_type = static_cast<int32_t>(PositionEventType::Snapshot);
                     e.qty = p.quantity;
@@ -802,6 +1048,7 @@ void BinanceExchange::log_events(QTrading::Infra::Logging::StepLogContext ctx,
                 e.request_id = static_cast<uint64_t>(o.id);
                 e.order_id = o.id;
                 e.symbol = o.symbol;
+                e.instrument_type = static_cast<int32_t>(o.instrument_type);
                 e.event_type = static_cast<int32_t>(type);
                 e.side = static_cast<int32_t>(o.side);
                 e.position_side = static_cast<int32_t>(o.position_side);
@@ -824,6 +1071,7 @@ void BinanceExchange::log_events(QTrading::Infra::Logging::StepLogContext ctx,
                 e.request_id = static_cast<uint64_t>(f.order_id);
                 e.order_id = f.order_id;
                 e.symbol = f.symbol;
+                e.instrument_type = static_cast<int32_t>(f.instrument_type);
                 e.event_type = static_cast<int32_t>(OrderEventType::Filled);
                 e.side = static_cast<int32_t>(f.side);
                 e.position_side = static_cast<int32_t>(f.position_side);
@@ -903,13 +1151,16 @@ void BinanceExchange::collect_funding_events(uint64_t ts, std::vector<FundingEve
             }
 
             std::vector<Account::FundingApplyResult> applied;
-            if (has_price && account) {
-                applied = account->apply_funding(symbols_[i], fr.FundingTime, fr.Rate, price);
+            if (has_price && account_engine_) {
+                applied = account_engine_->apply_funding(symbols_[i], fr.FundingTime, fr.Rate, price);
             }
 
             for (const auto& r : applied) {
                 FundingEventDto e;
                 e.symbol = symbols_[i];
+                if (account_engine_) {
+                    e.instrument_type = static_cast<int32_t>(account_engine_->get_instrument_spec(symbols_[i]).type);
+                }
                 e.funding_time = fr.FundingTime;
                 e.rate = fr.Rate;
                 e.has_mark_price = has_price;
@@ -930,13 +1181,29 @@ void BinanceExchange::FillStatusSnapshot(StatusSnapshot& out) const
 {
     std::lock_guard<std::mutex> lk(account_mtx_);
     out.ts_exchange = last_step_ts_;
-    if (account) {
-        const auto bal = account->get_balance();
-        out.wallet_balance = bal.WalletBalance;
-        out.margin_balance = bal.MarginBalance;
-        out.available_balance = bal.AvailableBalance;
-        out.unrealized_pnl = bal.UnrealizedPnl;
-        out.total_unrealized_pnl = account->total_unrealized_pnl();
+    if (account_engine_) {
+        const auto perp_bal = account_engine_->get_perp_balance();
+        const auto spot_bal = account_engine_->get_spot_balance();
+        const auto positions = account_engine_->get_all_positions();
+        const double spot_inventory_value = spot_inventory_value_from_positions(positions);
+        const double spot_ledger_value = spot_bal.WalletBalance + spot_inventory_value;
+        const double total_cash_balance = account_engine_->get_total_cash_balance();
+        const double total_ledger_value = perp_bal.Equity + spot_ledger_value;
+
+        out.wallet_balance = perp_bal.WalletBalance;
+        out.margin_balance = perp_bal.MarginBalance;
+        out.available_balance = perp_bal.AvailableBalance;
+        out.unrealized_pnl = perp_bal.UnrealizedPnl;
+        out.total_unrealized_pnl = account_engine_->total_unrealized_pnl();
+        out.perp_wallet_balance = perp_bal.WalletBalance;
+        out.perp_margin_balance = perp_bal.MarginBalance;
+        out.perp_available_balance = perp_bal.AvailableBalance;
+        out.spot_cash_balance = spot_bal.WalletBalance;
+        out.spot_available_balance = spot_bal.AvailableBalance;
+        out.spot_inventory_value = spot_inventory_value;
+        out.spot_ledger_value = spot_ledger_value;
+        out.total_cash_balance = total_cash_balance;
+        out.total_ledger_value = total_ledger_value;
     }
     else {
         out.wallet_balance = 0.0;
@@ -944,6 +1211,15 @@ void BinanceExchange::FillStatusSnapshot(StatusSnapshot& out) const
         out.available_balance = 0.0;
         out.unrealized_pnl = 0.0;
         out.total_unrealized_pnl = 0.0;
+        out.perp_wallet_balance = 0.0;
+        out.perp_margin_balance = 0.0;
+        out.perp_available_balance = 0.0;
+        out.spot_cash_balance = 0.0;
+        out.spot_available_balance = 0.0;
+        out.spot_inventory_value = 0.0;
+        out.spot_ledger_value = 0.0;
+        out.total_cash_balance = 0.0;
+        out.total_ledger_value = 0.0;
     }
     out.progress_pct = progress_pct_();
     out.prices.clear();
@@ -1004,7 +1280,8 @@ static bool position_equal(const dto::Position& x, const dto::Position& y)
         x.maintenance_margin == y.maintenance_margin &&
         x.fee == y.fee &&
         x.leverage == y.leverage &&
-        x.fee_rate == y.fee_rate;
+        x.fee_rate == y.fee_rate &&
+        x.instrument_type == y.instrument_type;
 }
 
 static bool order_equal(const dto::Order& x, const dto::Order& y)
@@ -1016,7 +1293,8 @@ static bool order_equal(const dto::Order& x, const dto::Order& y)
         x.side == y.side &&
         x.position_side == y.position_side &&
         x.reduce_only == y.reduce_only &&
-        x.closing_position_id == y.closing_position_id;
+        x.closing_position_id == y.closing_position_id &&
+        x.instrument_type == y.instrument_type;
 }
 
 template<typename T, typename Eq>
@@ -1045,3 +1323,4 @@ bool BinanceExchange::vec_equal(const std::vector<dto::Order>& a,
     const std::vector<dto::Order>& b) {
     return vec_equal_impl(a, b, order_equal);
 }
+

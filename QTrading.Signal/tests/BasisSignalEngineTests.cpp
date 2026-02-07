@@ -23,6 +23,27 @@ std::shared_ptr<QTrading::Dto::Market::Binance::MultiKlineDto> MakeMarket(
     return dto;
 }
 
+std::shared_ptr<QTrading::Dto::Market::Binance::MultiKlineDto> MakeMarketCustomSymbols(
+    unsigned long long ts,
+    const std::string& spot_symbol,
+    double spot_close,
+    const std::string& perp_symbol,
+    double perp_close)
+{
+    auto dto = std::make_shared<QTrading::Dto::Market::Binance::MultiKlineDto>();
+    dto->Timestamp = ts;
+    QTrading::Dto::Market::Binance::KlineDto spot(ts, 0, 0, 0, spot_close, 0, ts, 0, 0, 0, 0);
+    QTrading::Dto::Market::Binance::KlineDto perp(ts, 0, 0, 0, perp_close, 0, ts, 0, 0, 0, 0);
+    auto symbols = std::make_shared<std::vector<std::string>>();
+    symbols->push_back(spot_symbol);
+    symbols->push_back(perp_symbol);
+    dto->symbols = symbols;
+    dto->klines_by_id.resize(symbols->size());
+    dto->klines_by_id[0] = spot;
+    dto->klines_by_id[1] = perp;
+    return dto;
+}
+
 } // namespace
 
 TEST(BasisSignalEngineTests, ActivatesWhenZScoreAboveThreshold)
@@ -40,6 +61,25 @@ TEST(BasisSignalEngineTests, ActivatesWhenZScoreAboveThreshold)
     auto s3 = engine.on_market(MakeMarket(3, 100.0, 110.0));
 
     EXPECT_EQ(s3.symbol, "BTCUSDT_PERP");
+    EXPECT_EQ(s3.strategy, "basis_zscore");
+    EXPECT_EQ(s3.status, QTrading::Signal::SignalStatus::Active);
+}
+
+TEST(BasisSignalEngineTests, ActivatesWithCustomSymbolNames)
+{
+    QTrading::Signal::BasisSignalEngine engine({
+        "BTCUSDT_CASH",
+        "BTCUSDT_SWAP",
+        3,
+        0.5,
+        0.2
+    });
+
+    auto s1 = engine.on_market(MakeMarketCustomSymbols(1, "BTCUSDT_CASH", 100.0, "BTCUSDT_SWAP", 100.0));
+    auto s2 = engine.on_market(MakeMarketCustomSymbols(2, "BTCUSDT_CASH", 100.0, "BTCUSDT_SWAP", 100.0));
+    auto s3 = engine.on_market(MakeMarketCustomSymbols(3, "BTCUSDT_CASH", 100.0, "BTCUSDT_SWAP", 110.0));
+
+    EXPECT_EQ(s3.symbol, "BTCUSDT_SWAP");
     EXPECT_EQ(s3.strategy, "basis_zscore");
     EXPECT_EQ(s3.status, QTrading::Signal::SignalStatus::Active);
 }

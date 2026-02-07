@@ -5,6 +5,7 @@
 target_include_directories(QTrading.Logging.Tests
   PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../include
+    ${CMAKE_SOURCE_DIR}/QTrading.Infra/include
 )
 
 target_link_libraries(QTrading.Logging.Tests

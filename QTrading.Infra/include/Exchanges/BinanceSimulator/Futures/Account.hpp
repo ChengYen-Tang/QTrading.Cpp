@@ -11,6 +11,7 @@
 #include "Dto/Market/Binance/Kline.hpp"
 #include "Dto/Account/BalanceSnapshot.hpp"
 #include "Dto/Trading/Side.hpp"
+#include "Dto/Trading/InstrumentSpec.hpp"
 #include <optional>
 #include <functional>
 
@@ -20,6 +21,12 @@ using namespace QTrading::dto;
 ///        Manages balance, margin, orders, and positions.
 class Account {
 public:
+    struct AccountInitConfig {
+        double spot_initial_cash{ 0.0 };
+        double perp_initial_wallet{ 1'000'000.0 };
+        int vip_level{ 0 };
+    };
+
     enum class KlineVolumeSplitMode {
         LegacyTotalOnly = 0,
         TakerBuyOnly = 1,
@@ -55,21 +62,32 @@ public:
 
     Account(double initial_balance, int vip_level = 0);
     Account(double initial_balance, int vip_level, Policies policies);
+    explicit Account(const AccountInitConfig& init_config);
+    Account(const AccountInitConfig& init_config, Policies policies);
 
     QTrading::Dto::Account::BalanceSnapshot get_balance() const;
+    QTrading::Dto::Account::BalanceSnapshot get_perp_balance() const;
+    QTrading::Dto::Account::BalanceSnapshot get_spot_balance() const;
 
     double total_unrealized_pnl() const;
     double get_equity() const;
 
     double get_wallet_balance() const;
+    double get_spot_cash_balance() const;
+    double get_total_cash_balance() const;
     double get_margin_balance() const;
     double get_available_balance() const;
+    bool transfer_spot_to_perp(double amount);
+    bool transfer_perp_to_spot(double amount);
 
     void set_position_mode(bool hedgeMode);
     bool is_hedge_mode() const;
 
     void set_symbol_leverage(const std::string& symbol, double newLeverage);
     double get_symbol_leverage(const std::string& symbol) const;
+    void set_instrument_type(const std::string& symbol, QTrading::Dto::Trading::InstrumentType type);
+    void set_instrument_spec(const std::string& symbol, const QTrading::Dto::Trading::InstrumentSpec& spec);
+    QTrading::Dto::Trading::InstrumentSpec get_instrument_spec(const std::string& symbol) const;
 
     bool place_order(const std::string& symbol,
         double quantity,
@@ -148,7 +166,11 @@ public:
         double fee{};
         double fee_rate{};
         int closing_position_id{};
+        QTrading::Dto::Trading::InstrumentType instrument_type{ QTrading::Dto::Trading::InstrumentType::Perp };
         QTrading::Dto::Account::BalanceSnapshot balance_snapshot{};
+        QTrading::Dto::Account::BalanceSnapshot perp_balance_snapshot{};
+        QTrading::Dto::Account::BalanceSnapshot spot_balance_snapshot{};
+        double total_cash_balance_snapshot{};
         std::vector<Position> positions_snapshot{};
     };
 
@@ -158,6 +180,7 @@ private:
     double balance_;
     double wallet_balance_;
     double used_margin_;
+    double spot_cash_balance_{ 0.0 };
 
     int vip_level_;
     bool hedge_mode_;
@@ -222,6 +245,7 @@ private:
     // Monotonic open-order version for per-symbol cache invalidation.
     uint64_t open_orders_version_{ 0 };
     uint64_t per_symbol_cache_version_{ static_cast<uint64_t>(-1) };
+    QTrading::Dto::Trading::InstrumentRegistry instrument_registry_{};
     // Cached balance snapshot to avoid repeated O(P+O) scans.
     mutable QTrading::Dto::Account::BalanceSnapshot balance_cache_{};
     mutable uint64_t balance_cache_version_{ static_cast<uint64_t>(-1) };
@@ -258,6 +282,7 @@ private:
     void ensure_symbol_capacity_(size_t id);
     void mark_open_orders_dirty_();
     void mark_balance_dirty_();
+    const QTrading::Dto::Trading::InstrumentSpec& resolve_instrument_spec_(const std::string& symbol) const;
 
 public:
     uint64_t get_state_version() const noexcept { return state_version_; }

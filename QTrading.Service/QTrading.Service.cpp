@@ -20,6 +20,7 @@
 #include "FileLogger/FeatherV2/RunMetadata.hpp"
 #include "Diagnostics/Trace.hpp"
 #include "Dto/Trading/Side.hpp"
+#include "Dto/Trading/InstrumentSpec.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -33,12 +34,14 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 using namespace std;
 using namespace QTrading::Log;
 using BinanceExchange = QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
 using MarketPtr = QTrading::Infra::Exchanges::BinanceSim::MultiKlinePtr;
+using SimAccount = ::Account;
 
 namespace {
 
@@ -84,6 +87,40 @@ QTrading::Dto::Trading::OrderSide ToOrderSide(QTrading::Execution::OrderAction a
         : QTrading::Dto::Trading::OrderSide::Sell;
 }
 
+std::string InstrumentTypeToString(std::optional<QTrading::Dto::Trading::InstrumentType> type)
+{
+    if (!type.has_value()) {
+        return "auto";
+    }
+    switch (*type) {
+    case QTrading::Dto::Trading::InstrumentType::Spot:
+        return "spot";
+    case QTrading::Dto::Trading::InstrumentType::Perp:
+        return "perp";
+    default:
+        break;
+    }
+    return "unknown";
+}
+
+std::optional<QTrading::Dto::Trading::InstrumentType> ResolveInstrumentType(
+    const std::unordered_map<std::string, QTrading::Dto::Trading::InstrumentType>& explicit_types,
+    const std::string& symbol)
+{
+    const auto it = explicit_types.find(symbol);
+    if (it != explicit_types.end()) {
+        return it->second;
+    }
+
+    if (symbol.size() >= 5 && symbol.rfind("_SPOT") == symbol.size() - 5) {
+        return QTrading::Dto::Trading::InstrumentType::Spot;
+    }
+    if (symbol.size() >= 5 && symbol.rfind("_PERP") == symbol.size() - 5) {
+        return QTrading::Dto::Trading::InstrumentType::Perp;
+    }
+    return std::nullopt;
+}
+
 #if defined(QTRADING_TRACE) && !defined(QTRADING_TRACE_VERBOSE)
 void PrintStatusLine(const BinanceExchange::StatusSnapshot& snap)
 {
@@ -95,6 +132,11 @@ void PrintStatusLine(const BinanceExchange::StatusSnapshot& snap)
         << " margin=" << snap.margin_balance
         << " avail=" << snap.available_balance
         << " u_pnl=" << snap.total_unrealized_pnl
+        << " spot_cash=" << snap.spot_cash_balance
+        << " spot_inv=" << snap.spot_inventory_value
+        << " spot_ledger=" << snap.spot_ledger_value
+        << " perp_ledger=" << snap.perp_margin_balance
+        << " total_ledger=" << snap.total_ledger_value
         << " progress=" << snap.progress_pct << "%";
     oss << " prices=";
     for (size_t i = 0; i < snap.prices.size(); ++i) {
@@ -141,12 +183,31 @@ int main()
     QTR_TRACE("service", "main begin");
 
     try {
+        constexpr double kInitialSpotCash = 500'000.0;
+        constexpr double kInitialPerpWallet = 500'000.0;
+        constexpr int kVipLevel = 0;
+
+        SimAccount::AccountInitConfig account_init{};
+        account_init.spot_initial_cash = kInitialSpotCash;
+        account_init.perp_initial_wallet = kInitialPerpWallet;
+        account_init.vip_level = kVipLevel;
+
+        std::ostringstream strategy_params_builder;
+        strategy_params_builder << "notional=1000;leverage=2;receive_funding=true"
+                                << ";initial_spot_cash=" << kInitialSpotCash
+                                << ";initial_perp_wallet=" << kInitialPerpWallet;
+        const std::string strategy_params = strategy_params_builder.str();
+
         /// @brief Mapping from symbol string to CSV file path.
         std::vector<BinanceExchange::SymbolDataset> symbolCsv = {
-            {"BTCUSDT_SPOT", Utf8Path(u8R"(\\synology\MarketData\General\MarketData\Kline\Spot\BTCUSDT.csv)"), std::nullopt},
+            {"BTCUSDT_SPOT",
+                Utf8Path(u8R"(\\synology\MarketData\General\MarketData\Kline\Spot\BTCUSDT.csv)"),
+                std::nullopt,
+                QTrading::Dto::Trading::InstrumentType::Spot},
             {"BTCUSDT_PERP",
                 Utf8Path(u8R"(\\synology\MarketData\General\MarketData\Kline\UsdFutures\BTCUSDT.csv)"),
-                Utf8Path(u8R"(\\synology\MarketData\General\MarketData\FundingRate\UsdFutures\BTCUSDT.csv)")}
+                Utf8Path(u8R"(\\synology\MarketData\General\MarketData\FundingRate\UsdFutures\BTCUSDT.csv)"),
+                QTrading::Dto::Trading::InstrumentType::Perp}
         };
         const uint64_t run_id = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count());
@@ -158,6 +219,8 @@ int main()
             dataset += ds.symbol;
             dataset += "=";
             dataset += ds.kline_csv;
+            dataset += "@";
+            dataset += InstrumentTypeToString(ds.instrument_type);
             if (ds.funding_csv.has_value() && !ds.funding_csv->empty()) {
                 dataset += "|";
                 dataset += *ds.funding_csv;
@@ -184,7 +247,7 @@ int main()
                          << "  \"run_id\": " << run_id << ",\n"
                          << "  \"strategy_name\": \"" << JsonEscape("FundingCarryMVP") << "\",\n"
                          << "  \"strategy_version\": \"" << JsonEscape("0.1") << "\",\n"
-                         << "  \"strategy_params\": \"" << JsonEscape("notional=1000;leverage=2;receive_funding=true") << "\",\n"
+                         << "  \"strategy_params\": \"" << JsonEscape(strategy_params) << "\",\n"
                          << "  \"dataset\": \"" << JsonEscape(dataset) << "\"\n"
                          << "}\n";
                 }
@@ -213,7 +276,7 @@ int main()
                 meta.run_id = run_id;
                 meta.strategy_name = "FundingCarryMVP";
                 meta.strategy_version = "0.1";
-                meta.strategy_params = "notional=1000;leverage=2;receive_funding=true";
+                meta.strategy_params = strategy_params;
                 meta.dataset = dataset;
                 logger->Log(LogModuleToString(LogModule::RunMetadata), std::move(meta));
         }
@@ -221,7 +284,8 @@ int main()
         std::cerr << "[Service] constructing exchange..." << std::endl;
         std::cerr.flush();
         // @brief Exchange simulator providing 1-minute MultiKlineDto.
-        auto exchange = std::make_shared<QTrading::Infra::Exchanges::BinanceSim::BinanceExchange>(symbolCsv, logger, 1'000'000.0, 0, run_id);
+        auto exchange = std::make_shared<QTrading::Infra::Exchanges::BinanceSim::BinanceExchange>(
+            symbolCsv, logger, account_init, run_id);
         std::cerr << "[Service] exchange constructed" << std::endl;
         std::cerr.flush();
 
@@ -232,7 +296,13 @@ int main()
             "BTCUSDT_PERP"
         });
         QTrading::Intent::FundingCarryIntentBuilder intent_builder({ "BTCUSDT_SPOT", "BTCUSDT_PERP", true });
-        QTrading::Risk::SimpleRiskEngine risk_engine({ 1000.0, 2.0, 3.0 });
+        QTrading::Risk::SimpleRiskEngine::Config risk_cfg;
+        risk_cfg.notional_usdt = 1000.0;
+        risk_cfg.leverage = 2.0;
+        risk_cfg.max_leverage = 3.0;
+        risk_cfg.instrument_types["BTCUSDT_SPOT"] = QTrading::Dto::Trading::InstrumentType::Spot;
+        risk_cfg.instrument_types["BTCUSDT_PERP"] = QTrading::Dto::Trading::InstrumentType::Perp;
+        QTrading::Risk::SimpleRiskEngine risk_engine(risk_cfg);
         QTrading::Execution::MarketExecutionEngine execution_engine(exchange, { 10.0 });
         QTrading::Monitoring::SimpleMonitoring monitoring({ 5 });
 
@@ -300,6 +370,9 @@ int main()
             QTrading::Risk::AccountState account{};
             account.positions = exchange->get_all_positions();
             account.open_orders = exchange->get_all_open_orders();
+            account.spot_balance = exchange->account.get_spot_balance();
+            account.perp_balance = exchange->account.get_perp_balance();
+            account.total_cash_balance = exchange->account.get_total_cash_balance();
 
             auto risk = risk_engine.position(intent, account, market);
             auto orders = execution_engine.plan(risk, signal, market);
@@ -308,13 +381,35 @@ int main()
                 double price = (order.type == QTrading::Execution::OrderType::Limit)
                     ? order.price
                     : 0.0;
-                (void)exchange->place_order(order.symbol, order.qty, price, ToOrderSide(order.action),
-                    QTrading::Dto::Trading::PositionSide::Both, order.reduce_only);
+                const auto type = ResolveInstrumentType(risk_cfg.instrument_types, order.symbol);
+                if (type.has_value() && *type == QTrading::Dto::Trading::InstrumentType::Spot) {
+                    (void)exchange->spot.place_order(
+                        order.symbol,
+                        order.qty,
+                        price,
+                        ToOrderSide(order.action),
+                        order.reduce_only);
+                }
+                else {
+                    (void)exchange->perp.place_order(
+                        order.symbol,
+                        order.qty,
+                        price,
+                        ToOrderSide(order.action),
+                        QTrading::Dto::Trading::PositionSide::Both,
+                        order.reduce_only);
+                }
             }
 
             for (const auto& alert : monitoring.check(account)) {
                 if (alert.action == "CANCEL_OPEN_ORDERS") {
-                    exchange->cancel_open_orders(alert.symbol);
+                    const auto type = ResolveInstrumentType(risk_cfg.instrument_types, alert.symbol);
+                    if (type.has_value() && *type == QTrading::Dto::Trading::InstrumentType::Spot) {
+                        exchange->spot.cancel_open_orders(alert.symbol);
+                    }
+                    else {
+                        exchange->perp.cancel_open_orders(alert.symbol);
+                    }
                 }
             }
 

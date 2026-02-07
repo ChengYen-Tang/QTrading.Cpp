@@ -45,6 +45,41 @@ TEST(AccountTest, ConstructorAndGetters) {
     EXPECT_DOUBLE_EQ(account.get_equity(), 1000.0);
 }
 
+TEST(AccountTest, AccountInitConfigConstructorInitializesStartingBalance) {
+    Account::AccountInitConfig cfg;
+    cfg.spot_initial_cash = 250.0;
+    cfg.perp_initial_wallet = 750.0;
+    cfg.vip_level = 1;
+
+    Account account(cfg);
+    auto perp_bal = account.get_balance();
+    auto spot_bal = account.get_spot_balance();
+    EXPECT_DOUBLE_EQ(perp_bal.WalletBalance, 750.0);
+    EXPECT_DOUBLE_EQ(spot_bal.WalletBalance, 250.0);
+    EXPECT_DOUBLE_EQ(account.get_wallet_balance(), 750.0);
+    EXPECT_DOUBLE_EQ(account.get_spot_cash_balance(), 250.0);
+    EXPECT_DOUBLE_EQ(account.get_total_cash_balance(), 1000.0);
+    EXPECT_DOUBLE_EQ(account.total_unrealized_pnl(), 0.0);
+}
+
+TEST(AccountTest, AccountInitConfigRejectsInvalidValues) {
+    {
+        Account::AccountInitConfig cfg;
+        cfg.spot_initial_cash = -1.0;
+        EXPECT_THROW((void)Account(cfg), std::runtime_error);
+    }
+    {
+        Account::AccountInitConfig cfg;
+        cfg.perp_initial_wallet = -1.0;
+        EXPECT_THROW((void)Account(cfg), std::runtime_error);
+    }
+    {
+        Account::AccountInitConfig cfg;
+        cfg.vip_level = -1;
+        EXPECT_THROW((void)Account(cfg), std::runtime_error);
+    }
+}
+
 /// @brief Verifies setting and getting symbol leverage, and error on invalid.
 TEST(AccountTest, SetAndGetSymbolLeverage) {
     Account account(2000.0, 0);
@@ -58,6 +93,295 @@ TEST(AccountTest, SetAndGetSymbolLeverage) {
     // <=0 => throw
     EXPECT_THROW(account.set_symbol_leverage("BTCUSDT", 0.0), std::runtime_error);
     EXPECT_THROW(account.set_symbol_leverage("BTCUSDT", -10.0), std::runtime_error);
+}
+
+TEST(AccountTest, SpotSymbolLeverageIsAlwaysOne) {
+    Account::AccountInitConfig cfg;
+    cfg.spot_initial_cash = 2000.0;
+    cfg.perp_initial_wallet = 0.0;
+    Account account(cfg);
+    using QTrading::Dto::Trading::InstrumentType;
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+    account.set_instrument_type("BTCUSDT_SPOT", InstrumentType::Spot);
+
+    EXPECT_DOUBLE_EQ(account.get_symbol_leverage("BTCUSDT_SPOT"), 1.0);
+    account.set_symbol_leverage("BTCUSDT_SPOT", 20.0);
+    EXPECT_DOUBLE_EQ(account.get_symbol_leverage("BTCUSDT_SPOT"), 1.0);
+
+    ASSERT_TRUE(account.place_order("BTCUSDT_SPOT", 1.0, 1000.0, OrderSide::Buy, PositionSide::Both));
+    account.update_positions(oneKline("BTCUSDT_SPOT", 1000.0, 1000.0, 1000.0, 1000.0, 10.0));
+
+    const auto& pos = account.get_all_positions();
+    ASSERT_EQ(pos.size(), 1u);
+    EXPECT_DOUBLE_EQ(pos[0].leverage, 1.0);
+}
+
+TEST(AccountTest, SpotBuyConsumesOnlySpotCash) {
+    Account::AccountInitConfig cfg;
+    cfg.spot_initial_cash = 1000.0;
+    cfg.perp_initial_wallet = 500.0;
+    Account account(cfg);
+
+    using QTrading::Dto::Trading::InstrumentType;
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+    account.set_instrument_type("BTCUSDT_SPOT", InstrumentType::Spot);
+
+    ASSERT_TRUE(account.place_order("BTCUSDT_SPOT", 1.0, 100.0, OrderSide::Buy, PositionSide::Both));
+    account.update_positions(oneKline("BTCUSDT_SPOT", 100.0, 100.0, 100.0, 100.0, 1000.0));
+
+    EXPECT_DOUBLE_EQ(account.get_wallet_balance(), 500.0);
+    EXPECT_LT(account.get_spot_cash_balance(), 1000.0);
+}
+
+TEST(AccountTest, PerpTradeConsumesOnlyPerpWallet) {
+    Account::AccountInitConfig cfg;
+    cfg.spot_initial_cash = 1000.0;
+    cfg.perp_initial_wallet = 1000.0;
+    Account account(cfg);
+
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+    account.set_symbol_leverage("BTCUSDT", 10.0);
+
+    ASSERT_TRUE(account.place_order("BTCUSDT", 1.0, 100.0, OrderSide::Buy, PositionSide::Both));
+    account.update_positions(oneKline("BTCUSDT", 100.0, 100.0, 100.0, 100.0, 1000.0));
+
+    EXPECT_DOUBLE_EQ(account.get_spot_cash_balance(), 1000.0);
+    EXPECT_LT(account.get_wallet_balance(), 1000.0);
+}
+
+TEST(AccountTest, SpotSellIncreasesOnlySpotCash) {
+    Account::AccountInitConfig cfg;
+    cfg.spot_initial_cash = 2000.0;
+    cfg.perp_initial_wallet = 0.0;
+    Account account(cfg);
+
+    using QTrading::Dto::Trading::InstrumentType;
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+    account.set_instrument_type("BTCUSDT_SPOT", InstrumentType::Spot);
+
+    ASSERT_TRUE(account.place_order("BTCUSDT_SPOT", 1.0, 100.0, OrderSide::Buy, PositionSide::Both));
+    account.update_positions(oneKline("BTCUSDT_SPOT", 100.0, 100.0, 100.0, 100.0, 1000.0));
+    const double spot_after_buy = account.get_spot_cash_balance();
+    const double perp_before_sell = account.get_wallet_balance();
+
+    ASSERT_TRUE(account.place_order("BTCUSDT_SPOT", 0.5, 120.0, OrderSide::Sell, PositionSide::Both));
+    account.update_positions(oneKline("BTCUSDT_SPOT", 120.0, 120.0, 120.0, 120.0, 1000.0));
+
+    EXPECT_GT(account.get_spot_cash_balance(), spot_after_buy);
+    EXPECT_DOUBLE_EQ(account.get_wallet_balance(), perp_before_sell);
+}
+
+TEST(AccountTest, SpotOpenOrderReservesOnlySpotBudget) {
+    Account::AccountInitConfig cfg;
+    cfg.spot_initial_cash = 1000.0;
+    cfg.perp_initial_wallet = 500.0;
+    Account account(cfg);
+
+    using QTrading::Dto::Trading::InstrumentType;
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+    account.set_instrument_type("BTCUSDT_SPOT", InstrumentType::Spot);
+
+    const auto perp_before = account.get_perp_balance();
+    ASSERT_TRUE(account.place_order("BTCUSDT_SPOT", 5.0, 100.0, OrderSide::Buy, PositionSide::Both));
+    const auto spot_after = account.get_spot_balance();
+    const auto perp_after = account.get_perp_balance();
+
+    EXPECT_GT(spot_after.OpenOrderInitialMargin, 0.0);
+    EXPECT_LT(spot_after.AvailableBalance, 1000.0);
+    EXPECT_DOUBLE_EQ(perp_after.AvailableBalance, perp_before.AvailableBalance);
+    EXPECT_DOUBLE_EQ(perp_after.WalletBalance, perp_before.WalletBalance);
+}
+
+TEST(AccountTest, SpotBuyPlacementRejectedWhenSpotBudgetExceededByOpenOrders) {
+    Account::AccountInitConfig cfg;
+    cfg.spot_initial_cash = 1000.0;
+    cfg.perp_initial_wallet = 0.0;
+    Account account(cfg);
+
+    using QTrading::Dto::Trading::InstrumentType;
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+    account.set_instrument_type("BTCUSDT_SPOT", InstrumentType::Spot);
+
+    ASSERT_TRUE(account.place_order("BTCUSDT_SPOT", 8.0, 100.0, OrderSide::Buy, PositionSide::Both));
+    EXPECT_FALSE(account.place_order("BTCUSDT_SPOT", 3.0, 100.0, OrderSide::Buy, PositionSide::Both));
+}
+
+TEST(AccountTest, TransferBetweenLedgersRespectsAvailableBalance) {
+    Account::AccountInitConfig cfg;
+    cfg.spot_initial_cash = 500.0;
+    cfg.perp_initial_wallet = 500.0;
+    Account account(cfg);
+
+    using QTrading::Dto::Trading::InstrumentType;
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+    account.set_instrument_type("BTCUSDT_SPOT", InstrumentType::Spot);
+
+    EXPECT_TRUE(account.transfer_spot_to_perp(100.0));
+    EXPECT_DOUBLE_EQ(account.get_spot_cash_balance(), 400.0);
+    EXPECT_DOUBLE_EQ(account.get_wallet_balance(), 600.0);
+
+    ASSERT_TRUE(account.place_order("BTCUSDT_SPOT", 3.0, 100.0, OrderSide::Buy, PositionSide::Both));
+    EXPECT_FALSE(account.transfer_spot_to_perp(150.0));
+
+    EXPECT_TRUE(account.transfer_perp_to_spot(200.0));
+    EXPECT_DOUBLE_EQ(account.get_wallet_balance(), 400.0);
+    EXPECT_DOUBLE_EQ(account.get_spot_cash_balance(), 600.0);
+    EXPECT_FALSE(account.transfer_perp_to_spot(1000.0));
+}
+
+TEST(AccountTest, ExplicitInstrumentTypeAppliesWithoutSuffixNaming) {
+    Account::AccountInitConfig cfg;
+    cfg.spot_initial_cash = 20000.0;
+    cfg.perp_initial_wallet = 0.0;
+    Account account(cfg);
+    using QTrading::Dto::Trading::InstrumentType;
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+
+    account.set_instrument_type("BTCUSDT", InstrumentType::Spot);
+    account.set_symbol_leverage("BTCUSDT", 20.0);
+    EXPECT_DOUBLE_EQ(account.get_symbol_leverage("BTCUSDT"), 1.0);
+
+    EXPECT_FALSE(account.place_order("BTCUSDT", 1.0, 100.0, OrderSide::Sell, PositionSide::Both));
+
+    ASSERT_TRUE(account.place_order("BTCUSDT", 1.0, 100.0, OrderSide::Buy, PositionSide::Both));
+    account.update_positions(oneKline("BTCUSDT", 100.0, 100.0, 100.0, 100.0, 1000.0));
+    ASSERT_EQ(account.get_all_positions().size(), 1u);
+
+    EXPECT_TRUE(account.place_order("BTCUSDT", 0.5, 100.0, OrderSide::Sell, PositionSide::Both));
+}
+
+TEST(AccountTest, UnspecifiedInstrumentDefaultsToPerpPolicy) {
+    Account account(10000.0, 0);
+    account.set_symbol_leverage("BTCUSDT", 10.0);
+    EXPECT_DOUBLE_EQ(account.get_symbol_leverage("BTCUSDT"), 10.0);
+}
+
+TEST(AccountTest, MixedBookSpotAndPerpRulesApplyByInstrumentType) {
+    Account::AccountInitConfig cfg;
+    cfg.spot_initial_cash = 50000.0;
+    cfg.perp_initial_wallet = 50000.0;
+    Account account(cfg);
+    using QTrading::Dto::Trading::InstrumentType;
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+
+    account.set_instrument_type("BTCUSDT_CASH", InstrumentType::Spot);
+    account.set_instrument_type("BTCUSDT_SWAP", InstrumentType::Perp);
+    account.set_symbol_leverage("BTCUSDT_SWAP", 10.0);
+
+    // Spot cannot naked-short, perp can.
+    EXPECT_FALSE(account.place_order("BTCUSDT_CASH", 0.1, 100.0, OrderSide::Sell, PositionSide::Both));
+    EXPECT_TRUE(account.place_order("BTCUSDT_SWAP", 1.0, 100.0, OrderSide::Sell, PositionSide::Both));
+    EXPECT_TRUE(account.place_order("BTCUSDT_CASH", 1.0, 100.0, OrderSide::Buy, PositionSide::Both));
+    {
+        const auto& ords = account.get_all_open_orders();
+        ASSERT_EQ(ords.size(), 2u);
+        for (const auto& o : ords) {
+            if (o.symbol == "BTCUSDT_CASH") {
+                EXPECT_EQ(o.instrument_type, InstrumentType::Spot);
+            }
+            if (o.symbol == "BTCUSDT_SWAP") {
+                EXPECT_EQ(o.instrument_type, InstrumentType::Perp);
+            }
+        }
+    }
+
+    QTrading::Dto::Market::Binance::KlineDto kc;
+    kc.OpenPrice = 100.0;
+    kc.HighPrice = 100.0;
+    kc.LowPrice = 100.0;
+    kc.ClosePrice = 100.0;
+    kc.Volume = 1000.0;
+    QTrading::Dto::Market::Binance::KlineDto ks = kc;
+    account.update_positions({
+        {"BTCUSDT_CASH", kc},
+        {"BTCUSDT_SWAP", ks}
+        });
+
+    const auto& pos = account.get_all_positions();
+    ASSERT_EQ(pos.size(), 2u);
+    bool foundSpot = false;
+    bool foundPerp = false;
+    for (const auto& p : pos) {
+        if (p.symbol == "BTCUSDT_CASH") {
+            foundSpot = true;
+            EXPECT_TRUE(p.is_long);
+            EXPECT_DOUBLE_EQ(p.leverage, 1.0);
+            EXPECT_DOUBLE_EQ(p.maintenance_margin, 0.0);
+            EXPECT_EQ(p.instrument_type, InstrumentType::Spot);
+        }
+        if (p.symbol == "BTCUSDT_SWAP") {
+            foundPerp = true;
+            EXPECT_FALSE(p.is_long);
+            EXPECT_DOUBLE_EQ(p.leverage, 10.0);
+            EXPECT_GT(p.maintenance_margin, 0.0);
+            EXPECT_EQ(p.instrument_type, InstrumentType::Perp);
+        }
+    }
+    EXPECT_TRUE(foundSpot);
+    EXPECT_TRUE(foundPerp);
+
+    const double before = account.get_wallet_balance();
+    auto spotFunding = account.apply_funding("BTCUSDT_CASH", 1733497260000, 0.001, 10000.0);
+    EXPECT_TRUE(spotFunding.empty());
+    EXPECT_DOUBLE_EQ(account.get_wallet_balance(), before);
+
+    auto perpFunding = account.apply_funding("BTCUSDT_SWAP", 1733497260000, 0.001, 10000.0);
+    EXPECT_FALSE(perpFunding.empty());
+    EXPECT_GT(account.get_wallet_balance(), before);
+}
+
+TEST(AccountTest, SpotRejectsNakedShortAndOversell) {
+    Account::AccountInitConfig cfg;
+    cfg.spot_initial_cash = 50000.0;
+    cfg.perp_initial_wallet = 0.0;
+    Account account(cfg);
+    using QTrading::Dto::Trading::InstrumentType;
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+    account.set_instrument_type("BTCUSDT_SPOT", InstrumentType::Spot);
+
+    EXPECT_FALSE(account.place_order("BTCUSDT_SPOT", 1.0, 100.0, OrderSide::Sell, PositionSide::Both));
+    EXPECT_TRUE(account.get_all_open_orders().empty());
+
+    ASSERT_TRUE(account.place_order("BTCUSDT_SPOT", 1.0, 100.0, OrderSide::Buy, PositionSide::Both));
+    account.update_positions(oneKline("BTCUSDT_SPOT", 100.0, 100.0, 100.0, 100.0, 1000.0));
+    ASSERT_EQ(account.get_all_positions().size(), 1u);
+
+    EXPECT_FALSE(account.place_order("BTCUSDT_SPOT", 2.0, 100.0, OrderSide::Sell, PositionSide::Both));
+    EXPECT_TRUE(account.get_all_open_orders().empty());
+
+    ASSERT_TRUE(account.place_order("BTCUSDT_SPOT", 0.6, 100.0, OrderSide::Sell, PositionSide::Both));
+    EXPECT_FALSE(account.place_order("BTCUSDT_SPOT", 0.6, 100.0, OrderSide::Sell, PositionSide::Both));
+}
+
+TEST(AccountTest, SpotPositionHasNoMaintenanceMarginAndNoLiquidationPath) {
+    Account::AccountInitConfig cfg;
+    cfg.spot_initial_cash = 50000.0;
+    cfg.perp_initial_wallet = 0.0;
+    Account account(cfg);
+    using QTrading::Dto::Trading::InstrumentType;
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+    account.set_instrument_type("BTCUSDT_SPOT", InstrumentType::Spot);
+
+    ASSERT_TRUE(account.place_order("BTCUSDT_SPOT", 1.0, 1000.0, OrderSide::Buy, PositionSide::Both));
+    account.update_positions(oneKline("BTCUSDT_SPOT", 1000.0, 1000.0, 1000.0, 1000.0, 1000.0));
+    ASSERT_EQ(account.get_all_positions().size(), 1u);
+
+    account.update_positions(oneKline("BTCUSDT_SPOT", 10.0, 10.0, 10.0, 10.0, 1000.0));
+    const auto& pos = account.get_all_positions();
+    ASSERT_EQ(pos.size(), 1u);
+    EXPECT_DOUBLE_EQ(pos[0].maintenance_margin, 0.0);
+    EXPECT_DOUBLE_EQ(account.get_balance().MaintenanceMargin, 0.0);
 }
 
 /// @brief Verifies limit order placement appears in open_orders without immediate balance change.
@@ -182,6 +506,60 @@ TEST(AccountTest, Liquidation) {
     EXPECT_TRUE(logs.find("Liquidation triggered") != std::string::npos);
 
     EXPECT_TRUE(account.get_all_positions().empty() || account.get_balance().MarginBalance >= account.get_balance().MaintenanceMargin);
+}
+
+TEST(AccountTest, PerpLiquidationDoesNotConsumeSpotPosition) {
+    Account::AccountInitConfig cfg;
+    cfg.spot_initial_cash = 100000.0;
+    cfg.perp_initial_wallet = 350000.0;
+    Account account(cfg);
+    account.set_instrument_type("BTCUSDT_SPOT", QTrading::Dto::Trading::InstrumentType::Spot);
+    account.set_instrument_type("BTCUSDT_PERP", QTrading::Dto::Trading::InstrumentType::Perp);
+    account.set_symbol_leverage("BTCUSDT_PERP", 75.0);
+
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+
+    ASSERT_TRUE(account.place_order("BTCUSDT_SPOT", 1.0, 100.0, OrderSide::Buy, PositionSide::Both));
+    ASSERT_TRUE(account.place_order("BTCUSDT_PERP", 5000.0, 500.0, OrderSide::Buy, PositionSide::Both));
+    QTrading::Dto::Market::Binance::KlineDto k_spot_entry;
+    k_spot_entry.OpenPrice = 100.0;
+    k_spot_entry.HighPrice = 100.0;
+    k_spot_entry.LowPrice = 100.0;
+    k_spot_entry.ClosePrice = 100.0;
+    k_spot_entry.Volume = 100000.0;
+
+    QTrading::Dto::Market::Binance::KlineDto k_perp_entry;
+    k_perp_entry.OpenPrice = 500.0;
+    k_perp_entry.HighPrice = 500.0;
+    k_perp_entry.LowPrice = 500.0;
+    k_perp_entry.ClosePrice = 500.0;
+    k_perp_entry.Volume = 100000.0;
+
+    account.update_positions({
+        {"BTCUSDT_SPOT", k_spot_entry},
+        {"BTCUSDT_PERP", k_perp_entry}
+        });
+
+    QTrading::Dto::Market::Binance::KlineDto k_spot_crash = k_spot_entry;
+    QTrading::Dto::Market::Binance::KlineDto k_perp_crash = k_perp_entry;
+    k_perp_crash.OpenPrice = 1.0;
+    k_perp_crash.HighPrice = 1.0;
+    k_perp_crash.LowPrice = 1.0;
+    k_perp_crash.ClosePrice = 1.0;
+    account.update_positions({
+        {"BTCUSDT_SPOT", k_spot_crash},
+        {"BTCUSDT_PERP", k_perp_crash}
+        });
+
+    bool has_spot_position = false;
+    for (const auto& p : account.get_all_positions()) {
+        if (p.symbol == "BTCUSDT_SPOT" && p.quantity > 0.0) {
+            has_spot_position = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(has_spot_position);
 }
 
 /// @brief Verifies hedge-mode allows separate long and short positions.

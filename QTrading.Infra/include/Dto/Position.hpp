@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include "Dto/Trading/InstrumentSpec.hpp"
 
 namespace QTrading::dto {
 
@@ -45,6 +46,9 @@ namespace QTrading::dto {
 
         /// @brief Fee rate applied (maker/taker).
         double fee_rate;
+
+        /// @brief Instrument type captured at position creation for routing/logging.
+        QTrading::Dto::Trading::InstrumentType instrument_type{ QTrading::Dto::Trading::InstrumentType::Perp };
     };
 
 }  // namespace QTrading::dto

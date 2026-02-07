@@ -28,3 +28,15 @@ TEST(BasisIntentBuilderTests, EmptyLegsWhenInactive)
     auto intent = builder.build(signal, nullptr);
     EXPECT_TRUE(intent.legs.empty());
 }
+
+TEST(BasisIntentBuilderTests, UsesConfiguredCustomSymbols)
+{
+    QTrading::Intent::BasisIntentBuilder builder({ "BTCUSDT_CASH", "BTCUSDT_SWAP" });
+    QTrading::Signal::SignalDecision signal;
+    signal.status = QTrading::Signal::SignalStatus::Active;
+
+    auto intent = builder.build(signal, nullptr);
+    ASSERT_EQ(intent.legs.size(), 2u);
+    EXPECT_EQ(intent.legs[0].instrument, "BTCUSDT_CASH");
+    EXPECT_EQ(intent.legs[1].instrument, "BTCUSDT_SWAP");
+}

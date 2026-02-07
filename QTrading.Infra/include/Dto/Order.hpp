@@ -2,6 +2,7 @@
 
 #include <string>
 #include "Dto/Trading/Side.hpp"
+#include "Dto/Trading/InstrumentSpec.hpp"
 
 namespace QTrading::dto {
 
@@ -32,6 +33,9 @@ namespace QTrading::dto {
 
         /// @brief For internal closing orders: ID of the position being closed; –1 if opening order.
         int closing_position_id{ -1 };
+
+        /// @brief Instrument type captured at order creation for routing/logging.
+        QTrading::Dto::Trading::InstrumentType instrument_type{ QTrading::Dto::Trading::InstrumentType::Perp };
     };
 
 }  // namespace QTrading::dto

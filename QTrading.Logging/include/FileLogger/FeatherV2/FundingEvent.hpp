@@ -15,6 +15,7 @@ namespace QTrading::Log::FileLogger::FeatherV2 {
         uint64_t ts_local{};
 
         std::string symbol;
+        int32_t instrument_type{ -1 }; // Dto::Trading::InstrumentType, -1 means unknown.
         uint64_t funding_time{};
         double rate{};
         bool has_mark_price{};
@@ -34,6 +35,7 @@ namespace QTrading::Log::FileLogger::FeatherV2 {
                 arrow::field("step_seq", arrow::uint64()),
                 arrow::field("event_seq", arrow::uint64()),
                 arrow::field("symbol", arrow::utf8()),
+                arrow::field("instrument_type", arrow::int32()),
                 arrow::field("funding_time", arrow::uint64()),
                 arrow::field("rate", arrow::float64()),
                 arrow::field("has_mark_price", arrow::boolean()),
@@ -54,15 +56,16 @@ namespace QTrading::Log::FileLogger::FeatherV2 {
             detail::AppendOrThrow(builder.GetFieldAs<arrow::UInt64Builder>(2), e.step_seq);
             detail::AppendOrThrow(builder.GetFieldAs<arrow::UInt64Builder>(3), e.event_seq);
             detail::AppendOrThrow(builder.GetFieldAs<arrow::StringBuilder>(4), e.symbol);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::UInt64Builder>(5), e.funding_time);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(6), e.rate);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::BooleanBuilder>(7), e.has_mark_price);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(8), e.mark_price);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::Int64Builder>(9), e.position_id);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::BooleanBuilder>(10), e.is_long);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(11), e.quantity);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(12), e.funding);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::UInt64Builder>(13), e.ts_local);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::Int32Builder>(5), e.instrument_type);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::UInt64Builder>(6), e.funding_time);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(7), e.rate);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::BooleanBuilder>(8), e.has_mark_price);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(9), e.mark_price);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::Int64Builder>(10), e.position_id);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::BooleanBuilder>(11), e.is_long);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(12), e.quantity);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(13), e.funding);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::UInt64Builder>(14), e.ts_local);
         }
     } // namespace FundingEvent
 

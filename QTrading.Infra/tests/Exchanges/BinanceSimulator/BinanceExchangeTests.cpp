@@ -2,6 +2,7 @@
 #include <fstream>
 #include <filesystem>
 #include <optional>
+#include <type_traits>
 
 #include "Exchanges/BinanceSimulator/BinanceExchange.hpp"
 
@@ -9,6 +10,9 @@ using namespace QTrading::Infra::Exchanges::BinanceSim;
 using namespace QTrading::Dto::Market::Binance;
 using namespace QTrading::Utils::Queue;
 namespace fs = std::filesystem;
+
+static_assert(!std::is_move_constructible_v<BinanceExchange>);
+static_assert(!std::is_move_assignable_v<BinanceExchange>);
 
 /// @brief Mock logger that discards all consumed rows.
 class MockLogger : public QTrading::Log::Logger {
@@ -170,10 +174,8 @@ TEST_F(BinanceExchangeFixture, PushOnlyOnChange)
     EXPECT_FALSE(pCh->TryReceive().has_value());
 
     using QTrading::Dto::Trading::OrderSide;
-    using QTrading::Dto::Trading::PositionSide;
-
     /* ---- create an order -> should appear next step -- */
-    ASSERT_TRUE(ex.place_order("BTCUSDT", 1.0, 1.0, OrderSide::Buy, PositionSide::Both, false));
+    ASSERT_TRUE(ex.perp.place_order("BTCUSDT", 1.0, 1.0, OrderSide::Buy));
 
     ex.step();     mCh->Receive();
     auto ordSnap = oCh->Receive();
@@ -207,14 +209,78 @@ TEST_F(BinanceExchangeFixture, SnapshotConsistent)
     EXPECT_TRUE(ex.get_all_positions().empty());
 
     using QTrading::Dto::Trading::OrderSide;
-    using QTrading::Dto::Trading::PositionSide;
-
     // 2) Place market order 0.5 BTC long
-    ASSERT_TRUE(ex.place_order("BTCUSDT", 0.5, 0.0, OrderSide::Buy, PositionSide::Both, false));
+    ASSERT_TRUE(ex.perp.place_order("BTCUSDT", 0.5, OrderSide::Buy));
     ex.step();
 
     EXPECT_EQ(ex.get_all_positions().size(), 1u);
     EXPECT_TRUE(ex.get_all_open_orders().empty());
+}
+
+TEST_F(BinanceExchangeFixture, ConstructWithAccountInitConfig)
+{
+    writeCsv("btc.csv", {
+        {0,1,1,1,1,10, 30000,10,1,0,0}
+        });
+
+    Account::AccountInitConfig cfg;
+    cfg.spot_initial_cash = 100.0;
+    cfg.perp_initial_wallet = 900.0;
+    cfg.vip_level = 0;
+
+    BinanceExchange ex({ {"BTCUSDT",(tmpDir / "btc.csv").string()} }, logger, cfg);
+    auto mCh = ex.get_market_channel();
+    ASSERT_TRUE(ex.step());
+    auto dto = mCh->Receive();
+    ASSERT_TRUE(dto.has_value());
+    EXPECT_EQ(dto->get()->Timestamp, 0u);
+}
+
+TEST_F(BinanceExchangeFixture, DomainFacadeRoutesByInstrumentType)
+{
+    writeCsv("btc.csv", {
+        {0,100,100,100,100,1000, 30000,100,1,0,0}
+        });
+    writeCsv("eth.csv", {
+        {0,100,100,100,100,1000, 30000,100,1,0,0}
+        });
+
+    Account::AccountInitConfig cfg;
+    cfg.spot_initial_cash = 1000.0;
+    cfg.perp_initial_wallet = 1000.0;
+
+    BinanceExchange ex(
+        { {"BTCUSDT",(tmpDir / "btc.csv").string()},
+          {"ETHUSDT",(tmpDir / "eth.csv").string()} },
+        logger,
+        cfg);
+
+    using QTrading::Dto::Trading::OrderSide;
+    ASSERT_TRUE(ex.spot.place_order("BTCUSDT", 1.0, 100.0, OrderSide::Buy));
+    ASSERT_TRUE(ex.perp.place_order("ETHUSDT", 1.0, 100.0, OrderSide::Sell));
+
+    ASSERT_TRUE(ex.step());
+    const auto& pos = ex.get_all_positions();
+    ASSERT_EQ(pos.size(), 2u);
+}
+
+TEST_F(BinanceExchangeFixture, AccountFacadeTransfersRespectAvailability)
+{
+    writeCsv("btc.csv", {
+        {0,100,100,100,100,1000, 30000,100,1,0,0}
+        });
+
+    Account::AccountInitConfig cfg;
+    cfg.spot_initial_cash = 500.0;
+    cfg.perp_initial_wallet = 500.0;
+
+    BinanceExchange ex({ {"BTCUSDT",(tmpDir / "btc.csv").string()} }, logger, cfg);
+    EXPECT_TRUE(ex.account.transfer_spot_to_perp(100.0));
+    EXPECT_TRUE(ex.account.transfer_perp_to_spot(200.0));
+
+    using QTrading::Dto::Trading::OrderSide;
+    ASSERT_TRUE(ex.spot.place_order("BTCUSDT", 3.0, 100.0, OrderSide::Buy));
+    EXPECT_FALSE(ex.account.transfer_spot_to_perp(300.0));
 }
 
 TEST_F(BinanceExchangeFixture, FundingAppliedAndDeduped)
@@ -237,9 +303,7 @@ TEST_F(BinanceExchangeFixture, FundingAppliedAndDeduped)
         /*balance*/ 1000.0);
 
     using QTrading::Dto::Trading::OrderSide;
-    using QTrading::Dto::Trading::PositionSide;
-
-    ASSERT_TRUE(ex.place_order("BTCUSDT", 1.0, 0.0, OrderSide::Buy, PositionSide::Both, false));
+    ASSERT_TRUE(ex.perp.place_order("BTCUSDT", 1.0, OrderSide::Buy));
     auto mCh = ex.get_market_channel();
 
     BinanceExchange::StatusSnapshot snap{};
@@ -274,9 +338,7 @@ TEST_F(BinanceExchangeFixture, NoFundingPathKeepsBalance)
     BinanceExchange ex({ {"BTCUSDT",(tmpDir / "btc.csv").string()} }, logger, /*balance*/ 1000.0);
 
     using QTrading::Dto::Trading::OrderSide;
-    using QTrading::Dto::Trading::PositionSide;
-
-    ASSERT_TRUE(ex.place_order("BTCUSDT", 1.0, 0.0, OrderSide::Buy, PositionSide::Both, false));
+    ASSERT_TRUE(ex.perp.place_order("BTCUSDT", 1.0, OrderSide::Buy));
     auto mCh = ex.get_market_channel();
 
     BinanceExchange::StatusSnapshot snap{};
@@ -292,6 +354,75 @@ TEST_F(BinanceExchangeFixture, NoFundingPathKeepsBalance)
     const double after = snap.wallet_balance;
 
     EXPECT_NEAR(after, base, 1e-8);
+}
+
+TEST_F(BinanceExchangeFixture, ExplicitInstrumentTypeSpotWorksWithoutSuffixSymbol)
+{
+    writeCsv("btc_cash.csv", {
+        {      0, 100,100,100,100,1000, 30000,100,1,0,0 },
+        {  60000, 100,100,100,100,1000, 90000,100,1,0,0 }
+        });
+
+    Account::AccountInitConfig cfg;
+    cfg.spot_initial_cash = 1000.0;
+    cfg.perp_initial_wallet = 0.0;
+
+    BinanceExchange ex(
+        { {"BTCUSDT",
+            (tmpDir / "btc_cash.csv").string(),
+            std::nullopt,
+            QTrading::Dto::Trading::InstrumentType::Spot} },
+        logger,
+        cfg);
+
+    using QTrading::Dto::Trading::OrderSide;
+    // Spot without inventory should reject naked sell.
+    EXPECT_FALSE(ex.spot.place_order("BTCUSDT", 1.0, 100.0, OrderSide::Sell));
+
+    ASSERT_TRUE(ex.spot.place_order("BTCUSDT", 1.0, 100.0, OrderSide::Buy));
+    ASSERT_TRUE(ex.step());
+    ASSERT_EQ(ex.get_all_positions().size(), 1u);
+
+    // Spot leverage stays unlevered even when caller tries to set it.
+    ex.set_symbol_leverage("BTCUSDT", 20.0);
+    EXPECT_DOUBLE_EQ(ex.get_symbol_leverage("BTCUSDT"), 1.0);
+}
+
+TEST_F(BinanceExchangeFixture, StatusSnapshotExposesDualLedgerTotals)
+{
+    writeCsv("btc_spot.csv", {
+        {      0, 100,100,100,100,1000, 30000,100,1,0,0 },
+        {  60000, 110,110,110,110,1000, 90000,100,1,0,0 }
+        });
+
+    Account::AccountInitConfig cfg;
+    cfg.spot_initial_cash = 1000.0;
+    cfg.perp_initial_wallet = 500.0;
+
+    BinanceExchange ex(
+        { {"BTCUSDT",
+            (tmpDir / "btc_spot.csv").string(),
+            std::nullopt,
+            QTrading::Dto::Trading::InstrumentType::Spot} },
+        logger,
+        cfg);
+
+    using QTrading::Dto::Trading::OrderSide;
+    ASSERT_TRUE(ex.spot.place_order("BTCUSDT", 1.0, 100.0, OrderSide::Buy));
+    ASSERT_TRUE(ex.step());
+
+    BinanceExchange::StatusSnapshot snap{};
+    ex.FillStatusSnapshot(snap);
+
+    EXPECT_GT(snap.spot_inventory_value, 0.0);
+    EXPECT_NEAR(
+        snap.spot_ledger_value,
+        snap.spot_cash_balance + snap.spot_inventory_value,
+        1e-9);
+    EXPECT_NEAR(
+        snap.total_ledger_value,
+        snap.perp_margin_balance + snap.spot_ledger_value,
+        1e-9);
 }
 
 

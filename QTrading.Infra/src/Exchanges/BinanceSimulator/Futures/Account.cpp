@@ -10,6 +10,7 @@
 #include <thread>
 
 using QTrading::Dto::Market::Binance::KlineDto;
+using QTrading::Dto::Trading::InstrumentType;
 using QTrading::Dto::Trading::OrderSide;
 using QTrading::Dto::Trading::PositionSide;
 
@@ -175,21 +176,60 @@ static bool order_reserves_open_margin(const Order& o)
     return order_opens_in_hedge_mode(o);
 }
 
+static bool is_perp_instrument(InstrumentType type) noexcept
+{
+    return type == InstrumentType::Perp;
+}
+
+static bool is_spot_instrument(InstrumentType type) noexcept
+{
+    return type == InstrumentType::Spot;
+}
+
+static Account::AccountInitConfig validate_account_init_config(const Account::AccountInitConfig& cfg)
+{
+    auto is_valid_amount = [](double v) {
+        return std::isfinite(v) && v >= 0.0;
+    };
+
+    if (!is_valid_amount(cfg.spot_initial_cash)) {
+        throw std::runtime_error("AccountInitConfig.spot_initial_cash must be finite and >= 0.");
+    }
+    if (!is_valid_amount(cfg.perp_initial_wallet)) {
+        throw std::runtime_error("AccountInitConfig.perp_initial_wallet must be finite and >= 0.");
+    }
+    if (cfg.vip_level < 0) {
+        throw std::runtime_error("AccountInitConfig.vip_level must be >= 0.");
+    }
+    return cfg;
+}
+
 } // namespace
 
 /// @brief Simulated Binance Futures Account implementation.
 /// @details Supports one-way and hedge modes, order matching, margin, fees, and auto-liquidation.
 Account::Account(double initial_balance, int vip_level)
-    : wallet_balance_(initial_balance),
-    balance_(initial_balance),
+    : Account(AccountInitConfig{ 0.0, initial_balance, vip_level })
+{
+}
+
+Account::Account(const AccountInitConfig& init_config)
+    : balance_(0.0),
+    wallet_balance_(0.0),
     used_margin_(0.0),
-    vip_level_(vip_level),
+    vip_level_(0),
     hedge_mode_(false),
     next_order_id_(1),
     next_position_id_(1),
     policies_(DefaultPolicies()),
     tick_memory_(std::pmr::new_delete_resource())
 {
+    const auto cfg = validate_account_init_config(init_config);
+    vip_level_ = cfg.vip_level;
+    spot_cash_balance_ = cfg.spot_initial_cash;
+    wallet_balance_ = cfg.perp_initial_wallet;
+    balance_ = wallet_balance_;
+
     open_orders_.reserve(1024);
     positions_.reserve(1024);
 
@@ -210,7 +250,12 @@ Account::Account(double initial_balance, int vip_level)
 }
 
 Account::Account(double initial_balance, int vip_level, Policies policies)
-    : Account(initial_balance, vip_level)
+    : Account(AccountInitConfig{ 0.0, initial_balance, vip_level }, std::move(policies))
+{
+}
+
+Account::Account(const AccountInitConfig& init_config, Policies policies)
+    : Account(init_config)
 {
     policies_ = std::move(policies);
 }
@@ -236,7 +281,7 @@ size_t Account::max_match_orders_per_symbol() const
 }
 
 static QTrading::Dto::Account::BalanceSnapshot build_snapshot(
-    double wallet_balance,
+    double perp_wallet_balance,
     const std::vector<Position>& positions,
     const std::vector<Order>& open_orders,
     const std::unordered_map<std::string, double>& symbol_leverage,
@@ -245,12 +290,15 @@ static QTrading::Dto::Account::BalanceSnapshot build_snapshot(
     double market_slippage_buffer)
 {
     QTrading::Dto::Account::BalanceSnapshot s;
-    s.WalletBalance = wallet_balance;
+    s.WalletBalance = perp_wallet_balance;
 
     double unreal = 0.0;
     double posInit = 0.0;
     double maint = 0.0;
     for (const auto& p : positions) {
+        if (!is_perp_instrument(p.instrument_type)) {
+            continue;
+        }
         unreal += p.unrealized_pnl;
         posInit += p.initial_margin;
         maint += p.maintenance_margin;
@@ -287,6 +335,9 @@ static QTrading::Dto::Account::BalanceSnapshot build_snapshot(
     // - hedge: only opening-direction orders reserve margin
     double openOrdInit = 0.0;
     for (const auto& o : open_orders) {
+        if (!is_perp_instrument(o.instrument_type)) {
+            continue;
+        }
         if (!order_reserves_open_margin(o)) continue;
 
         const double notional = estimate_notional(o);
@@ -302,11 +353,63 @@ static QTrading::Dto::Account::BalanceSnapshot build_snapshot(
 }
 
 QTrading::Dto::Account::BalanceSnapshot Account::get_balance() const {
+    return get_perp_balance();
+}
+
+QTrading::Dto::Account::BalanceSnapshot Account::get_perp_balance() const
+{
     if (balance_cache_version_ != balance_version_) {
         balance_cache_ = build_snapshot(wallet_balance_, positions_, open_orders_, symbol_leverage_, symbol_id_by_name_, last_mark_price_by_id_, market_slippage_buffer_);
         balance_cache_version_ = balance_version_;
     }
     return balance_cache_;
+}
+
+QTrading::Dto::Account::BalanceSnapshot Account::get_spot_balance() const
+{
+    QTrading::Dto::Account::BalanceSnapshot s;
+    s.WalletBalance = spot_cash_balance_;
+    const auto fee_rates = get_fee_rates();
+    const double worst_fee_rate = std::max(0.0, std::max(std::get<0>(fee_rates), std::get<1>(fee_rates)));
+
+    double reserved = 0.0;
+    for (const auto& ord : open_orders_) {
+        if (!is_spot_instrument(ord.instrument_type)) {
+            continue;
+        }
+        if (ord.side != OrderSide::Buy || ord.closing_position_id >= 0 || ord.reduce_only) {
+            continue;
+        }
+        if (ord.quantity <= 0.0) {
+            continue;
+        }
+
+        if (ord.price > 0.0) {
+            reserved += ord.quantity * ord.price * (1.0 + worst_fee_rate);
+            continue;
+        }
+
+        const auto it = symbol_id_by_name_.find(ord.symbol);
+        if (it == symbol_id_by_name_.end()) {
+            continue;
+        }
+        const size_t sym_id = it->second;
+        if (sym_id >= last_mark_price_by_id_.size()) {
+            continue;
+        }
+        const double mark = last_mark_price_by_id_[sym_id];
+        if (!std::isfinite(mark) || mark <= 0.0) {
+            continue;
+        }
+        const double notional = ord.quantity * mark * (1.0 + std::max(0.0, market_slippage_buffer_));
+        reserved += notional * (1.0 + worst_fee_rate);
+    }
+
+    s.OpenOrderInitialMargin = reserved;
+    s.AvailableBalance = std::max(0.0, spot_cash_balance_ - reserved);
+    s.MarginBalance = spot_cash_balance_;
+    s.Equity = spot_cash_balance_;
+    return s;
 }
 
 void Account::set_market_slippage_buffer(double pct)
@@ -420,20 +523,62 @@ double Account::get_wallet_balance() const {
     return wallet_balance_;
 }
 
+double Account::get_spot_cash_balance() const {
+    return spot_cash_balance_;
+}
+
+double Account::get_total_cash_balance() const {
+    return wallet_balance_ + spot_cash_balance_;
+}
+
+bool Account::transfer_spot_to_perp(double amount)
+{
+    if (!std::isfinite(amount) || amount <= 0.0) {
+        return false;
+    }
+    const auto spot = get_spot_balance();
+    if (spot.AvailableBalance + 1e-12 < amount) {
+        return false;
+    }
+    spot_cash_balance_ -= amount;
+    wallet_balance_ += amount;
+    balance_ = wallet_balance_;
+    mark_balance_dirty_();
+    ++state_version_;
+    return true;
+}
+
+bool Account::transfer_perp_to_spot(double amount)
+{
+    if (!std::isfinite(amount) || amount <= 0.0) {
+        return false;
+    }
+    const auto perp = get_perp_balance();
+    if (perp.AvailableBalance + 1e-12 < amount) {
+        return false;
+    }
+    wallet_balance_ -= amount;
+    balance_ = wallet_balance_;
+    spot_cash_balance_ += amount;
+    mark_balance_dirty_();
+    ++state_version_;
+    return true;
+}
+
 double Account::get_margin_balance() const {
-    return get_balance().MarginBalance;
+    return get_perp_balance().MarginBalance;
 }
 
 double Account::get_available_balance() const {
-    return get_balance().AvailableBalance;
+    return get_perp_balance().AvailableBalance;
 }
 
 double Account::total_unrealized_pnl() const {
-    return get_balance().UnrealizedPnl;
+    return get_perp_balance().UnrealizedPnl;
 }
 
 double Account::get_equity() const {
-    return get_balance().MarginBalance;
+    return get_perp_balance().MarginBalance;
 }
 
 /// @brief Switch between one-way mode and hedge mode.
@@ -461,10 +606,42 @@ bool Account::is_hedge_mode() const {
     return hedge_mode_;
 }
 
+const QTrading::Dto::Trading::InstrumentSpec& Account::resolve_instrument_spec_(const std::string& symbol) const
+{
+    return instrument_registry_.Resolve(symbol);
+}
+
+void Account::set_instrument_type(const std::string& symbol, InstrumentType type)
+{
+    instrument_registry_.Set(symbol, type);
+    if (type == InstrumentType::Spot) {
+        symbol_leverage_.erase(symbol);
+    }
+    mark_balance_dirty_();
+}
+
+void Account::set_instrument_spec(const std::string& symbol, const QTrading::Dto::Trading::InstrumentSpec& spec)
+{
+    instrument_registry_.Set(symbol, spec);
+    if (spec.type == InstrumentType::Spot || spec.max_leverage <= 1.0) {
+        symbol_leverage_.erase(symbol);
+    }
+    mark_balance_dirty_();
+}
+
+QTrading::Dto::Trading::InstrumentSpec Account::get_instrument_spec(const std::string& symbol) const
+{
+    return resolve_instrument_spec_(symbol);
+}
+
 /// @brief Get the current leverage for a symbol.
 /// @param symbol Trading symbol.
 /// @return Leverage multiplier (default 1.0).
 double Account::get_symbol_leverage(const std::string& symbol) const {
+    const auto& spec = resolve_instrument_spec_(symbol);
+    if (spec.type == InstrumentType::Spot || spec.max_leverage <= 1.0) {
+        return 1.0;
+    }
     auto it = symbol_leverage_.find(symbol);
     return (it != symbol_leverage_.end()) ? it->second : 1.0;
 }
@@ -476,6 +653,21 @@ double Account::get_symbol_leverage(const std::string& symbol) const {
 void Account::set_symbol_leverage(const std::string& symbol, double newLeverage) {
     if (newLeverage <= 0)
         throw std::runtime_error("Leverage must be > 0.");
+    const auto& spec = resolve_instrument_spec_(symbol);
+    if (spec.type == InstrumentType::Spot || spec.max_leverage <= 1.0) {
+        // Spot (or explicitly unlevered instruments) are always 1x.
+        const auto erased = symbol_leverage_.erase(symbol);
+        if (erased > 0) {
+            mark_balance_dirty_();
+        }
+        return;
+    }
+    if (newLeverage > spec.max_leverage) {
+        if (enable_console_output_) {
+            std::cerr << "[set_symbol_leverage] leverage exceeds instrument max.\n";
+        }
+        return;
+    }
     double oldLev = 1.0;
     auto it = symbol_leverage_.find(symbol);
     if (it != symbol_leverage_.end()) {
@@ -531,6 +723,119 @@ bool Account::place_order(const std::string& symbol,
         return false;
     }
 
+    const auto& instrument_spec = resolve_instrument_spec_(symbol);
+    const bool is_spot_symbol = instrument_spec.type == InstrumentType::Spot;
+    if (is_spot_symbol && hedge_mode_) {
+        if (enable_console_output_) {
+            std::cerr << "[place_order] Spot symbol does not support hedge mode.\n";
+        }
+        return false;
+    }
+
+    if (is_spot_symbol && position_side != PositionSide::Both) {
+        position_side = PositionSide::Both;
+    }
+
+    if (is_spot_symbol && side == OrderSide::Buy && !reduce_only) {
+        double notional_est = 0.0;
+        if (price > 0.0) {
+            notional_est = quantity * price;
+        }
+        else {
+            auto it = symbol_id_by_name_.find(symbol);
+            if (it != symbol_id_by_name_.end()) {
+                const size_t sym_id = it->second;
+                if (sym_id < last_mark_price_by_id_.size()) {
+                    const double mark = last_mark_price_by_id_[sym_id];
+                    if (std::isfinite(mark) && mark > 0.0) {
+                        notional_est = quantity * mark * (1.0 + std::max(0.0, market_slippage_buffer_));
+                    }
+                }
+            }
+        }
+
+        if (notional_est > 0.0) {
+            const auto fee_rates = get_fee_rates();
+            const double worst_fee_rate = std::max(0.0, std::max(std::get<0>(fee_rates), std::get<1>(fee_rates)));
+            const double required_cash = notional_est * (1.0 + worst_fee_rate);
+            const auto spot_bal = get_spot_balance();
+            if (spot_bal.AvailableBalance + 1e-12 < required_cash) {
+                if (enable_console_output_) {
+                    std::cerr << "[place_order] Spot buy rejected: insufficient spot available cash.\n";
+                }
+                return false;
+            }
+        }
+    }
+
+    if (!instrument_spec.allow_short && side == OrderSide::Sell) {
+        double held_qty = 0.0;
+        int held_position_id = -1;
+        auto it = position_indices_by_symbol_.find(symbol);
+        if (it != position_indices_by_symbol_.end()) {
+            for (size_t idx : it->second) {
+                if (idx >= positions_.size()) {
+                    continue;
+                }
+                const auto& p = positions_[idx];
+                if (p.symbol != symbol || !p.is_long || p.quantity <= 1e-8) {
+                    continue;
+                }
+                held_qty += p.quantity;
+                if (held_position_id < 0) {
+                    held_position_id = p.id;
+                }
+            }
+        }
+
+        double pending_close_qty = 0.0;
+        for (const auto& ord : open_orders_) {
+            if (ord.symbol != symbol || ord.side != OrderSide::Sell || ord.quantity <= 1e-8) {
+                continue;
+            }
+            if (ord.closing_position_id >= 0 || ord.reduce_only) {
+                pending_close_qty += ord.quantity;
+            }
+        }
+
+        const double sellable_qty = std::max(0.0, held_qty - pending_close_qty);
+        if (sellable_qty <= 1e-8) {
+            if (enable_console_output_) {
+                std::cerr << "[place_order] Spot sell rejected: no available spot inventory.\n";
+            }
+            return false;
+        }
+        if (quantity > sellable_qty + 1e-8) {
+            if (enable_console_output_) {
+                std::cerr << "[place_order] Spot sell rejected: quantity exceeds available inventory.\n";
+            }
+            return false;
+        }
+        if (held_position_id < 0) {
+            if (enable_console_output_) {
+                std::cerr << "[place_order] Spot sell rejected: no long position to close.\n";
+            }
+            return false;
+        }
+
+        const int oid = generate_order_id();
+        Order closingOrd{
+            oid,
+            symbol,
+            quantity,
+            price,
+            OrderSide::Sell,
+            PositionSide::Both,
+            reduce_only,
+            held_position_id
+        };
+        closingOrd.instrument_type = instrument_spec.type;
+        open_orders_.push_back(closingOrd);
+        mark_open_orders_dirty_();
+        ++state_version_;
+        return true;
+    }
+
     if (!hedge_mode_ && position_side != PositionSide::Both) {
         position_side = PositionSide::Both;
     }
@@ -544,7 +849,7 @@ bool Account::place_order(const std::string& symbol,
     }
 
     // In one-way mode, attempt to process reverse (flip) orders.
-    if (!hedge_mode_) {
+    if (!hedge_mode_ && !is_spot_symbol) {
         if (handleOneWayReverseOrder(symbol, quantity, price, side))
             return true;
     }
@@ -582,6 +887,7 @@ bool Account::place_order(const std::string& symbol,
         reduce_only,
         -1
     };
+    newOrd.instrument_type = instrument_spec.type;
     open_orders_.push_back(newOrd);
     mark_open_orders_dirty_();
     ++state_version_;
@@ -605,6 +911,7 @@ bool Account::place_order(const std::string& symbol,
 /// @return true if the order was converted into a closing/reverse order.
 bool Account::handleOneWayReverseOrder(const std::string& symbol, double quantity, double price, OrderSide side) {
     // In one-way mode we maintain at most one net position per symbol.
+    const auto symbol_type = resolve_instrument_spec_(symbol).type;
     auto it = position_indices_by_symbol_.find(symbol);
     if (it == position_indices_by_symbol_.end() || it->second.empty()) {
         return false;
@@ -639,6 +946,7 @@ bool Account::handleOneWayReverseOrder(const std::string& symbol, double quantit
             false,
             pos.id
         };
+        closingOrd.instrument_type = symbol_type;
         open_orders_.push_back(closingOrd);
         mark_open_orders_dirty_();
         return true;
@@ -657,6 +965,7 @@ bool Account::handleOneWayReverseOrder(const std::string& symbol, double quantit
             false,
             pos.id
         };
+        closingOrd.instrument_type = symbol_type;
         open_orders_.push_back(closingOrd);
     }
 
@@ -674,6 +983,7 @@ bool Account::handleOneWayReverseOrder(const std::string& symbol, double quantit
             false,
             -1
         };
+        newOpen.instrument_type = symbol_type;
         open_orders_.push_back(newOpen);
     }
     mark_open_orders_dirty_();
@@ -700,6 +1010,7 @@ void Account::place_closing_order(int position_id, double quantity, double price
             false,
             position_id
         };
+        closingOrd.instrument_type = pos.instrument_type;
         open_orders_.push_back(closingOrd);
         mark_open_orders_dirty_();
         return;
@@ -1063,11 +1374,15 @@ void Account::update_positions(const std::unordered_map<std::string, KlineDto>& 
                 fill.fee = fee;
                 fill.fee_rate = feeRate;
                 fill.closing_position_id = ord.closing_position_id;
+                fill.instrument_type = ord.instrument_type;
                 if (kptr) {
                     update_pnl_for_symbol(fill.symbol, close_price);
                 }
                 mark_balance_dirty_();
-                fill.balance_snapshot = get_balance();
+                fill.perp_balance_snapshot = get_perp_balance();
+                fill.spot_balance_snapshot = get_spot_balance();
+                fill.total_cash_balance_snapshot = get_total_cash_balance();
+                fill.balance_snapshot = fill.perp_balance_snapshot;
                 fill.positions_snapshot = positions_;
                 fill_events_.push_back(std::move(fill));
             }
@@ -1124,8 +1439,17 @@ void Account::update_positions(const std::unordered_map<std::string, KlineDto>& 
         pos.unrealized_pnl = (cp - pos.entry_price) * pos.quantity * (pos.is_long ? 1.0 : -1.0);
     }
 
-    auto snapshot = get_balance();
-    if (snapshot.MarginBalance < snapshot.MaintenanceMargin && !positions_.empty()) {
+    auto has_perp_position = [&]() {
+        for (const auto& p : positions_) {
+            if (is_perp_instrument(p.instrument_type) && p.quantity > 1e-8) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    auto snapshot = get_perp_balance();
+    if (snapshot.MarginBalance < snapshot.MaintenanceMargin && has_perp_position()) {
         positions_changed = true;
         constexpr int kMaxLiquidationStepsPerTick = 8;
 
@@ -1135,7 +1459,9 @@ void Account::update_positions(const std::unordered_map<std::string, KlineDto>& 
         const size_t open_before = open_orders_.size();
         open_orders_.erase(
             std::remove_if(open_orders_.begin(), open_orders_.end(),
-                [](const Order& o) { return o.closing_position_id < 0; }),
+                [](const Order& o) {
+                    return is_perp_instrument(o.instrument_type) && o.closing_position_id < 0;
+                }),
             open_orders_.end());
         if (open_orders_.size() != open_before) {
             open_orders_changed = true;
@@ -1144,14 +1470,17 @@ void Account::update_positions(const std::unordered_map<std::string, KlineDto>& 
         rebuild_open_order_index_();
 
         for (int step = 0; step < kMaxLiquidationStepsPerTick; ++step) {
-            snapshot = get_balance();
-            if (positions_.empty()) break;
+            snapshot = get_perp_balance();
+            if (!has_perp_position()) break;
             if (snapshot.MarginBalance >= snapshot.MaintenanceMargin) break;
 
             int worst_idx = -1;
             double worst_unreal = 0.0;
             for (int i = 0; i < static_cast<int>(positions_.size()); ++i) {
-                if (i == 0 || positions_[i].unrealized_pnl < worst_unreal) {
+                if (!is_perp_instrument(positions_[i].instrument_type)) {
+                    continue;
+                }
+                if (worst_idx < 0 || positions_[i].unrealized_pnl < worst_unreal) {
                     worst_unreal = positions_[i].unrealized_pnl;
                     worst_idx = i;
                 }
@@ -1209,6 +1538,7 @@ void Account::update_positions(const std::unordered_map<std::string, KlineDto>& 
                 false,
                 pos.id
             };
+            liqOrd.instrument_type = pos.instrument_type;
 
             const double notional = close_qty * liq_price;
             const double fee = notional * fee_model.taker_fee;
@@ -1231,11 +1561,15 @@ void Account::update_positions(const std::unordered_map<std::string, KlineDto>& 
             fill.fee = fee;
             fill.fee_rate = fee_model.taker_fee;
             fill.closing_position_id = liqOrd.closing_position_id;
+            fill.instrument_type = liqOrd.instrument_type;
             if (kptr) {
                 update_pnl_for_symbol(fill.symbol, kptr->ClosePrice);
             }
             mark_balance_dirty_();
-            fill.balance_snapshot = get_balance();
+            fill.perp_balance_snapshot = get_perp_balance();
+            fill.spot_balance_snapshot = get_spot_balance();
+            fill.total_cash_balance_snapshot = get_total_cash_balance();
+            fill.balance_snapshot = fill.perp_balance_snapshot;
             fill.positions_snapshot = positions_;
             fill_events_.push_back(std::move(fill));
 
@@ -1261,22 +1595,35 @@ void Account::update_positions(const std::unordered_map<std::string, KlineDto>& 
             }
         }
 
-        snapshot = get_balance();
-        if (!positions_.empty() && snapshot.MarginBalance < snapshot.MaintenanceMargin) {
+        snapshot = get_perp_balance();
+        if (has_perp_position() && snapshot.MarginBalance < snapshot.MaintenanceMargin) {
             std::cerr << "[update_positions] Liquidation unresolved after steps, forcing account bankruptcy\n";
             wallet_balance_ = 0.0;
             used_margin_ = 0.0;
-            positions_.clear();
+            positions_.erase(
+                std::remove_if(positions_.begin(), positions_.end(),
+                    [](const Position& p) { return is_perp_instrument(p.instrument_type); }),
+                positions_.end());
             mark_balance_dirty_();
-            position_indices_by_symbol_.clear();
+            rebuild_position_index_();
             if (!open_orders_.empty()) {
-                open_orders_.clear();
+                const auto before = open_orders_.size();
+                open_orders_.erase(
+                    std::remove_if(open_orders_.begin(), open_orders_.end(),
+                        [](const Order& o) { return is_perp_instrument(o.instrument_type); }),
+                    open_orders_.end());
+                if (open_orders_.size() != before) {
                 open_orders_changed = true;
                 mark_open_orders_dirty_();
+                }
+                rebuild_open_order_index_();
             }
             order_to_position_.clear();
-            open_order_index_by_id_.clear();
-            position_index_by_id_.clear();
+            for (const auto& p : positions_) {
+                if (p.order_id > 0) {
+                    order_to_position_[p.order_id] = p.id;
+                }
+            }
         }
     }
 
@@ -1286,12 +1633,17 @@ void Account::update_positions(const std::unordered_map<std::string, KlineDto>& 
 
         const double mark = itp->second.ClosePrice;
         p.notional = std::abs(p.quantity * mark);
+        const auto& instrument_spec = resolve_instrument_spec_(p.symbol);
+        if (!instrument_spec.maintenance_margin_enabled) {
+            p.maintenance_margin = 0.0;
+            continue;
+        }
         double mmr, maxLev;
         std::tie(mmr, maxLev) = get_tier_info(p.notional);
         p.maintenance_margin = p.notional * mmr;
     }
 
-    snapshot = get_balance();
+    snapshot = get_perp_balance();
     if (enable_console_output_) {
         std::cout << "[update_positions] marginBalance=" << snapshot.MarginBalance
             << ", maintenanceMargin=" << snapshot.MaintenanceMargin
@@ -1319,6 +1671,9 @@ std::vector<Account::FundingApplyResult> Account::apply_funding(
     const std::string& symbol, uint64_t /*funding_time*/, double rate, double mark_price)
 {
     std::vector<FundingApplyResult> results;
+    if (!resolve_instrument_spec_(symbol).funding_enabled) {
+        return results;
+    }
     if (!std::isfinite(mark_price) || mark_price <= 0.0) {
         return results;
     }
@@ -1336,6 +1691,7 @@ std::vector<Account::FundingApplyResult> Account::apply_funding(
         auto& pos = positions_[idx];
         if (pos.symbol != symbol) continue;
         if (pos.quantity <= 0.0) continue;
+        if (!is_perp_instrument(pos.instrument_type)) continue;
 
         const double notional = std::abs(pos.quantity) * mark_price;
         if (notional <= 0.0) continue;
@@ -1385,10 +1741,18 @@ void Account::processClosingOrder(Order& ord, double fill_qty, double fill_price
     double freed_maint = pos.maintenance_margin * ratio;
     double freed_fee = pos.fee * ratio;
 
-    wallet_balance_ += realized_pnl;
-    wallet_balance_ -= fee;
-
-    used_margin_ -= freed_margin;
+    if (is_spot_instrument(pos.instrument_type)) {
+        const double proceeds = fill_price * close_qty;
+        spot_cash_balance_ += proceeds;
+        spot_cash_balance_ -= fee;
+        freed_margin = 0.0;
+        freed_maint = 0.0;
+    }
+    else {
+        wallet_balance_ += realized_pnl;
+        wallet_balance_ -= fee;
+        used_margin_ -= freed_margin;
+    }
 
     pos.quantity -= close_qty;
     pos.initial_margin -= freed_margin;
@@ -1633,29 +1997,71 @@ bool Account::processReduceOnlyOrder(Order& ord, double fill_qty, double fill_pr
 
 void Account::processNormalOpeningOrder(Order& ord, double fill_qty, double fill_price, double notional,
     double fee, double feeRate, std::vector<Order>& leftover) {
-
-    double lev = get_symbol_leverage(ord.symbol);
-    double mmr, maxLev;
-    std::tie(mmr, maxLev) = get_tier_info(notional);
-    if (lev > maxLev) {
+    const auto& instrument_spec = resolve_instrument_spec_(ord.symbol);
+    const bool is_spot_symbol = instrument_spec.type == InstrumentType::Spot;
+    if (!instrument_spec.allow_short && ord.side != OrderSide::Buy) {
         if (enable_console_output_) {
-            std::cerr << "[processNormalOpeningOrder] Leverage too high for order id=" << ord.id << "\n";
+            std::cerr << "[processNormalOpeningOrder] Spot open order must be BUY. id=" << ord.id << "\n";
+        }
+        leftover.push_back(ord);
+        return;
+    }
+    if (is_spot_symbol && hedge_mode_) {
+        if (enable_console_output_) {
+            std::cerr << "[processNormalOpeningOrder] Spot symbol does not support hedge mode. id=" << ord.id << "\n";
         }
         leftover.push_back(ord);
         return;
     }
 
-    const double init_margin = notional / lev;
-    const double maint_margin = notional * mmr;
-
-    const auto snap = get_balance();
-    const double required = init_margin + fee;
-    if (snap.AvailableBalance < required) {
-        if (enable_console_output_) {
-            std::cerr << "[processNormalOpeningOrder] Not enough available balance for order id=" << ord.id << "\n";
+    double lev = is_spot_symbol ? 1.0 : get_symbol_leverage(ord.symbol);
+    double init_margin = 0.0;
+    double maint_margin = 0.0;
+    if (is_spot_symbol) {
+        init_margin = notional;
+        maint_margin = 0.0;
+    }
+    else {
+        double mmr, maxLev;
+        std::tie(mmr, maxLev) = get_tier_info(notional);
+        if (instrument_spec.max_leverage > 0.0 && lev > instrument_spec.max_leverage) {
+            if (enable_console_output_) {
+                std::cerr << "[processNormalOpeningOrder] Instrument leverage cap exceeded for order id=" << ord.id << "\n";
+            }
+            leftover.push_back(ord);
+            return;
         }
-        leftover.push_back(ord);
-        return;
+        if (lev > maxLev) {
+            if (enable_console_output_) {
+                std::cerr << "[processNormalOpeningOrder] Leverage too high for order id=" << ord.id << "\n";
+            }
+            leftover.push_back(ord);
+            return;
+        }
+        init_margin = notional / lev;
+        maint_margin = notional * mmr;
+    }
+
+    if (is_spot_symbol) {
+        const double required_cash = notional + fee;
+        if (spot_cash_balance_ + 1e-12 < required_cash) {
+            if (enable_console_output_) {
+                std::cerr << "[processNormalOpeningOrder] Not enough spot cash for order id=" << ord.id << "\n";
+            }
+            leftover.push_back(ord);
+            return;
+        }
+    }
+    else {
+        const auto snap = get_perp_balance();
+        const double required = init_margin + fee;
+        if (snap.AvailableBalance < required) {
+            if (enable_console_output_) {
+                std::cerr << "[processNormalOpeningOrder] Not enough available balance for order id=" << ord.id << "\n";
+            }
+            leftover.push_back(ord);
+            return;
+        }
     }
 
     if (hedge_mode_ && ord.position_side == PositionSide::Both) {
@@ -1666,8 +2072,13 @@ void Account::processNormalOpeningOrder(Order& ord, double fill_qty, double fill
         return;
     }
 
-    wallet_balance_ -= fee;
-    used_margin_ += init_margin;
+    if (is_spot_symbol) {
+        spot_cash_balance_ -= (notional + fee);
+    }
+    else {
+        wallet_balance_ -= fee;
+        used_margin_ += init_margin;
+    }
 
     auto pm = order_to_position_.find(ord.id);
     if (pm == order_to_position_.end()) {
@@ -1684,11 +2095,12 @@ void Account::processNormalOpeningOrder(Order& ord, double fill_qty, double fill
             pos_is_long,
             0.0,
             notional,
-            init_margin,
+            is_spot_symbol ? 0.0 : init_margin,
             maint_margin,
             fee,
             lev,
-            feeRate
+            feeRate,
+            ord.instrument_type
             });
         order_to_position_[ord.id] = pid;
         rebuild_position_index_();
@@ -1707,9 +2119,10 @@ void Account::processNormalOpeningOrder(Order& ord, double fill_qty, double fill
             pos.quantity = new_qty;
             pos.entry_price = new_entry;
             pos.notional += notional;
-            pos.initial_margin += init_margin;
+            pos.initial_margin += is_spot_symbol ? 0.0 : init_margin;
             pos.maintenance_margin += maint_margin;
             pos.fee += fee;
+            pos.instrument_type = ord.instrument_type;
         }
         else {
             // Fallback: index out of sync, do linear search.
@@ -1724,9 +2137,10 @@ void Account::processNormalOpeningOrder(Order& ord, double fill_qty, double fill
                     pos.quantity = new_qty;
                     pos.entry_price = new_entry;
                     pos.notional += notional;
-                    pos.initial_margin += init_margin;
+                    pos.initial_margin += is_spot_symbol ? 0.0 : init_margin;
                     pos.maintenance_margin += maint_margin;
                     pos.fee += fee;
+                    pos.instrument_type = ord.instrument_type;
                     break;
                 }
             }

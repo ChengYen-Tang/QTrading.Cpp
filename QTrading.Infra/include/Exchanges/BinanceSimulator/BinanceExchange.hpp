@@ -43,9 +43,81 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
             std::string symbol;
             std::string kline_csv;
             std::optional<std::string> funding_csv;
+            std::optional<QTrading::Dto::Trading::InstrumentType> instrument_type;
 
-            SymbolDataset(std::string sym, std::string kline, std::optional<std::string> funding)
-                : symbol(std::move(sym)), kline_csv(std::move(kline)), funding_csv(std::move(funding)) {}
+            SymbolDataset(std::string sym,
+                std::string kline,
+                std::optional<std::string> funding,
+                std::optional<QTrading::Dto::Trading::InstrumentType> type = std::nullopt)
+                : symbol(std::move(sym)),
+                kline_csv(std::move(kline)),
+                funding_csv(std::move(funding)),
+                instrument_type(type) {}
+        };
+
+        class SpotApi {
+        public:
+            explicit SpotApi(BinanceExchange& owner) : owner_(owner) {}
+
+            bool place_order(const std::string& symbol,
+                double quantity,
+                double price,
+                QTrading::Dto::Trading::OrderSide side,
+                bool reduce_only = false);
+
+            bool place_order(const std::string& symbol,
+                double quantity,
+                QTrading::Dto::Trading::OrderSide side,
+                bool reduce_only = false);
+
+            void close_position(const std::string& symbol, double price = 0.0);
+            void cancel_open_orders(const std::string& symbol);
+
+        private:
+            BinanceExchange& owner_;
+        };
+
+        class PerpApi {
+        public:
+            explicit PerpApi(BinanceExchange& owner) : owner_(owner) {}
+
+            bool place_order(const std::string& symbol,
+                double quantity,
+                double price,
+                QTrading::Dto::Trading::OrderSide side,
+                QTrading::Dto::Trading::PositionSide position_side = QTrading::Dto::Trading::PositionSide::Both,
+                bool reduce_only = false);
+
+            bool place_order(const std::string& symbol,
+                double quantity,
+                QTrading::Dto::Trading::OrderSide side,
+                QTrading::Dto::Trading::PositionSide position_side = QTrading::Dto::Trading::PositionSide::Both,
+                bool reduce_only = false);
+
+            void close_position(const std::string& symbol, double price = 0.0);
+            void close_position(const std::string& symbol,
+                QTrading::Dto::Trading::PositionSide position_side,
+                double price = 0.0);
+            void cancel_open_orders(const std::string& symbol);
+            void set_symbol_leverage(const std::string& symbol, double new_leverage);
+            double get_symbol_leverage(const std::string& symbol) const;
+
+        private:
+            BinanceExchange& owner_;
+        };
+
+        class AccountApi {
+        public:
+            explicit AccountApi(BinanceExchange& owner) : owner_(owner) {}
+
+            QTrading::Dto::Account::BalanceSnapshot get_spot_balance() const;
+            QTrading::Dto::Account::BalanceSnapshot get_perp_balance() const;
+            double get_total_cash_balance() const;
+            bool transfer_spot_to_perp(double amount);
+            bool transfer_perp_to_spot(double amount);
+
+        private:
+            BinanceExchange& owner_;
         };
 
         /// @brief Construct with CSV mappings, logger, initial balance and VIP level.
@@ -58,6 +130,10 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
             double  init_balance = 1'000'000.0,
             int     vip_level = 0,
             uint64_t run_id = 0);
+        BinanceExchange(const std::vector<std::pair<std::string, std::string>>& symbolCsv,
+            std::shared_ptr<QTrading::Log::Logger> logger,
+            const Account::AccountInitConfig& account_init,
+            uint64_t run_id = 0);
 
         /// @brief Construct with kline + optional funding CSV mappings.
         /// @param datasets Vector of (symbol, kline_csv, optional funding_csv).
@@ -68,6 +144,10 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
             std::shared_ptr<QTrading::Log::Logger> logger,
             double  init_balance = 1'000'000.0,
             int     vip_level = 0,
+            uint64_t run_id = 0);
+        BinanceExchange(const std::vector<SymbolDataset>& datasets,
+            std::shared_ptr<QTrading::Log::Logger> logger,
+            const Account::AccountInitConfig& account_init,
             uint64_t run_id = 0);
 
         /// @brief Construct with CSV mappings, logger, and existing Account.
@@ -89,28 +169,9 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
             uint64_t run_id = 0);
         ~BinanceExchange();
 
-        /// @copydoc IExchange::place_order
-        bool place_order(const std::string& symbol,
-            double quantity,
-            double price,
-            QTrading::Dto::Trading::OrderSide side,
-            QTrading::Dto::Trading::PositionSide position_side = QTrading::Dto::Trading::PositionSide::Both,
-            bool reduce_only = false) override;
-        /// @copydoc IExchange::place_order
-        bool place_order(const std::string& symbol,
-            double quantity,
-            QTrading::Dto::Trading::OrderSide side,
-            QTrading::Dto::Trading::PositionSide position_side = QTrading::Dto::Trading::PositionSide::Both,
-            bool reduce_only = false) override;
-
-        /// @copydoc IExchange::close_position
-        void close_position(const std::string& symbol, double price) override;
-        /// @copydoc IExchange::close_position
-        void close_position(const std::string& symbol) override;
-        /// @copydoc IExchange::close_position
-        void close_position(const std::string& symbol,
-            QTrading::Dto::Trading::PositionSide position_side,
-            double price = 0.0) override;
+        SpotApi spot;
+        PerpApi perp;
+        AccountApi account;
 
         /// @copydoc IExchange::step
         bool  step() override;
@@ -120,12 +181,20 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
         /// @copydoc IExchange::get_all_open_orders
         const std::vector<dto::Order>& get_all_open_orders() const override;
         /// @copydoc IExchange::set_symbol_leverage
+        /// @note Legacy top-level API kept for compatibility.
+        ///       New code should prefer `exchange.perp.set_symbol_leverage(...)`.
         void set_symbol_leverage(const std::string& symbol, double new_leverage) override;
         /// @copydoc IExchange::get_symbol_leverage
+        /// @note Legacy top-level API kept for compatibility.
+        ///       New code should prefer `exchange.perp.get_symbol_leverage(...)`.
         double get_symbol_leverage(const std::string& symbol) const override;
+        QTrading::Dto::Account::BalanceSnapshot get_spot_balance() const;
+        QTrading::Dto::Account::BalanceSnapshot get_perp_balance() const;
+        double get_total_cash_balance() const;
+        bool transfer_spot_to_perp(double amount);
+        bool transfer_perp_to_spot(double amount);
         /// @brief Close all channels and mark simulation complete.
         void  close() override;
-        void  cancel_open_orders(const std::string& symbol) override;
 
         struct StatusSnapshot {
             struct PriceSnapshot {
@@ -135,11 +204,24 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
             };
 
             uint64_t ts_exchange{ 0 };
+            // Legacy perp-oriented fields kept for compatibility.
             double wallet_balance{ 0.0 };
             double margin_balance{ 0.0 };
             double available_balance{ 0.0 };
             double unrealized_pnl{ 0.0 };
             double total_unrealized_pnl{ 0.0 };
+
+            // Dual-ledger status fields.
+            double perp_wallet_balance{ 0.0 };
+            double perp_margin_balance{ 0.0 };
+            double perp_available_balance{ 0.0 };
+            double spot_cash_balance{ 0.0 };
+            double spot_available_balance{ 0.0 };
+            double spot_inventory_value{ 0.0 };
+            double spot_ledger_value{ 0.0 };
+            double total_cash_balance{ 0.0 };
+            double total_ledger_value{ 0.0 };
+
             double progress_pct{ 0.0 };
             std::vector<PriceSnapshot> prices;
         };
@@ -165,7 +247,7 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
         std::vector<std::unique_ptr<FundingRateData>> funding_md_; ///< Optional funding data per symbol.
         std::vector<size_t>                         funding_cursor_; ///< Funding read index per symbol.
         std::vector<uint8_t>                        has_funding_;
-        std::shared_ptr<Account>                    account;  ///< Simulated margin account engine.
+        std::shared_ptr<Account>                    account_engine_;  ///< Simulated margin account engine.
         mutable std::mutex                          account_mtx_;
 
         std::vector<dto::Position> last_pos_snapshot;   ///< Last-debounced snapshot of positions.
@@ -190,7 +272,10 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
             std::vector<dto::Position> positions;
             std::vector<dto::Order> orders;
             std::vector<QTrading::Log::FileLogger::FeatherV2::FundingEventDto> funding_events;
-            QTrading::Dto::Account::BalanceSnapshot balance;
+            QTrading::Dto::Account::BalanceSnapshot perp_balance;
+            QTrading::Dto::Account::BalanceSnapshot spot_balance;
+            double total_cash_balance{ 0.0 };
+            double spot_inventory_value{ 0.0 };
             std::vector<Account::FillEvent> fill_events;
             uint64_t cur_ver{ 0 };
         };
@@ -237,7 +322,10 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
         void     build_multikline(uint64_t ts,
             QTrading::Dto::Market::Binance::MultiKlineDto& out);
         /// @brief Log current account balance, positions and orders via logger.
-        void log_status_snapshot(const QTrading::Dto::Account::BalanceSnapshot& balance,
+        void log_status_snapshot(const QTrading::Dto::Account::BalanceSnapshot& perp_balance,
+            const QTrading::Dto::Account::BalanceSnapshot& spot_balance,
+            double total_cash_balance,
+            double spot_inventory_value,
             const std::vector<dto::Position>& positions,
             const std::vector<dto::Order>& orders,
             uint64_t cur_ver);
@@ -247,7 +335,10 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
             const std::vector<dto::Position>& cur_positions,
             const std::vector<dto::Order>& cur_orders,
             const std::vector<QTrading::Log::FileLogger::FeatherV2::FundingEventDto>& funding_events,
-            const QTrading::Dto::Account::BalanceSnapshot& balance,
+            const QTrading::Dto::Account::BalanceSnapshot& perp_balance,
+            const QTrading::Dto::Account::BalanceSnapshot& spot_balance,
+            double total_cash_balance,
+            double spot_inventory_value,
             std::vector<Account::FillEvent>&& fill_events,
             uint64_t cur_ver);
 
@@ -269,6 +360,8 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
 
         BinanceExchange(const BinanceExchange&) = delete;
         BinanceExchange& operator=(const BinanceExchange&) = delete;
+        BinanceExchange(BinanceExchange&&) = delete;
+        BinanceExchange& operator=(BinanceExchange&&) = delete;
     };
 
 }

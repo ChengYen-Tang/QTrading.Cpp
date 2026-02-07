@@ -25,6 +25,7 @@ namespace QTrading::Log::FileLogger::FeatherV2 {
 
         int64_t order_id{};
         std::string symbol;
+        int32_t instrument_type{ -1 }; // Dto::Trading::InstrumentType, -1 means unknown.
         int32_t event_type{}; // OrderEventType
 
         int32_t side{};          // Dto::Trading::OrderSide (int)
@@ -58,6 +59,7 @@ namespace QTrading::Log::FileLogger::FeatherV2 {
                 arrow::field("request_id", arrow::uint64()),
                 arrow::field("order_id", arrow::int64()),
                 arrow::field("symbol", arrow::utf8()),
+                arrow::field("instrument_type", arrow::int32()),
                 arrow::field("event_type", arrow::int32()),
                 arrow::field("side", arrow::int32()),
                 arrow::field("position_side", arrow::int32()),
@@ -86,21 +88,22 @@ namespace QTrading::Log::FileLogger::FeatherV2 {
             detail::AppendOrThrow(builder.GetFieldAs<arrow::UInt64Builder>(4), e.request_id);
             detail::AppendOrThrow(builder.GetFieldAs<arrow::Int64Builder>(5), e.order_id);
             detail::AppendOrThrow(builder.GetFieldAs<arrow::StringBuilder>(6), e.symbol);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::Int32Builder>(7), e.event_type);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::Int32Builder>(8), e.side);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::Int32Builder>(9), e.position_side);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::BooleanBuilder>(10), e.reduce_only);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(11), e.qty);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(12), e.price);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(13), e.exec_qty);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(14), e.exec_price);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(15), e.remaining_qty);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::Int64Builder>(16), e.closing_position_id);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::BooleanBuilder>(17), e.is_taker);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(18), e.fee);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(19), e.fee_rate);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::Int32Builder>(20), e.reject_reason);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::UInt64Builder>(21), e.ts_local);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::Int32Builder>(7), e.instrument_type);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::Int32Builder>(8), e.event_type);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::Int32Builder>(9), e.side);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::Int32Builder>(10), e.position_side);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::BooleanBuilder>(11), e.reduce_only);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(12), e.qty);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(13), e.price);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(14), e.exec_qty);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(15), e.exec_price);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(16), e.remaining_qty);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::Int64Builder>(17), e.closing_position_id);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::BooleanBuilder>(18), e.is_taker);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(19), e.fee);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(20), e.fee_rate);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::Int32Builder>(21), e.reject_reason);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::UInt64Builder>(22), e.ts_local);
         }
     } // namespace OrderEvent
 

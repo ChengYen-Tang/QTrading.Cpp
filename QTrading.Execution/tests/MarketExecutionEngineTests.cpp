@@ -10,19 +10,6 @@ namespace {
 
 class FakeExchange final : public QTrading::Infra::Exchanges::IExchange<MarketPtr> {
 public:
-    bool place_order(const std::string&, double, double,
-        QTrading::Dto::Trading::OrderSide,
-        QTrading::Dto::Trading::PositionSide,
-        bool) override { return true; }
-    bool place_order(const std::string&, double,
-        QTrading::Dto::Trading::OrderSide,
-        QTrading::Dto::Trading::PositionSide,
-        bool) override { return true; }
-    void close_position(const std::string&, double) override {}
-    void close_position(const std::string&) override {}
-    void close_position(const std::string&,
-        QTrading::Dto::Trading::PositionSide,
-        double) override {}
     bool step() override { return false; }
     const std::vector<QTrading::dto::Position>& get_all_positions() const override { return positions_; }
     const std::vector<QTrading::dto::Order>& get_all_open_orders() const override { return orders_; }
@@ -71,6 +58,25 @@ MarketPtr MakeMarketWithQuoteVolume(
     return dto;
 }
 
+MarketPtr MakeTwoSymbolMarket(
+    unsigned long long ts,
+    const std::string& symbol_a,
+    double close_a,
+    const std::string& symbol_b,
+    double close_b)
+{
+    auto dto = std::make_shared<QTrading::Dto::Market::Binance::MultiKlineDto>();
+    dto->Timestamp = ts;
+    auto symbols = std::make_shared<std::vector<std::string>>();
+    symbols->push_back(symbol_a);
+    symbols->push_back(symbol_b);
+    dto->symbols = symbols;
+    dto->klines_by_id.resize(symbols->size());
+    dto->klines_by_id[0] = QTrading::Dto::Market::Binance::KlineDto(ts, 0, 0, 0, close_a, 0, ts, 0, 0, 0, 0);
+    dto->klines_by_id[1] = QTrading::Dto::Market::Binance::KlineDto(ts, 0, 0, 0, close_b, 0, ts, 0, 0, 0, 0);
+    return dto;
+}
+
 } // namespace
 
 TEST(MarketExecutionEngineTests, GeneratesOrderForNotionalDelta)
@@ -95,6 +101,45 @@ TEST(MarketExecutionEngineTests, GeneratesOrderForNotionalDelta)
     EXPECT_NEAR(orders[0].qty, 0.9, 1e-6);
     EXPECT_TRUE(orders[0].reduce_only);
     EXPECT_DOUBLE_EQ(ex->get_symbol_leverage("BTCUSDT_PERP"), 3.0);
+}
+
+TEST(MarketExecutionEngineTests, PlansMixedTypedSymbolsWithoutSuffixAssumptions)
+{
+    auto ex = std::make_shared<FakeExchange>();
+
+    QTrading::Execution::MarketExecutionEngine engine(ex, { 10.0 });
+    QTrading::Risk::RiskTarget target;
+    target.target_positions["BTCUSDT_CASH"] = 500.0;
+    target.target_positions["BTCUSDT_SWAP"] = -1200.0;
+    target.leverage["BTCUSDT_CASH"] = 1.0;
+    target.leverage["BTCUSDT_SWAP"] = 3.0;
+
+    QTrading::Signal::SignalDecision signal;
+    auto market = MakeTwoSymbolMarket(1, "BTCUSDT_CASH", 100.0, "BTCUSDT_SWAP", 3000.0);
+    auto orders = engine.plan(target, signal, market);
+
+    ASSERT_EQ(orders.size(), 2u);
+    const auto find_order = [&](const std::string& symbol) -> const QTrading::Execution::ExecutionOrder* {
+        for (const auto& order : orders) {
+            if (order.symbol == symbol) {
+                return &order;
+            }
+        }
+        return nullptr;
+    };
+
+    const auto* cash = find_order("BTCUSDT_CASH");
+    ASSERT_NE(cash, nullptr);
+    EXPECT_EQ(cash->action, QTrading::Execution::OrderAction::Buy);
+    EXPECT_NEAR(cash->qty, 5.0, 1e-9);
+
+    const auto* swap = find_order("BTCUSDT_SWAP");
+    ASSERT_NE(swap, nullptr);
+    EXPECT_EQ(swap->action, QTrading::Execution::OrderAction::Sell);
+    EXPECT_NEAR(swap->qty, 0.4, 1e-9);
+
+    EXPECT_DOUBLE_EQ(ex->get_symbol_leverage("BTCUSDT_CASH"), 1.0);
+    EXPECT_DOUBLE_EQ(ex->get_symbol_leverage("BTCUSDT_SWAP"), 3.0);
 }
 
 TEST(MarketExecutionEngineTests, CarryRebalanceRespectsCooldown)

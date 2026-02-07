@@ -3,8 +3,10 @@
 #include <limits>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include "IRiskEngine.hpp"
 #include "Dto/Market/Binance/MultiKline.hpp"
+#include "Dto/Trading/InstrumentSpec.hpp"
 
 namespace QTrading::Risk {
 
@@ -49,6 +51,8 @@ public:
         double gross_deviation_trigger_notional_threshold = 50000.0;
         /// @brief Hard cap for per-leg target notional to avoid unstable churn at oversized capacity.
         double max_leg_notional_usdt = 200000.0;
+        /// @brief Optional explicit instrument typing; when empty, fallback inference is used.
+        std::unordered_map<std::string, QTrading::Dto::Trading::InstrumentType> instrument_types;
     };
 
     explicit SimpleRiskEngine(Config cfg);
@@ -58,7 +62,12 @@ public:
         const std::shared_ptr<QTrading::Dto::Market::Binance::MultiKlineDto>& market) override;
 
 private:
+    bool is_spot_instrument_(const std::string& instrument) const;
+    bool is_perp_instrument_(const std::string& instrument) const;
+    double leverage_for_instrument_(const std::string& instrument) const;
+
     Config cfg_;
+    QTrading::Dto::Trading::InstrumentRegistry instrument_registry_{};
     bool basis_level_ema_initialized_{ false };
     double basis_level_ema_{ 0.0 };
     double basis_level_ema_prev_{ 0.0 };

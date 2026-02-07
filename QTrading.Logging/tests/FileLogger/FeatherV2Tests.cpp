@@ -1,4 +1,11 @@
-﻿#include "FileLogger/FeatherV2.hpp"
+#include "FileLogger/FeatherV2.hpp"
+#include "FileLogger/FeatherV2/AccountLog.hpp"
+#include "FileLogger/FeatherV2/AccountEvent.hpp"
+#include "FileLogger/FeatherV2/FundingEvent.hpp"
+#include "FileLogger/FeatherV2/Order.hpp"
+#include "FileLogger/FeatherV2/OrderEvent.hpp"
+#include "FileLogger/FeatherV2/Position.hpp"
+#include "FileLogger/FeatherV2/PositionEvent.hpp"
 #include <gtest/gtest.h>
 #include <arrow/io/api.h>
 #include <arrow/ipc/api.h>
@@ -253,3 +260,54 @@ TEST_F(LoggerTest, MultiModule) {
     auto x_arr = std::static_pointer_cast<arrow::DoubleArray>(tbl2->column(1)->chunk(0));
     EXPECT_DOUBLE_EQ(x_arr->Value(0), 3.14);
 }
+
+TEST(FeatherSchemaTests, SnapshotSchemasExposeInstrumentType)
+{
+    const auto account_spot_ledger = QTrading::Log::FileLogger::FeatherV2::AccountLog::Schema->GetFieldByName("spot_ledger_value");
+    ASSERT_NE(account_spot_ledger, nullptr);
+    EXPECT_TRUE(account_spot_ledger->type()->Equals(arrow::float64()));
+    const auto account_total_ledger = QTrading::Log::FileLogger::FeatherV2::AccountLog::Schema->GetFieldByName("total_ledger_value");
+    ASSERT_NE(account_total_ledger, nullptr);
+    EXPECT_TRUE(account_total_ledger->type()->Equals(arrow::float64()));
+
+    const auto order_field = QTrading::Log::FileLogger::FeatherV2::Order::Schema->GetFieldByName("instrument_type");
+    ASSERT_NE(order_field, nullptr);
+    EXPECT_TRUE(order_field->type()->Equals(arrow::int32()));
+
+    const auto position_field = QTrading::Log::FileLogger::FeatherV2::Position::Schema->GetFieldByName("instrument_type");
+    ASSERT_NE(position_field, nullptr);
+    EXPECT_TRUE(position_field->type()->Equals(arrow::int32()));
+}
+
+TEST(FeatherSchemaTests, EventSchemasExposeInstrumentType)
+{
+    const auto account_schema = QTrading::Log::FileLogger::FeatherV2::AccountEvent::Schema();
+    const auto account_symbol = account_schema->GetFieldByName("symbol");
+    ASSERT_NE(account_symbol, nullptr);
+    EXPECT_TRUE(account_symbol->type()->Equals(arrow::utf8()));
+    const auto account_type = account_schema->GetFieldByName("instrument_type");
+    ASSERT_NE(account_type, nullptr);
+    EXPECT_TRUE(account_type->type()->Equals(arrow::int32()));
+    const auto account_ledger = account_schema->GetFieldByName("ledger");
+    ASSERT_NE(account_ledger, nullptr);
+    EXPECT_TRUE(account_ledger->type()->Equals(arrow::int32()));
+    const auto account_total_ledger = account_schema->GetFieldByName("total_ledger_value_after");
+    ASSERT_NE(account_total_ledger, nullptr);
+    EXPECT_TRUE(account_total_ledger->type()->Equals(arrow::float64()));
+
+    const auto order_schema = QTrading::Log::FileLogger::FeatherV2::OrderEvent::Schema();
+    const auto order_type = order_schema->GetFieldByName("instrument_type");
+    ASSERT_NE(order_type, nullptr);
+    EXPECT_TRUE(order_type->type()->Equals(arrow::int32()));
+
+    const auto position_schema = QTrading::Log::FileLogger::FeatherV2::PositionEvent::Schema();
+    const auto position_type = position_schema->GetFieldByName("instrument_type");
+    ASSERT_NE(position_type, nullptr);
+    EXPECT_TRUE(position_type->type()->Equals(arrow::int32()));
+
+    const auto funding_schema = QTrading::Log::FileLogger::FeatherV2::FundingEvent::Schema();
+    const auto funding_type = funding_schema->GetFieldByName("instrument_type");
+    ASSERT_NE(funding_type, nullptr);
+    EXPECT_TRUE(funding_type->type()->Equals(arrow::int32()));
+}
+
