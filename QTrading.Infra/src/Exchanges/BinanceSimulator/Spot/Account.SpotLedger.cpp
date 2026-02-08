@@ -10,7 +10,7 @@ QTrading::Dto::Account::BalanceSnapshot Account::get_spot_balance() const
 {
     QTrading::Dto::Account::BalanceSnapshot s;
     s.WalletBalance = spot_ledger_.cash_balance();
-    const auto fee_rates = get_fee_rates();
+    const auto fee_rates = get_fee_rates(InstrumentType::Spot);
     const double worst_fee_rate = std::max(0.0, std::max(std::get<0>(fee_rates), std::get<1>(fee_rates)));
 
     double reserved = 0.0;

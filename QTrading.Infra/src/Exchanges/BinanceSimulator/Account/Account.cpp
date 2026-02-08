@@ -488,7 +488,7 @@ void Account::update_positions(const std::unordered_map<std::string, KlineDto>& 
 
     bool mark_dirty = false;
 
-    const FeeModel fee_model(get_fee_rates());
+    const FeeModel perp_fee_model(get_fee_rates(InstrumentType::Perp));
     const FillModel fill_model{ kline_volume_split_mode_ };
 
     if (!kline_by_id_.empty()) {
@@ -530,7 +530,7 @@ void Account::update_positions(const std::unordered_map<std::string, KlineDto>& 
     }
 
     if (has_open_orders) {
-        process_open_orders_pipeline_(fee_model.maker_fee, fee_model.taker_fee, dirty, open_orders_changed, positions_changed);
+        process_open_orders_pipeline_(dirty, open_orders_changed, positions_changed);
     }
 
     // Remove positions with negligible quantity.
@@ -564,7 +564,7 @@ void Account::update_positions(const std::unordered_map<std::string, KlineDto>& 
         pos.unrealized_pnl = (cp - pos.entry_price) * pos.quantity * (pos.is_long ? 1.0 : -1.0);
     }
 
-    apply_perp_liquidation_(fee_model.taker_fee, open_orders_changed, positions_changed);
+    apply_perp_liquidation_(perp_fee_model.taker_fee, open_orders_changed, positions_changed);
 
     for (auto& p : positions_) {
         auto itp = symbol_kline.find(p.symbol);
@@ -746,9 +746,24 @@ std::tuple<double, double> Account::get_tier_info(double notional) const {
     return std::make_tuple(margin_tiers.front().maintenance_margin_rate, margin_tiers.front().max_leverage);
 }
 
-/// @brief Get maker and taker fee rates based on VIP level.
+/// @brief Get maker and taker fee rates by instrument type and VIP level.
 /// @return Tuple(maker_fee_rate, taker_fee_rate).
-std::tuple<double, double> Account::get_fee_rates() const {
+std::tuple<double, double> Account::get_fee_rates(InstrumentType instrument_type) const {
+    if (instrument_type == InstrumentType::Spot) {
+        if (policies_.spot_fee_rates) {
+            return policies_.spot_fee_rates(vip_level_);
+        }
+        // Backward compatibility: if caller injects only `fee_rates`, reuse it for spot too.
+        if (policies_.fee_rates) {
+            return policies_.fee_rates(vip_level_);
+        }
+        auto it_spot = spot_vip_fee_rates.find(vip_level_);
+        if (it_spot != spot_vip_fee_rates.end()) {
+            return std::make_tuple(it_spot->second.maker_fee_rate, it_spot->second.taker_fee_rate);
+        }
+        return std::make_tuple(spot_vip_fee_rates.at(0).maker_fee_rate, spot_vip_fee_rates.at(0).taker_fee_rate);
+    }
+
     if (policies_.fee_rates) {
         return policies_.fee_rates(vip_level_);
     }

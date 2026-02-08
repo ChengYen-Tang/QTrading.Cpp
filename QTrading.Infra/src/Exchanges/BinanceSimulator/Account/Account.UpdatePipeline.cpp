@@ -8,6 +8,7 @@
 #include <thread>
 
 using QTrading::Dto::Market::Binance::KlineDto;
+using QTrading::Dto::Trading::InstrumentType;
 using QTrading::Dto::Trading::OrderSide;
 
 namespace {
@@ -107,11 +108,18 @@ struct FillModel {
 
 } // namespace
 
-void Account::process_open_orders_pipeline_(double maker_fee, double taker_fee, bool& dirty, bool& open_orders_changed, bool& positions_changed)
+void Account::process_open_orders_pipeline_(bool& dirty, bool& open_orders_changed, bool& positions_changed)
 {
     if (open_orders_.empty()) {
         return;
     }
+
+    const auto perp_fee_rates = get_fee_rates(InstrumentType::Perp);
+    const auto spot_fee_rates = get_fee_rates(InstrumentType::Spot);
+    const double perp_maker_fee = std::get<0>(perp_fee_rates);
+    const double perp_taker_fee = std::get<1>(perp_fee_rates);
+    const double spot_maker_fee = std::get<0>(spot_fee_rates);
+    const double spot_taker_fee = std::get<1>(spot_fee_rates);
 
     const FillModel fill_model{ kline_volume_split_mode_ };
     std::pmr::vector<unsigned char> keep_open_order{ &tick_memory_ };
@@ -286,7 +294,10 @@ void Account::process_open_orders_pipeline_(double maker_fee, double taker_fee, 
             const double order_price = ord.price;
 
             const double notional = fill_qty * fill_price;
-            const double fee_rate = is_taker ? taker_fee : maker_fee;
+            const bool is_spot = (ord.instrument_type == InstrumentType::Spot);
+            const double fee_rate = is_taker
+                ? (is_spot ? spot_taker_fee : perp_taker_fee)
+                : (is_spot ? spot_maker_fee : perp_maker_fee);
             const double fee = notional * fee_rate;
 
             keep_open_order[entry.idx] = false;

@@ -106,8 +106,11 @@ public:
     using FeeRates = std::tuple<double, double>; // (maker, taker)
 
     struct Policies {
-        // Fee rates by VIP level
+        // Perp fee rates by VIP level (maker, taker).
         std::function<FeeRates(int vip_level)> fee_rates;
+        // Optional spot fee rates by VIP level (maker, taker).
+        // If not provided, spot falls back to the default spot fee table.
+        std::function<FeeRates(int vip_level)> spot_fee_rates;
 
         // Decide if order can fill on this kline and whether it's taker
         std::function<std::pair<bool, bool>(const Order& ord, const QTrading::Dto::Market::Binance::KlineDto& k)> can_fill_and_taker;
@@ -333,7 +336,7 @@ private:
     int generate_position_id();
 
     std::tuple<double, double> get_tier_info(double notional) const;
-    std::tuple<double, double> get_fee_rates() const;
+    std::tuple<double, double> get_fee_rates(QTrading::Dto::Trading::InstrumentType instrument_type) const;
     bool adjust_position_leverage(const std::string& symbol, double oldLev, double newLev);
 
     void place_closing_order(int position_id, double quantity, double price);
@@ -359,7 +362,7 @@ private:
     void update_unrealized_for_symbol_(const std::string& symbol, double close_price);
     bool has_open_perp_position_() const;
     void apply_perp_liquidation_(double taker_fee, bool& open_orders_changed, bool& positions_changed);
-    void process_open_orders_pipeline_(double maker_fee, double taker_fee, bool& dirty, bool& open_orders_changed, bool& positions_changed);
+    void process_open_orders_pipeline_(bool& dirty, bool& open_orders_changed, bool& positions_changed);
     void close_spot_position_(const std::string& symbol, double price);
     void close_perp_position_(const std::string& symbol, double price);
     void close_perp_position_side_(const std::string& symbol, QTrading::Dto::Trading::PositionSide position_side, double price);

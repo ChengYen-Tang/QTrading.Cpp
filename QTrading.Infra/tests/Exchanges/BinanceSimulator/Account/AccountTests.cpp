@@ -109,6 +109,30 @@ TEST(AccountTest, DomainApisRouteByInstrumentType) {
     EXPECT_LT(account.perp.get_wallet_balance(), 1000.0);
 }
 
+TEST(AccountTest, SpotAndPerpUseDifferentDefaultFeeTables) {
+    Account::AccountInitConfig cfg;
+    cfg.spot_initial_cash = 1000.0;
+    cfg.perp_initial_wallet = 1000.0;
+    Account account(cfg);
+
+    using QTrading::Dto::Trading::InstrumentType;
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+    account.set_instrument_type("BTCUSDT_SPOT", InstrumentType::Spot);
+    account.set_instrument_type("BTCUSDT_PERP", InstrumentType::Perp);
+
+    // Spot VIP0 taker/maker: 0.10%/0.10%
+    ASSERT_TRUE(account.place_order("BTCUSDT_SPOT", 1.0, 100.0, OrderSide::Buy, PositionSide::Both));
+    account.update_positions(oneKline("BTCUSDT_SPOT", 100.0, 100.0, 100.0, 100.0, 1000.0));
+    EXPECT_NEAR(account.get_spot_cash_balance(), 1000.0 - 100.0 - 0.1, 1e-9);
+
+    // Perp VIP0 taker/maker keeps existing perp table: 0.02%/0.05%.
+    // With current OHLC fill policy this order is treated as taker (close is marketable).
+    ASSERT_TRUE(account.place_order("BTCUSDT_PERP", 1.0, 100.0, OrderSide::Buy, PositionSide::Both));
+    account.update_positions(oneKline("BTCUSDT_PERP", 100.0, 100.0, 100.0, 100.0, 1000.0));
+    EXPECT_NEAR(account.get_wallet_balance(), 1000.0 - 0.05, 1e-9);
+}
+
 /// @brief Verifies setting and getting symbol leverage, and error on invalid.
 TEST(AccountTest, SetAndGetSymbolLeverage) {
     Account account(2000.0, 0);

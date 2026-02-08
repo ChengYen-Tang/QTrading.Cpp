@@ -10,7 +10,7 @@ struct FeeRate {
     double taker_fee_rate;   ///< Rate applied to market (taker) orders
 };
 
-/// @brief Mapping from VIP level (0–9) to maker/taker fees.
+/// @brief Mapping from VIP level (0–9) to USD-M perpetual maker/taker fees.
 const std::map<int, FeeRate> vip_fee_rates = {
     {0, {0.00020, 0.00050}},
     {1, {0.00016, 0.00040}},
@@ -22,6 +22,21 @@ const std::map<int, FeeRate> vip_fee_rates = {
     {7, {0.00004, 0.00022}},
     {8, {0.00002, 0.00020}},
     {9, {0.00000, 0.00017}}
+};
+
+/// @brief Mapping from VIP level (0–9) to spot maker/taker fees.
+/// @note Values based on Binance spot fee schedule (without BNB fee-discount modeling).
+const std::map<int, FeeRate> spot_vip_fee_rates = {
+    {0, {0.00100, 0.00100}},
+    {1, {0.00090, 0.00100}},
+    {2, {0.00080, 0.00100}},
+    {3, {0.00040, 0.00060}},
+    {4, {0.00040, 0.00052}},
+    {5, {0.00025, 0.00031}},
+    {6, {0.00020, 0.00029}},
+    {7, {0.00019, 0.00028}},
+    {8, {0.00016, 0.00025}},
+    {9, {0.00011, 0.00023}}
 };
 
 

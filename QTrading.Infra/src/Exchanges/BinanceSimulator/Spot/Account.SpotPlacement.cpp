@@ -6,6 +6,7 @@
 
 using QTrading::Dto::Trading::OrderSide;
 using QTrading::Dto::Trading::PositionSide;
+using QTrading::Dto::Trading::InstrumentType;
 
 bool Account::place_spot_order(const std::string& symbol,
     double quantity,
@@ -45,7 +46,7 @@ bool Account::place_spot_order(const std::string& symbol,
         }
 
         if (notional_est > 0.0) {
-            const auto fee_rates = get_fee_rates();
+            const auto fee_rates = get_fee_rates(InstrumentType::Spot);
             const double worst_fee_rate = std::max(0.0, std::max(std::get<0>(fee_rates), std::get<1>(fee_rates)));
             const double required_cash = notional_est * (1.0 + worst_fee_rate);
             const auto spot_bal = get_spot_balance();

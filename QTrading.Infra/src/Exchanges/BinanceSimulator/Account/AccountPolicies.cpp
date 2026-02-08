@@ -100,6 +100,14 @@ Account::Policies AccountPolicies::Default()
         return std::make_tuple(vip_fee_rates.at(0).maker_fee_rate, vip_fee_rates.at(0).taker_fee_rate);
     };
 
+    p.spot_fee_rates = [](int vip_level) -> Account::FeeRates {
+        auto it = spot_vip_fee_rates.find(vip_level);
+        if (it != spot_vip_fee_rates.end()) {
+            return std::make_tuple(it->second.maker_fee_rate, it->second.taker_fee_rate);
+        }
+        return std::make_tuple(spot_vip_fee_rates.at(0).maker_fee_rate, spot_vip_fee_rates.at(0).taker_fee_rate);
+    };
+
     p.can_fill_and_taker = [](const Order& ord, const KlineDto& k) -> std::pair<bool, bool> {
         const bool is_market = (ord.price <= 0.0);
         if (is_market) {
