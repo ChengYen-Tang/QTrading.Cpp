@@ -17,28 +17,58 @@ struct InstrumentSpec {
     bool allow_short{ true };
     bool funding_enabled{ true };
     bool maintenance_margin_enabled{ true };
+
+    // PRICE_FILTER
+    double min_price{ 0.0 };
+    double max_price{ 0.0 };
+    double price_tick_size{ 0.0 };
+
+    // LOT_SIZE
+    double min_qty{ 0.0 };
+    double max_qty{ 0.0 };
+    double qty_step_size{ 0.0 };
+
+    // MARKET_LOT_SIZE
+    double market_min_qty{ 0.0 };
+    double market_max_qty{ 0.0 };
+    double market_qty_step_size{ 0.0 };
+
+    // MIN_NOTIONAL / NOTIONAL
+    double min_notional{ 0.0 };
+    double max_notional{ 0.0 };
+
+    // PERCENT_PRICE / PERCENT_PRICE_BY_SIDE
+    // When percent_price_by_side is false, use percent_price_multiplier_{up,down}.
+    // When true, use bid/ask multipliers by order side.
+    bool percent_price_by_side{ false };
+    double percent_price_multiplier_up{ 0.0 };
+    double percent_price_multiplier_down{ 0.0 };
+    double bid_multiplier_up{ 0.0 };
+    double bid_multiplier_down{ 0.0 };
+    double ask_multiplier_up{ 0.0 };
+    double ask_multiplier_down{ 0.0 };
 };
 
 inline InstrumentSpec SpotInstrumentSpec()
 {
-    return InstrumentSpec{
-        InstrumentType::Spot,
-        1.0,
-        false,
-        false,
-        false
-    };
+    InstrumentSpec spec;
+    spec.type = InstrumentType::Spot;
+    spec.max_leverage = 1.0;
+    spec.allow_short = false;
+    spec.funding_enabled = false;
+    spec.maintenance_margin_enabled = false;
+    return spec;
 }
 
 inline InstrumentSpec PerpInstrumentSpec()
 {
-    return InstrumentSpec{
-        InstrumentType::Perp,
-        125.0,
-        true,
-        true,
-        true
-    };
+    InstrumentSpec spec;
+    spec.type = InstrumentType::Perp;
+    spec.max_leverage = 125.0;
+    spec.allow_short = true;
+    spec.funding_enabled = true;
+    spec.maintenance_margin_enabled = true;
+    return spec;
 }
 
 class InstrumentRegistry {

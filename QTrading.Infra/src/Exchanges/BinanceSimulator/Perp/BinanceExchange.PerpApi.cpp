@@ -13,6 +13,13 @@ bool BinanceExchange::PerpApi::place_order(const std::string& symbol,
     bool reduce_only)
 {
     std::lock_guard<std::mutex> lk(owner_.account_mtx_);
+    if (owner_.order_latency_bars_ > 0) {
+        const uint64_t due = owner_.processed_steps_ + static_cast<uint64_t>(owner_.order_latency_bars_);
+        owner_.enqueue_deferred_order_locked_(due, [symbol, quantity, price, side, position_side, reduce_only](Account& acc) {
+            (void)acc.perp.place_order(symbol, quantity, price, side, position_side, reduce_only);
+        });
+        return true;
+    }
     return owner_.account_engine_->perp.place_order(symbol, quantity, price, side, position_side, reduce_only);
 }
 
@@ -23,6 +30,13 @@ bool BinanceExchange::PerpApi::place_order(const std::string& symbol,
     bool reduce_only)
 {
     std::lock_guard<std::mutex> lk(owner_.account_mtx_);
+    if (owner_.order_latency_bars_ > 0) {
+        const uint64_t due = owner_.processed_steps_ + static_cast<uint64_t>(owner_.order_latency_bars_);
+        owner_.enqueue_deferred_order_locked_(due, [symbol, quantity, side, position_side, reduce_only](Account& acc) {
+            (void)acc.perp.place_order(symbol, quantity, side, position_side, reduce_only);
+        });
+        return true;
+    }
     return owner_.account_engine_->perp.place_order(symbol, quantity, side, position_side, reduce_only);
 }
 

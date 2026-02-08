@@ -3,6 +3,7 @@ add_executable(QTrading.Infra.Tests
   Exchanges/BinanceSimulator/DataProvider/FundingRateDataTests.cpp
   Exchanges/BinanceSimulator/Account/AccountTests.cpp
   Exchanges/BinanceSimulator/Account/AccountPolicyInjectionTests.cpp
+  Exchanges/BinanceSimulator/Calibration/CalibrationMetricsTests.cpp
   Exchanges/BinanceSimulator/BinanceExchangeTests.cpp
 )
 

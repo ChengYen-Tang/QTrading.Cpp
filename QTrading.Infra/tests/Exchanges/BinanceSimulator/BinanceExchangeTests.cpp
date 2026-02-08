@@ -196,6 +196,33 @@ TEST_F(BinanceExchangeFixture, PushOnlyOnChange)
     EXPECT_FALSE(pCh->TryReceive().has_value());
 }
 
+TEST_F(BinanceExchangeFixture, OrderLatencyBarsDelaysPlacementUntilFutureStep)
+{
+    writeCsv("btc.csv", {
+        {      0,1,1,1,1,100, 30000,100,1,0,0 },
+        {  60000,1,1,1,1,100, 90000,100,1,0,0 }
+        });
+
+    BinanceExchange ex({ {"BTCUSDT",(tmpDir / "btc.csv").string()} }, logger, /*balance*/ 1000.0);
+    ex.set_order_latency_bars(1);
+    auto mCh = ex.get_market_channel();
+
+    // Step 1: process first bar.
+    ASSERT_TRUE(ex.step());
+    (void)mCh->Receive();
+
+    using QTrading::Dto::Trading::OrderSide;
+    ASSERT_TRUE(ex.perp.place_order("BTCUSDT", 1.0, OrderSide::Buy));
+    // Order is queued, not yet in account book.
+    EXPECT_TRUE(ex.get_all_open_orders().empty());
+    EXPECT_TRUE(ex.get_all_positions().empty());
+
+    // Step 2: queued order becomes active and can fill on this bar.
+    ASSERT_TRUE(ex.step());
+    (void)mCh->Receive();
+    EXPECT_EQ(ex.get_all_positions().size(), 1u);
+}
+
 /// @brief Test that snapshot getters return consistent data before/after fills.
 TEST_F(BinanceExchangeFixture, SnapshotConsistent)
 {
@@ -328,6 +355,49 @@ TEST_F(BinanceExchangeFixture, FundingAppliedAndDeduped)
     EXPECT_FALSE(ex.step());
 }
 
+TEST_F(BinanceExchangeFixture, FundingTimestampUsesInterpolatedMarkPriceBetweenBars)
+{
+    writeCsv("btc.csv", {
+        {      0, 100,100,100,100,1000, 30000,100,1,0,0 },
+        { 120000, 120,120,120,120,1000,150000,100,1,0,0 }
+        });
+
+    // Funding event falls between two kline timestamps and has no mark price.
+    // Expected interpolated mark: 110.
+    writeFundingCsv("btc_funding.csv", {
+        {  60000,  0.001, std::nullopt }
+        });
+
+    BinanceExchange ex(
+        { {"BTCUSDT", (tmpDir / "btc.csv").string(),
+            std::optional<std::string>((tmpDir / "btc_funding.csv").string())} },
+        logger,
+        /*balance*/ 1000.0);
+
+    using QTrading::Dto::Trading::OrderSide;
+    ASSERT_TRUE(ex.perp.place_order("BTCUSDT", 1.0, OrderSide::Buy));
+    auto mCh = ex.get_market_channel();
+
+    BinanceExchange::StatusSnapshot snap{};
+
+    ASSERT_TRUE(ex.step());
+    mCh->Receive();
+    ex.FillStatusSnapshot(snap);
+    const double after_entry = snap.wallet_balance;
+
+    ASSERT_TRUE(ex.step());
+    auto dto2 = mCh->Receive();
+    ASSERT_TRUE(dto2.has_value());
+    EXPECT_EQ(dto2->get()->Timestamp, 60000u);
+    ex.FillStatusSnapshot(snap);
+    const double after_funding = snap.wallet_balance;
+    EXPECT_NEAR(after_funding - after_entry, -0.11, 1e-6);
+
+    ASSERT_TRUE(ex.step());
+    mCh->Receive();
+    EXPECT_FALSE(ex.step());
+}
+
 TEST_F(BinanceExchangeFixture, NoFundingPathKeepsBalance)
 {
     writeCsv("btc.csv", {
@@ -442,5 +512,27 @@ TEST_F(BinanceExchangeFixture, StatusSnapshotExposesDualLedgerTotals)
         1e-9);
 }
 
+TEST_F(BinanceExchangeFixture, StatusSnapshotOutputsUncertaintyBands)
+{
+    writeCsv("btc.csv", {
+        {      0, 100,100,100,100,1000, 30000,100,1,0,0 }
+        });
+
+    Account::AccountInitConfig cfg;
+    cfg.spot_initial_cash = 500.0;
+    cfg.perp_initial_wallet = 500.0;
+
+    BinanceExchange ex({ {"BTCUSDT",(tmpDir / "btc.csv").string()} }, logger, cfg);
+    ex.set_uncertainty_band_bps(200.0); // 2%
+    ASSERT_TRUE(ex.step());
+
+    BinanceExchange::StatusSnapshot snap{};
+    ex.FillStatusSnapshot(snap);
+
+    EXPECT_NEAR(snap.uncertainty_band_bps, 200.0, 1e-12);
+    EXPECT_NEAR(snap.total_ledger_value_base, snap.total_ledger_value, 1e-12);
+    EXPECT_NEAR(snap.total_ledger_value_conservative, snap.total_ledger_value * 0.98, 1e-9);
+    EXPECT_NEAR(snap.total_ledger_value_optimistic, snap.total_ledger_value * 1.02, 1e-9);
+}
 
 

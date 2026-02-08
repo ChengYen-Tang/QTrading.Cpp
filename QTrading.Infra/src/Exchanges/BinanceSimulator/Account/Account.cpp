@@ -137,6 +137,16 @@ static Account::AccountInitConfig validate_account_init_config(const Account::Ac
     return cfg;
 }
 
+static bool is_multiple_of_step(double value, double step)
+{
+    if (!(std::isfinite(value) && std::isfinite(step)) || step <= 0.0) {
+        return true;
+    }
+    const double units = value / step;
+    const double nearest = std::round(units);
+    return std::abs(units - nearest) <= 1e-8;
+}
+
 } // namespace
 
 /// @brief Simulated Binance Futures Account implementation.
@@ -153,6 +163,7 @@ Account::Account(const AccountInitConfig& init_config)
     perp_ledger_(0.0),
     vip_level_(0),
     hedge_mode_(false),
+    strict_binance_mode_(false),
     next_order_id_(1),
     next_position_id_(1),
     policies_(DefaultPolicies()),
@@ -160,6 +171,7 @@ Account::Account(const AccountInitConfig& init_config)
 {
     const auto cfg = validate_account_init_config(init_config);
     vip_level_ = cfg.vip_level;
+    strict_binance_mode_ = cfg.strict_binance_mode;
     spot_ledger_.set_cash_balance(cfg.spot_initial_cash);
     perp_ledger_.set_wallet_balance(cfg.perp_initial_wallet);
     perp_ledger_.set_used_margin(0.0);
@@ -235,6 +247,105 @@ void Account::set_kline_volume_split_mode(KlineVolumeSplitMode mode)
     kline_volume_split_mode_ = mode;
 }
 
+void Account::set_intra_bar_path_mode(IntraBarPathMode mode)
+{
+    intra_bar_path_mode_ = mode;
+}
+
+Account::IntraBarPathMode Account::intra_bar_path_mode() const
+{
+    return intra_bar_path_mode_;
+}
+
+void Account::set_intra_bar_monte_carlo_samples(size_t samples)
+{
+    intra_bar_monte_carlo_samples_ = std::max<size_t>(1, samples);
+}
+
+size_t Account::intra_bar_monte_carlo_samples() const
+{
+    return intra_bar_monte_carlo_samples_;
+}
+
+void Account::set_intra_bar_random_seed(uint64_t seed)
+{
+    intra_bar_random_seed_ = seed;
+}
+
+uint64_t Account::intra_bar_random_seed() const
+{
+    return intra_bar_random_seed_;
+}
+
+void Account::set_limit_fill_probability_enabled(bool enable)
+{
+    limit_fill_probability_enabled_ = enable;
+}
+
+bool Account::is_limit_fill_probability_enabled() const
+{
+    return limit_fill_probability_enabled_;
+}
+
+void Account::set_limit_fill_probability_coefficients(double intercept,
+    double penetration_weight,
+    double size_ratio_weight,
+    double taker_flow_weight,
+    double volatility_weight)
+{
+    fill_prob_intercept_ = intercept;
+    fill_prob_penetration_weight_ = penetration_weight;
+    fill_prob_size_ratio_weight_ = size_ratio_weight;
+    fill_prob_taker_flow_weight_ = taker_flow_weight;
+    fill_prob_volatility_weight_ = volatility_weight;
+}
+
+void Account::set_market_impact_slippage_enabled(bool enable)
+{
+    market_impact_slippage_enabled_ = enable;
+}
+
+bool Account::is_market_impact_slippage_enabled() const
+{
+    return market_impact_slippage_enabled_;
+}
+
+void Account::set_market_impact_slippage_params(double b0_bps,
+    double b1_bps,
+    double beta,
+    double b2_bps,
+    double b3_bps)
+{
+    impact_b0_bps_ = b0_bps;
+    impact_b1_bps_ = b1_bps;
+    impact_beta_ = beta;
+    impact_b2_bps_ = b2_bps;
+    impact_b3_bps_ = b3_bps;
+}
+
+void Account::set_taker_probability_model_enabled(bool enable)
+{
+    taker_probability_model_enabled_ = enable;
+}
+
+bool Account::is_taker_probability_model_enabled() const
+{
+    return taker_probability_model_enabled_;
+}
+
+void Account::set_taker_probability_model_coefficients(double intercept,
+    double same_side_flow_weight,
+    double size_ratio_weight,
+    double volatility_weight,
+    double penetration_weight)
+{
+    taker_prob_intercept_ = intercept;
+    taker_prob_same_side_flow_weight_ = same_side_flow_weight;
+    taker_prob_size_ratio_weight_ = size_ratio_weight;
+    taker_prob_volatility_weight_ = volatility_weight;
+    taker_prob_penetration_weight_ = penetration_weight;
+}
+
 double Account::get_total_cash_balance() const {
     return perp_ledger_.wallet_balance() + spot_ledger_.cash_balance();
 }
@@ -243,10 +354,16 @@ double Account::get_total_cash_balance() const {
 /// @param hedgeMode true to enable hedge mode (separate long/short), false for one-way.
 /// @details Fails if any positions are currently open.
 void Account::set_position_mode(bool hedgeMode) {
-    // Disallow switching mode if there are open positions.
+    // Disallow switching mode if there are open positions or pending orders.
     if (!positions_.empty()) {
         if (enable_console_output_) {
             std::cerr << "[set_position_mode] Cannot switch mode while positions are open.\n";
+        }
+        return;
+    }
+    if (!open_orders_.empty()) {
+        if (enable_console_output_) {
+            std::cerr << "[set_position_mode] Cannot switch mode while open orders exist.\n";
         }
         return;
     }
@@ -262,6 +379,16 @@ void Account::set_position_mode(bool hedgeMode) {
 /// @return True if hedge mode; false for one-way.
 bool Account::is_hedge_mode() const {
     return hedge_mode_;
+}
+
+void Account::set_strict_binance_mode(bool enable)
+{
+    strict_binance_mode_ = enable;
+}
+
+bool Account::is_strict_binance_mode() const
+{
+    return strict_binance_mode_;
 }
 
 const QTrading::Dto::Trading::InstrumentSpec& Account::resolve_instrument_spec_(const std::string& symbol) const
@@ -382,6 +509,9 @@ bool Account::place_order(const std::string& symbol,
     }
 
     const auto& instrument_spec = resolve_instrument_spec_(symbol);
+    if (!validate_order_filters_(symbol, quantity, price, side, instrument_spec)) {
+        return false;
+    }
     if (instrument_spec.type == InstrumentType::Spot) {
         return place_spot_order(symbol, quantity, price, side, position_side, reduce_only, instrument_spec);
     }
@@ -772,6 +902,148 @@ std::tuple<double, double> Account::get_fee_rates(InstrumentType instrument_type
         return std::make_tuple(it->second.maker_fee_rate, it->second.taker_fee_rate);
     }
     return std::make_tuple(vip_fee_rates.at(0).maker_fee_rate, vip_fee_rates.at(0).taker_fee_rate);
+}
+
+bool Account::validate_order_filters_(const std::string& symbol,
+    double quantity,
+    double price,
+    OrderSide side,
+    const QTrading::Dto::Trading::InstrumentSpec& instrument_spec) const
+{
+    const bool is_market = (price <= 0.0);
+
+    if (!is_market) {
+        if (instrument_spec.min_price > 0.0 && price + 1e-12 < instrument_spec.min_price) {
+            if (enable_console_output_) {
+                std::cerr << "[place_order] PRICE_FILTER reject: below min_price.\n";
+            }
+            return false;
+        }
+        if (instrument_spec.max_price > 0.0 && price - 1e-12 > instrument_spec.max_price) {
+            if (enable_console_output_) {
+                std::cerr << "[place_order] PRICE_FILTER reject: above max_price.\n";
+            }
+            return false;
+        }
+        if (instrument_spec.price_tick_size > 0.0 && !is_multiple_of_step(price, instrument_spec.price_tick_size)) {
+            if (enable_console_output_) {
+                std::cerr << "[place_order] PRICE_FILTER reject: invalid tick size step.\n";
+            }
+            return false;
+        }
+    }
+
+    const double min_qty = is_market && instrument_spec.market_min_qty > 0.0
+        ? instrument_spec.market_min_qty
+        : instrument_spec.min_qty;
+    const double max_qty = is_market && instrument_spec.market_max_qty > 0.0
+        ? instrument_spec.market_max_qty
+        : instrument_spec.max_qty;
+    const double qty_step = is_market && instrument_spec.market_qty_step_size > 0.0
+        ? instrument_spec.market_qty_step_size
+        : instrument_spec.qty_step_size;
+
+    if (min_qty > 0.0 && quantity + 1e-12 < min_qty) {
+        if (enable_console_output_) {
+            std::cerr << "[place_order] LOT_SIZE reject: below min_qty.\n";
+        }
+        return false;
+    }
+    if (max_qty > 0.0 && quantity - 1e-12 > max_qty) {
+        if (enable_console_output_) {
+            std::cerr << "[place_order] LOT_SIZE reject: above max_qty.\n";
+        }
+        return false;
+    }
+    if (qty_step > 0.0 && !is_multiple_of_step(quantity, qty_step)) {
+        if (enable_console_output_) {
+            std::cerr << "[place_order] LOT_SIZE reject: invalid qty step.\n";
+        }
+        return false;
+    }
+
+    double notional_est = 0.0;
+    if (!is_market) {
+        notional_est = quantity * price;
+    }
+    else {
+        auto it = symbol_id_by_name_.find(symbol);
+        if (it != symbol_id_by_name_.end()) {
+            const size_t sym_id = it->second;
+            if (sym_id < last_mark_price_by_id_.size()) {
+                const double mark = last_mark_price_by_id_[sym_id];
+                if (std::isfinite(mark) && mark > 0.0) {
+                    notional_est = quantity * mark * (1.0 + std::max(0.0, market_slippage_buffer_));
+                }
+            }
+        }
+    }
+
+    const bool require_notional = (instrument_spec.min_notional > 0.0 || instrument_spec.max_notional > 0.0);
+    if (require_notional) {
+        if (!(notional_est > 0.0)) {
+            if (enable_console_output_) {
+                std::cerr << "[place_order] NOTIONAL reject: no reference price for notional estimation.\n";
+            }
+            return false;
+        }
+        if (instrument_spec.min_notional > 0.0 && notional_est + 1e-12 < instrument_spec.min_notional) {
+            if (enable_console_output_) {
+                std::cerr << "[place_order] NOTIONAL reject: below min_notional.\n";
+            }
+            return false;
+        }
+        if (instrument_spec.max_notional > 0.0 && notional_est - 1e-12 > instrument_spec.max_notional) {
+            if (enable_console_output_) {
+                std::cerr << "[place_order] NOTIONAL reject: above max_notional.\n";
+            }
+            return false;
+        }
+    }
+
+    if (!is_market) {
+        auto it = symbol_id_by_name_.find(symbol);
+        double ref_price = 0.0;
+        if (it != symbol_id_by_name_.end()) {
+            const size_t sym_id = it->second;
+            if (sym_id < last_mark_price_by_id_.size()) {
+                const double mark = last_mark_price_by_id_[sym_id];
+                if (std::isfinite(mark) && mark > 0.0) {
+                    ref_price = mark;
+                }
+            }
+        }
+
+        if (ref_price > 0.0) {
+            double up = instrument_spec.percent_price_multiplier_up;
+            double down = instrument_spec.percent_price_multiplier_down;
+            if (instrument_spec.percent_price_by_side) {
+                if (side == OrderSide::Buy) {
+                    up = instrument_spec.bid_multiplier_up;
+                    down = instrument_spec.bid_multiplier_down;
+                }
+                else {
+                    up = instrument_spec.ask_multiplier_up;
+                    down = instrument_spec.ask_multiplier_down;
+                }
+            }
+
+            if (up > 0.0 && price - 1e-12 > ref_price * up) {
+                if (enable_console_output_) {
+                    std::cerr << "[place_order] PERCENT_PRICE reject: above multiplier up bound.\n";
+                }
+                return false;
+            }
+            if (down > 0.0 && price + 1e-12 < ref_price * down) {
+                if (enable_console_output_) {
+                    std::cerr << "[place_order] PERCENT_PRICE reject: below multiplier down bound.\n";
+                }
+                return false;
+            }
+        }
+    }
+
+    return true;
 }
 
 /// @brief Adjust leverage on existing positions for a symbol.

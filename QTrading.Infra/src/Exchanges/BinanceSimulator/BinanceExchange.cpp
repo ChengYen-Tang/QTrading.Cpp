@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <future>
+#include <limits>
 #include <memory>
 #include <memory_resource>
 #include <unordered_set>
@@ -410,6 +411,9 @@ bool BinanceExchange::step()
 
     {
         std::lock_guard<std::mutex> lk(account_mtx_);
+        const uint64_t next_step = processed_steps_ + 1;
+        flush_deferred_orders_locked_(next_step);
+        processed_steps_ = next_step;
 
         const auto initial_perp_balance = account_engine_->get_perp_balance();
         const auto initial_spot_balance = account_engine_->get_spot_balance();
@@ -503,6 +507,28 @@ bool BinanceExchange::step()
     return true;
 }
 
+void BinanceExchange::enqueue_deferred_order_locked_(uint64_t due_step, std::function<void(Account&)> fn)
+{
+    deferred_order_commands_.push_back(DeferredOrderCommand{ due_step, std::move(fn) });
+}
+
+void BinanceExchange::flush_deferred_orders_locked_(uint64_t step_seq)
+{
+    if (deferred_order_commands_.empty() || !account_engine_) {
+        return;
+    }
+
+    for (size_t i = 0; i < deferred_order_commands_.size();) {
+        auto& cmd = deferred_order_commands_[i];
+        if (cmd.due_step > step_seq) {
+            ++i;
+            continue;
+        }
+        cmd.fn(*account_engine_);
+        deferred_order_commands_.erase(deferred_order_commands_.begin() + static_cast<std::ptrdiff_t>(i));
+    }
+}
+
 /// @brief Get a snapshot of all current positions.
 /// @return Const reference to the vector of Position DTOs.
 const std::vector<dto::Position>& BinanceExchange::get_all_positions() const {
@@ -557,6 +583,30 @@ bool BinanceExchange::transfer_perp_to_spot(double amount)
     return account_engine_->transfer_perp_to_spot(amount);
 }
 
+void BinanceExchange::set_order_latency_bars(size_t bars)
+{
+    std::lock_guard<std::mutex> lk(account_mtx_);
+    order_latency_bars_ = bars;
+}
+
+size_t BinanceExchange::order_latency_bars() const
+{
+    std::lock_guard<std::mutex> lk(account_mtx_);
+    return order_latency_bars_;
+}
+
+void BinanceExchange::set_uncertainty_band_bps(double bps)
+{
+    std::lock_guard<std::mutex> lk(account_mtx_);
+    uncertainty_band_bps_ = std::max(0.0, bps);
+}
+
+double BinanceExchange::uncertainty_band_bps() const
+{
+    std::lock_guard<std::mutex> lk(account_mtx_);
+    return uncertainty_band_bps_;
+}
+
 /// @brief Close the simulator: drain CSVs and close all channels.
 /// @details Advances each symbol's cursor to the end before closing.
 void BinanceExchange::close()
@@ -574,19 +624,48 @@ void BinanceExchange::close()
 /// @return true if at least one symbol has data remaining.
 bool BinanceExchange::next_timestamp(uint64_t& ts)
 {
+    uint64_t next_kline_ts = std::numeric_limits<uint64_t>::max();
+    bool has_next_kline = false;
+
     // Pop stale heap entries until top matches current per-symbol next_ts.
     while (!next_ts_heap_.empty()) {
         const auto top = next_ts_heap_.top();
         if (top.sym_id < next_ts_by_symbol_.size() &&
             has_next_ts_[top.sym_id] &&
             next_ts_by_symbol_[top.sym_id] == top.ts) {
-            ts = top.ts;
-            return true;
+            next_kline_ts = top.ts;
+            has_next_kline = true;
+            break;
         }
         next_ts_heap_.pop();
     }
-    ts = std::numeric_limits<uint64_t>::max();
-    return false;
+
+    uint64_t next_funding_ts = std::numeric_limits<uint64_t>::max();
+    bool has_next_funding = false;
+    const size_t funding_count = std::min(funding_md_.size(), funding_cursor_.size());
+    for (size_t i = 0; i < funding_count; ++i) {
+        if (!has_funding_[i] || !funding_md_[i]) {
+            continue;
+        }
+        const auto& data = *funding_md_[i];
+        const size_t cur = funding_cursor_[i];
+        if (cur >= data.get_count()) {
+            continue;
+        }
+        const uint64_t fts = data.get_funding(cur).FundingTime;
+        if (!has_next_funding || fts < next_funding_ts) {
+            next_funding_ts = fts;
+            has_next_funding = true;
+        }
+    }
+
+    if (!has_next_kline && !has_next_funding) {
+        ts = std::numeric_limits<uint64_t>::max();
+        return false;
+    }
+
+    ts = std::min(next_kline_ts, next_funding_ts);
+    return true;
 }
 
 /// @brief Build and send a MultiKlineDto for timestamp `ts`.
@@ -1051,6 +1130,9 @@ void BinanceExchange::collect_funding_events(uint64_t ts, std::vector<FundingEve
                 price = fr.MarkPrice.value();
                 has_price = true;
             }
+            else if (interpolate_mark_price_(i, fr.FundingTime, price)) {
+                has_price = true;
+            }
             else if (i < last_close_by_symbol_.size() && has_last_close_[i]) {
                 price = last_close_by_symbol_[i];
                 has_price = true;
@@ -1083,6 +1165,61 @@ void BinanceExchange::collect_funding_events(uint64_t ts, std::vector<FundingEve
     }
 }
 
+bool BinanceExchange::interpolate_mark_price_(size_t sym_id, uint64_t ts, double& out_price) const
+{
+    if (sym_id >= md_.size()) {
+        return false;
+    }
+    const auto& data = md_[sym_id];
+    const size_t n = data.get_klines_count();
+    if (n == 0) {
+        return false;
+    }
+
+    size_t lo = 0;
+    size_t hi = n;
+    while (lo < hi) {
+        const size_t mid = lo + (hi - lo) / 2;
+        if (data.get_kline(mid).Timestamp < ts) {
+            lo = mid + 1;
+        }
+        else {
+            hi = mid;
+        }
+    }
+
+    if (lo < n && data.get_kline(lo).Timestamp == ts) {
+        out_price = data.get_kline(lo).ClosePrice;
+        return std::isfinite(out_price) && out_price > 0.0;
+    }
+
+    const bool has_prev = lo > 0;
+    const bool has_next = lo < n;
+    if (has_prev && has_next) {
+        const auto& prev = data.get_kline(lo - 1);
+        const auto& next = data.get_kline(lo);
+        if (next.Timestamp > prev.Timestamp) {
+            const double alpha = static_cast<double>(ts - prev.Timestamp)
+                / static_cast<double>(next.Timestamp - prev.Timestamp);
+            out_price = prev.ClosePrice + (next.ClosePrice - prev.ClosePrice) * alpha;
+        }
+        else {
+            out_price = next.ClosePrice;
+        }
+        return std::isfinite(out_price) && out_price > 0.0;
+    }
+
+    if (has_prev) {
+        out_price = data.get_kline(lo - 1).ClosePrice;
+        return std::isfinite(out_price) && out_price > 0.0;
+    }
+    if (has_next) {
+        out_price = data.get_kline(lo).ClosePrice;
+        return std::isfinite(out_price) && out_price > 0.0;
+    }
+    return false;
+}
+
 void BinanceExchange::FillStatusSnapshot(StatusSnapshot& out) const
 {
     std::lock_guard<std::mutex> lk(account_mtx_);
@@ -1110,6 +1247,11 @@ void BinanceExchange::FillStatusSnapshot(StatusSnapshot& out) const
         out.spot_ledger_value = spot_ledger_value;
         out.total_cash_balance = total_cash_balance;
         out.total_ledger_value = total_ledger_value;
+        out.total_ledger_value_base = total_ledger_value;
+        out.uncertainty_band_bps = uncertainty_band_bps_;
+        const double band = std::max(0.0, uncertainty_band_bps_) / 10000.0;
+        out.total_ledger_value_conservative = total_ledger_value * (1.0 - band);
+        out.total_ledger_value_optimistic = total_ledger_value * (1.0 + band);
     }
     else {
         out.wallet_balance = 0.0;
@@ -1126,6 +1268,10 @@ void BinanceExchange::FillStatusSnapshot(StatusSnapshot& out) const
         out.spot_ledger_value = 0.0;
         out.total_cash_balance = 0.0;
         out.total_ledger_value = 0.0;
+        out.total_ledger_value_base = 0.0;
+        out.total_ledger_value_conservative = 0.0;
+        out.total_ledger_value_optimistic = 0.0;
+        out.uncertainty_band_bps = uncertainty_band_bps_;
     }
     out.progress_pct = progress_pct_();
     out.prices.clear();

@@ -94,12 +94,19 @@ public:
         double spot_initial_cash{ 0.0 };
         double perp_initial_wallet{ 1'000'000.0 };
         int vip_level{ 0 };
+        bool strict_binance_mode{ false };
     };
 
     enum class KlineVolumeSplitMode {
         LegacyTotalOnly = 0,
         TakerBuyOnly = 1,
         TakerBuyOrHeuristic = 2,
+    };
+
+    enum class IntraBarPathMode {
+        LegacyCloseHeuristic = 0,
+        ExpectedPath = 1,
+        MonteCarloPath = 2,
     };
 
     // --- Policies (P2.1) ---
@@ -157,6 +164,8 @@ public:
 
     void set_position_mode(bool hedgeMode);
     bool is_hedge_mode() const;
+    void set_strict_binance_mode(bool enable);
+    bool is_strict_binance_mode() const;
 
     // Legacy top-level APIs kept for compatibility.
     // New call sites should prefer `account.perp.set_symbol_leverage(...)`
@@ -225,6 +234,33 @@ public:
     void set_limit_execution_slippage(double pct);
 
     void set_kline_volume_split_mode(KlineVolumeSplitMode mode);
+    void set_intra_bar_path_mode(IntraBarPathMode mode);
+    IntraBarPathMode intra_bar_path_mode() const;
+    void set_intra_bar_monte_carlo_samples(size_t samples);
+    size_t intra_bar_monte_carlo_samples() const;
+    void set_intra_bar_random_seed(uint64_t seed);
+    uint64_t intra_bar_random_seed() const;
+    void set_limit_fill_probability_enabled(bool enable);
+    bool is_limit_fill_probability_enabled() const;
+    void set_limit_fill_probability_coefficients(double intercept,
+        double penetration_weight,
+        double size_ratio_weight,
+        double taker_flow_weight,
+        double volatility_weight);
+    void set_market_impact_slippage_enabled(bool enable);
+    bool is_market_impact_slippage_enabled() const;
+    void set_market_impact_slippage_params(double b0_bps,
+        double b1_bps,
+        double beta,
+        double b2_bps,
+        double b3_bps);
+    void set_taker_probability_model_enabled(bool enable);
+    bool is_taker_probability_model_enabled() const;
+    void set_taker_probability_model_coefficients(double intercept,
+        double same_side_flow_weight,
+        double size_ratio_weight,
+        double volatility_weight,
+        double penetration_weight);
 
     void set_enable_console_output(bool enable);
     bool is_console_output_enabled() const;
@@ -245,6 +281,9 @@ public:
         double exec_price{};
         double remaining_qty{};
         bool is_taker{};
+        double taker_probability{ 0.0 };
+        double fill_probability{ 1.0 };
+        double impact_slippage_bps{ 0.0 };
         double fee{};
         double fee_rate{};
         int closing_position_id{};
@@ -264,6 +303,7 @@ private:
 
     int vip_level_;
     bool hedge_mode_;
+    bool strict_binance_mode_;
 
     std::unordered_map<std::string, double> symbol_leverage_;
 
@@ -316,9 +356,30 @@ private:
     Policies policies_{ };
 
     KlineVolumeSplitMode kline_volume_split_mode_{ KlineVolumeSplitMode::TakerBuyOnly };
+    IntraBarPathMode intra_bar_path_mode_{ IntraBarPathMode::LegacyCloseHeuristic };
+    size_t intra_bar_monte_carlo_samples_{ 64 };
+    uint64_t intra_bar_random_seed_{ 0x9E3779B97F4A7C15ull };
 
     bool enable_console_output_{ false };
     size_t max_match_orders_per_symbol_{ 256 };
+    bool limit_fill_probability_enabled_{ false };
+    double fill_prob_intercept_{ 1.0 };
+    double fill_prob_penetration_weight_{ 2.0 };
+    double fill_prob_size_ratio_weight_{ 2.0 };
+    double fill_prob_taker_flow_weight_{ 1.0 };
+    double fill_prob_volatility_weight_{ 0.5 };
+    bool market_impact_slippage_enabled_{ false };
+    double impact_b0_bps_{ 0.0 };
+    double impact_b1_bps_{ 8.0 };
+    double impact_beta_{ 0.7 };
+    double impact_b2_bps_{ 20.0 };
+    double impact_b3_bps_{ 15.0 };
+    bool taker_probability_model_enabled_{ false };
+    double taker_prob_intercept_{ -2.0 };
+    double taker_prob_same_side_flow_weight_{ 2.0 };
+    double taker_prob_size_ratio_weight_{ 1.5 };
+    double taker_prob_volatility_weight_{ 1.0 };
+    double taker_prob_penetration_weight_{ 1.0 };
 
     // Monotonic state version for O(1) change detection by exchange.
     uint64_t state_version_{ 0 };
@@ -358,11 +419,28 @@ private:
         QTrading::Dto::Trading::PositionSide position_side,
         bool reduce_only,
         const QTrading::Dto::Trading::InstrumentSpec& instrument_spec);
+    bool validate_order_filters_(const std::string& symbol,
+        double quantity,
+        double price,
+        QTrading::Dto::Trading::OrderSide side,
+        const QTrading::Dto::Trading::InstrumentSpec& instrument_spec) const;
     bool has_reducible_position_for_order_(const Order& ord) const;
     void update_unrealized_for_symbol_(const std::string& symbol, double close_price);
     bool has_open_perp_position_() const;
     void apply_perp_liquidation_(double taker_fee, bool& open_orders_changed, bool& positions_changed);
     void process_open_orders_pipeline_(bool& dirty, bool& open_orders_changed, bool& positions_changed);
+    std::pair<bool, bool> evaluate_can_fill_and_taker_(const Order& ord,
+        const QTrading::Dto::Market::Binance::KlineDto& k) const;
+    double limit_fill_probability_(const Order& ord,
+        const QTrading::Dto::Market::Binance::KlineDto& k,
+        bool is_taker) const;
+    std::pair<double, double> apply_market_impact_slippage_(const Order& ord,
+        const QTrading::Dto::Market::Binance::KlineDto& k,
+        double base_fill_price,
+        double fill_qty) const;
+    double taker_probability_(const Order& ord,
+        const QTrading::Dto::Market::Binance::KlineDto& k,
+        bool base_is_taker) const;
     void close_spot_position_(const std::string& symbol, double price);
     void close_perp_position_(const std::string& symbol, double price);
     void close_perp_position_side_(const std::string& symbol, QTrading::Dto::Trading::PositionSide position_side, double price);

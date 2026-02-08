@@ -93,6 +93,12 @@ bool Account::place_perp_order(const std::string& symbol,
         }
         return false;
     }
+    if (strict_binance_mode_ && hedge_mode_ && reduce_only) {
+        if (enable_console_output_) {
+            std::cerr << "[place_order] Hedge-mode reduce_only is disabled in strict Binance mode.\n";
+        }
+        return false;
+    }
 
     // In one-way mode, attempt to process reverse (flip) orders.
     if (!hedge_mode_) {

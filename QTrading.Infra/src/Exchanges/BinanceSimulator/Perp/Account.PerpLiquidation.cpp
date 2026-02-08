@@ -40,33 +40,53 @@ bool Account::has_open_perp_position_() const
 void Account::apply_perp_liquidation_(double taker_fee, bool& open_orders_changed, bool& positions_changed)
 {
     auto snapshot = get_perp_balance();
-    if (snapshot.MarginBalance >= snapshot.MaintenanceMargin || !has_open_perp_position_()) {
+    if (!has_open_perp_position_()) {
+        return;
+    }
+
+    constexpr double kWarningZoneRatio = 1.05;
+    constexpr double kWarningReductionFraction = 0.15;
+    const bool warning_zone =
+        (snapshot.MaintenanceMargin > 0.0) &&
+        (snapshot.MarginBalance >= snapshot.MaintenanceMargin) &&
+        (snapshot.MarginBalance < snapshot.MaintenanceMargin * kWarningZoneRatio);
+    const bool distressed = snapshot.MarginBalance < snapshot.MaintenanceMargin;
+    if (!warning_zone && !distressed) {
         return;
     }
 
     positions_changed = true;
     constexpr int kMaxLiquidationStepsPerTick = 8;
 
-    std::cerr << "[update_positions] Liquidation triggered! marginBalance=" << snapshot.MarginBalance
-        << ", maintenanceMargin=" << snapshot.MaintenanceMargin << "\n";
-
-    const size_t open_before = open_orders_.size();
-    open_orders_.erase(
-        std::remove_if(open_orders_.begin(), open_orders_.end(),
-            [](const Order& o) {
-                return o.instrument_type == InstrumentType::Perp && o.closing_position_id < 0;
-            }),
-        open_orders_.end());
-    if (open_orders_.size() != open_before) {
-        open_orders_changed = true;
-        mark_open_orders_dirty_();
+    if (distressed) {
+        std::cerr << "[update_positions] Liquidation triggered! marginBalance=" << snapshot.MarginBalance
+            << ", maintenanceMargin=" << snapshot.MaintenanceMargin << "\n";
     }
-    rebuild_open_order_index_();
+    else {
+        std::cerr << "[update_positions] Warning zone triggered: staged reduction. marginBalance=" << snapshot.MarginBalance
+            << ", maintenanceMargin=" << snapshot.MaintenanceMargin << "\n";
+    }
+
+    if (distressed) {
+        const size_t open_before = open_orders_.size();
+        open_orders_.erase(
+            std::remove_if(open_orders_.begin(), open_orders_.end(),
+                [](const Order& o) {
+                    return o.instrument_type == InstrumentType::Perp && o.closing_position_id < 0;
+                }),
+            open_orders_.end());
+        if (open_orders_.size() != open_before) {
+            open_orders_changed = true;
+            mark_open_orders_dirty_();
+        }
+        rebuild_open_order_index_();
+    }
 
     for (int step = 0; step < kMaxLiquidationStepsPerTick; ++step) {
         snapshot = get_perp_balance();
         if (!has_open_perp_position_()) break;
-        if (snapshot.MarginBalance >= snapshot.MaintenanceMargin) break;
+        const bool step_distressed = snapshot.MarginBalance < snapshot.MaintenanceMargin;
+        if (!step_distressed && step > 0) break;
 
         int worst_idx = -1;
         double worst_unreal = 0.0;
@@ -107,9 +127,23 @@ void Account::apply_perp_liquidation_(double taker_fee, bool& open_orders_change
         const double deficit = snapshot.MaintenanceMargin - snapshot.MarginBalance;
         const double denom = (pnl_per_unit - fee_per_unit + maint_per_unit);
 
-        double desired_close = pos.quantity;
-        if (deficit > 0.0 && denom > 1e-12) {
-            desired_close = std::min(pos.quantity, deficit / denom);
+        double staged_fraction = kWarningReductionFraction;
+        if (step_distressed) {
+            const double deficit_ratio = deficit / std::max(1e-12, snapshot.MaintenanceMargin);
+            if (deficit_ratio < 0.10) {
+                staged_fraction = 0.25;
+            }
+            else if (deficit_ratio < 0.30) {
+                staged_fraction = 0.50;
+            }
+            else {
+                staged_fraction = 1.0;
+            }
+        }
+
+        double desired_close = std::clamp(pos.quantity * staged_fraction, 1e-8, pos.quantity);
+        if (step_distressed && deficit > 0.0 && denom > 1e-12) {
+            desired_close = std::min(pos.quantity, std::max(desired_close, deficit / denom));
         }
 
         desired_close = std::clamp(desired_close, 1e-8, pos.quantity);

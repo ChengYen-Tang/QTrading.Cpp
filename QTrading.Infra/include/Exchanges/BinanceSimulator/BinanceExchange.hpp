@@ -9,6 +9,7 @@
 #include <memory>
 #include <condition_variable>
 #include <deque>
+#include <functional>
 #include <thread>
 #include <atomic>
 #include <memory_resource>
@@ -193,6 +194,10 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
         double get_total_cash_balance() const;
         bool transfer_spot_to_perp(double amount);
         bool transfer_perp_to_spot(double amount);
+        void set_order_latency_bars(size_t bars);
+        size_t order_latency_bars() const;
+        void set_uncertainty_band_bps(double bps);
+        double uncertainty_band_bps() const;
         /// @brief Close all channels and mark simulation complete.
         void  close() override;
 
@@ -221,6 +226,10 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
             double spot_ledger_value{ 0.0 };
             double total_cash_balance{ 0.0 };
             double total_ledger_value{ 0.0 };
+            double total_ledger_value_base{ 0.0 };
+            double total_ledger_value_conservative{ 0.0 };
+            double total_ledger_value_optimistic{ 0.0 };
+            double uncertainty_band_bps{ 0.0 };
 
             double progress_pct{ 0.0 };
             std::vector<PriceSnapshot> prices;
@@ -311,6 +320,14 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
         std::vector<size_t> kline_counts_;
         std::vector<double> last_close_by_symbol_;
         std::vector<uint8_t> has_last_close_;
+        size_t order_latency_bars_{ 0 };
+        uint64_t processed_steps_{ 0 };
+        double uncertainty_band_bps_{ 0.0 };
+        struct DeferredOrderCommand {
+            uint64_t due_step{ 0 };
+            std::function<void(Account&)> fn{};
+        };
+        std::deque<DeferredOrderCommand> deferred_order_commands_;
 
         /// @brief Find the next timestamp to emit across all symbols.
         /// @param[out] ts Next timestamp (ms since epoch).
@@ -346,6 +363,9 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
         void stop_log_thread_();
         void log_worker_();
         void enqueue_log_task_(LogTask&& task);
+        void enqueue_deferred_order_locked_(uint64_t due_step, std::function<void(Account&)> fn);
+        void flush_deferred_orders_locked_(uint64_t step_seq);
+        bool interpolate_mark_price_(size_t sym_id, uint64_t ts, double& out_price) const;
 
     public:
         void collect_funding_events(uint64_t ts,

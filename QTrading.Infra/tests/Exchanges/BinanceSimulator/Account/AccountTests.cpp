@@ -3,6 +3,7 @@
 #include <string>
 #include <map>
 #include <vector>
+#include <cmath>
 #include <iostream> // for CaptureStdout, CaptureStderr
 #include "Exchanges/BinanceSimulator/Account/Account.hpp"
 #include "Dto/Trading/Side.hpp"
@@ -317,6 +318,54 @@ TEST(AccountTest, UnspecifiedInstrumentDefaultsToPerpPolicy) {
     EXPECT_DOUBLE_EQ(account.get_symbol_leverage("BTCUSDT"), 10.0);
 }
 
+TEST(AccountTest, InstrumentFiltersRejectInvalidPriceTickAndRange) {
+    Account account(10000.0, 0);
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+
+    auto spec = QTrading::Dto::Trading::PerpInstrumentSpec();
+    spec.min_price = 100.0;
+    spec.max_price = 200.0;
+    spec.price_tick_size = 0.1;
+    account.set_instrument_spec("BTCUSDT", spec);
+
+    EXPECT_FALSE(account.place_order("BTCUSDT", 1.0, 99.9, OrderSide::Buy, PositionSide::Both));
+    EXPECT_FALSE(account.place_order("BTCUSDT", 1.0, 100.05, OrderSide::Buy, PositionSide::Both));
+    EXPECT_TRUE(account.place_order("BTCUSDT", 1.0, 100.1, OrderSide::Buy, PositionSide::Both));
+}
+
+TEST(AccountTest, InstrumentFiltersRejectInvalidQuantityStepAndBounds) {
+    Account account(10000.0, 0);
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+
+    auto spec = QTrading::Dto::Trading::PerpInstrumentSpec();
+    spec.min_qty = 0.1;
+    spec.max_qty = 5.0;
+    spec.qty_step_size = 0.1;
+    account.set_instrument_spec("BTCUSDT", spec);
+
+    EXPECT_FALSE(account.place_order("BTCUSDT", 0.05, 100.0, OrderSide::Buy, PositionSide::Both));
+    EXPECT_FALSE(account.place_order("BTCUSDT", 0.15, 100.0, OrderSide::Buy, PositionSide::Both));
+    EXPECT_TRUE(account.place_order("BTCUSDT", 0.2, 100.0, OrderSide::Buy, PositionSide::Both));
+}
+
+TEST(AccountTest, InstrumentFiltersRejectOrderByMinNotional) {
+    Account account(10000.0, 0);
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+
+    auto spec = QTrading::Dto::Trading::PerpInstrumentSpec();
+    spec.min_notional = 50.0;
+    account.set_instrument_spec("BTCUSDT", spec);
+
+    // Set last mark so market-order notional can be estimated.
+    account.update_positions(oneKline("BTCUSDT", 100.0, 100.0, 100.0, 100.0, 1000.0));
+
+    EXPECT_FALSE(account.place_order("BTCUSDT", 0.4, 0.0, OrderSide::Buy, PositionSide::Both));
+    EXPECT_TRUE(account.place_order("BTCUSDT", 0.5, 0.0, OrderSide::Buy, PositionSide::Both));
+}
+
 TEST(AccountTest, MixedBookSpotAndPerpRulesApplyByInstrumentType) {
     Account::AccountInitConfig cfg;
     cfg.spot_initial_cash = 50000.0;
@@ -561,6 +610,28 @@ TEST(AccountTest, Liquidation) {
     EXPECT_TRUE(account.get_all_positions().empty() || account.get_balance().MarginBalance >= account.get_balance().MaintenanceMargin);
 }
 
+TEST(AccountTest, LiquidationWarningZoneTriggersStagedReduction) {
+    Account account(350000.0, 0);
+    account.set_symbol_leverage("BTCUSDT", 75.0);
+
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+
+    ASSERT_TRUE(account.place_order("BTCUSDT", 5000.0, 500.0, OrderSide::Buy, PositionSide::Both));
+    account.update_positions(partialMarketDataBTC(500.0, 10000.0));
+    ASSERT_EQ(account.get_all_positions().size(), 1u);
+    const double qty_before = account.get_all_positions()[0].quantity;
+
+    testing::internal::CaptureStderr();
+    account.update_positions(partialMarketDataBTC(433.2, 10000.0));
+    (void)testing::internal::GetCapturedStderr();
+
+    const auto& pos = account.get_all_positions();
+    ASSERT_FALSE(pos.empty());
+    EXPECT_LT(pos[0].quantity, qty_before);
+    EXPECT_GT(pos[0].quantity, 0.0);
+}
+
 TEST(AccountTest, PerpLiquidationDoesNotConsumeSpotPosition) {
     Account::AccountInitConfig cfg;
     cfg.spot_initial_cash = 100000.0;
@@ -676,6 +747,21 @@ TEST(AccountTest, SwitchingModeWithoutPositionsSucceeds) {
     EXPECT_TRUE(account.is_hedge_mode());
 }
 
+TEST(AccountTest, SwitchingModeWithOpenOrdersFails) {
+    Account account(10000.0, 0);
+    account.set_position_mode(false);
+    EXPECT_FALSE(account.is_hedge_mode());
+
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+
+    ASSERT_TRUE(account.place_order("BTCUSDT", 1.0, 10000.0, OrderSide::Buy, PositionSide::Both));
+    ASSERT_FALSE(account.get_all_open_orders().empty());
+
+    account.set_position_mode(true);
+    EXPECT_FALSE(account.is_hedge_mode());
+}
+
 /////////////////////////////////////////////////////////
 /// 2. Single Mode Auto-Reduce vs. Hedge Mode reduceOnly
 /////////////////////////////////////////////////////////
@@ -766,6 +852,28 @@ TEST(AccountTest, HedgeModeReduceOnlyOrder) {
     }
     EXPECT_DOUBLE_EQ(longQty, 2.0);
     EXPECT_DOUBLE_EQ(shortQty, 1.0);
+}
+
+TEST(AccountTest, StrictBinanceModeRejectsHedgeReduceOnly) {
+    Account::AccountInitConfig cfg;
+    cfg.perp_initial_wallet = 10000.0;
+    cfg.strict_binance_mode = true;
+    Account account(cfg);
+    EXPECT_TRUE(account.is_strict_binance_mode());
+
+    account.set_position_mode(true);
+    account.set_symbol_leverage("BTCUSDT", 10.0);
+
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+
+    ASSERT_TRUE(account.place_order("BTCUSDT", 1.0, 10000.0, OrderSide::Buy, PositionSide::Long));
+    account.update_positions(partialMarketDataBTC(10000.0, 1000.0));
+    ASSERT_EQ(account.get_all_positions().size(), 1u);
+
+    // Strict Binance mode: reduceOnly must be rejected in hedge mode.
+    EXPECT_FALSE(account.place_order("BTCUSDT", 0.5, 10000.0, OrderSide::Sell, PositionSide::Long, true));
+    EXPECT_TRUE(account.get_all_open_orders().empty());
 }
 
 /////////////////////////////////////////////////////////
@@ -1094,6 +1202,140 @@ TEST(AccountTest, OhlcTrigger_SellLimitTriggersOnHigh) {
     EXPECT_NEAR(positions[0].entry_price, 115.0, 1e-12);
 }
 
+TEST(AccountTest, IntraBarExpectedPath_SplitsOppositePassiveLimitVolume) {
+    Account account(100000.0, 0);
+    account.set_symbol_leverage("BTCUSDT", 10.0);
+    account.set_kline_volume_split_mode(Account::KlineVolumeSplitMode::LegacyTotalOnly);
+    account.set_intra_bar_path_mode(Account::IntraBarPathMode::ExpectedPath);
+
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+
+    ASSERT_TRUE(account.place_order("BTCUSDT", 10.0, 95.0, OrderSide::Buy, PositionSide::Both));
+    ASSERT_TRUE(account.place_order("BTCUSDT", 10.0, 105.0, OrderSide::Sell, PositionSide::Both));
+
+    account.update_positions(oneKline("BTCUSDT", 100.0, 110.0, 90.0, 100.0, 10.0));
+
+    const auto& pos = account.get_all_positions();
+    ASSERT_EQ(pos.size(), 2u);
+
+    double long_qty = 0.0;
+    double short_qty = 0.0;
+    for (const auto& p : pos) {
+        if (p.is_long) {
+            long_qty += p.quantity;
+        }
+        else {
+            short_qty += p.quantity;
+        }
+    }
+
+    EXPECT_NEAR(long_qty, 5.0, 1e-8);
+    EXPECT_NEAR(short_qty, 5.0, 1e-8);
+}
+
+TEST(AccountTest, IntraBarPathModeUsesOpenMarketabilityForTakerClassification) {
+    Account account(100000.0, 0);
+    account.set_symbol_leverage("BTCUSDT", 10.0);
+    account.set_kline_volume_split_mode(Account::KlineVolumeSplitMode::LegacyTotalOnly);
+    account.set_intra_bar_path_mode(Account::IntraBarPathMode::ExpectedPath);
+
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+
+    ASSERT_TRUE(account.place_order("BTCUSDT", 1.0, 100.0, OrderSide::Buy, PositionSide::Both));
+    account.update_positions(oneKline("BTCUSDT", 105.0, 106.0, 95.0, 99.0, 1000.0));
+
+    auto fills = account.drain_fill_events();
+    ASSERT_EQ(fills.size(), 1u);
+    EXPECT_FALSE(fills[0].is_taker);
+}
+
+TEST(AccountTest, IntraBarMonteCarloPathWithFixedSeedIsDeterministic) {
+    auto run_once = [](uint64_t seed) {
+        Account account(100000.0, 0);
+        account.set_symbol_leverage("BTCUSDT", 10.0);
+        account.set_kline_volume_split_mode(Account::KlineVolumeSplitMode::LegacyTotalOnly);
+        account.set_intra_bar_path_mode(Account::IntraBarPathMode::MonteCarloPath);
+        account.set_intra_bar_monte_carlo_samples(1);
+        account.set_intra_bar_random_seed(seed);
+
+        using QTrading::Dto::Trading::OrderSide;
+        using QTrading::Dto::Trading::PositionSide;
+
+        EXPECT_TRUE(account.place_order("BTCUSDT", 10.0, 95.0, OrderSide::Buy, PositionSide::Both));
+        EXPECT_TRUE(account.place_order("BTCUSDT", 10.0, 105.0, OrderSide::Sell, PositionSide::Both));
+
+        account.update_positions(oneKline("BTCUSDT", 100.0, 110.0, 90.0, 100.0, 10.0));
+
+        double long_qty = 0.0;
+        for (const auto& p : account.get_all_positions()) {
+            if (p.is_long) {
+                long_qty += p.quantity;
+            }
+        }
+        return long_qty;
+    };
+
+    const double first = run_once(42ull);
+    const double second = run_once(42ull);
+    EXPECT_NEAR(first, second, 1e-12);
+    EXPECT_TRUE(std::abs(first - 0.0) < 1e-12 || std::abs(first - 10.0) < 1e-12);
+}
+
+TEST(AccountTest, LimitFillProbabilityModelUsesPenetrationAndSizeRatio) {
+    Account account(100000.0, 0);
+    account.set_symbol_leverage("BTCUSDT", 10.0);
+    account.set_kline_volume_split_mode(Account::KlineVolumeSplitMode::LegacyTotalOnly);
+    account.set_limit_fill_probability_enabled(true);
+    account.set_limit_fill_probability_coefficients(1.0, 2.0, 2.0, 0.0, 0.0);
+
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+
+    // Same quantity, different penetration depth:
+    // Buy@99 penetrates deeper than Buy@91 when low=90.
+    ASSERT_TRUE(account.place_order("BTCUSDT", 10.0, 99.0, OrderSide::Buy, PositionSide::Both));
+    ASSERT_TRUE(account.place_order("BTCUSDT", 10.0, 91.0, OrderSide::Buy, PositionSide::Both));
+
+    account.update_positions(oneKline("BTCUSDT", 100.0, 110.0, 90.0, 100.0, 100.0));
+    auto fills = account.drain_fill_events();
+    ASSERT_EQ(fills.size(), 2u);
+
+    const Account::FillEvent* deep_fill = nullptr;
+    const Account::FillEvent* shallow_fill = nullptr;
+    for (const auto& f : fills) {
+        if (std::abs(f.order_price - 99.0) < 1e-12) {
+            deep_fill = &f;
+        }
+        if (std::abs(f.order_price - 91.0) < 1e-12) {
+            shallow_fill = &f;
+        }
+    }
+
+    ASSERT_NE(deep_fill, nullptr);
+    ASSERT_NE(shallow_fill, nullptr);
+    EXPECT_GT(deep_fill->fill_probability, shallow_fill->fill_probability);
+    EXPECT_GT(deep_fill->exec_qty, shallow_fill->exec_qty);
+    const double deep_prob = deep_fill->fill_probability;
+
+    // Add a large-size order on the next bar to validate size-ratio penalty.
+    ASSERT_TRUE(account.place_order("BTCUSDT", 80.0, 99.0, OrderSide::Buy, PositionSide::Both));
+    account.update_positions(oneKline("BTCUSDT", 100.0, 110.0, 90.0, 100.0, 100.0));
+    fills = account.drain_fill_events();
+    ASSERT_FALSE(fills.empty());
+
+    const Account::FillEvent* large_fill = nullptr;
+    for (const auto& f : fills) {
+        if (std::abs(f.order_qty - 80.0) < 1e-12) {
+            large_fill = &f;
+            break;
+        }
+    }
+    ASSERT_NE(large_fill, nullptr);
+    EXPECT_LT(large_fill->fill_probability, deep_prob);
+}
+
 TEST(AccountTest, HedgeMode_OrderRequiresExplicitPositionSide_IsRejectedWithoutException) {
     Account account(10000.0, 0);
     account.set_position_mode(true);
@@ -1375,6 +1617,90 @@ TEST(AccountTest, LimitOrderFill_ExecutionSlippageCanWorsenPriceWithinLimit) {
     ASSERT_EQ(pos.size(), 1u);
     EXPECT_TRUE(pos[0].is_long);
     EXPECT_NEAR(pos[0].entry_price, 104.5, 1e-12);
+}
+
+TEST(AccountTest, MarketImpactSlippageCurveWorsensLargeOrderMoreThanSmallOrder) {
+    Account account(100000.0, 0);
+    account.set_symbol_leverage("BTCUSDT", 10.0);
+    account.set_kline_volume_split_mode(Account::KlineVolumeSplitMode::LegacyTotalOnly);
+    account.set_market_impact_slippage_enabled(true);
+    account.set_market_impact_slippage_params(0.0, 500.0, 1.0, 0.0, 0.0);
+
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+
+    ASSERT_TRUE(account.place_order("BTCUSDT", 1.0, 0.0, OrderSide::Buy, PositionSide::Both));
+    ASSERT_TRUE(account.place_order("BTCUSDT", 8.0, 0.0, OrderSide::Buy, PositionSide::Both));
+
+    account.update_positions(oneKline("BTCUSDT", 100.0, 120.0, 80.0, 100.0, 100.0));
+    auto fills = account.drain_fill_events();
+    ASSERT_EQ(fills.size(), 2u);
+
+    const Account::FillEvent* small = nullptr;
+    const Account::FillEvent* large = nullptr;
+    for (const auto& f : fills) {
+        if (std::abs(f.order_qty - 1.0) < 1e-12) {
+            small = &f;
+        }
+        if (std::abs(f.order_qty - 8.0) < 1e-12) {
+            large = &f;
+        }
+    }
+
+    ASSERT_NE(small, nullptr);
+    ASSERT_NE(large, nullptr);
+    EXPECT_GT(large->impact_slippage_bps, small->impact_slippage_bps);
+    EXPECT_GT(large->exec_price, small->exec_price);
+}
+
+TEST(AccountTest, MarketImpactSlippageRespectsLimitProtection) {
+    Account account(100000.0, 0);
+    account.set_symbol_leverage("BTCUSDT", 10.0);
+    account.set_kline_volume_split_mode(Account::KlineVolumeSplitMode::LegacyTotalOnly);
+    account.set_market_impact_slippage_enabled(true);
+    account.set_market_impact_slippage_params(0.0, 5000.0, 1.0, 0.0, 0.0);
+
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+
+    ASSERT_TRUE(account.place_order("BTCUSDT", 8.0, 100.0, OrderSide::Buy, PositionSide::Both));
+    account.update_positions(oneKline("BTCUSDT", 105.0, 110.0, 95.0, 100.0, 100.0));
+
+    auto fills = account.drain_fill_events();
+    ASSERT_EQ(fills.size(), 1u);
+    EXPECT_LE(fills[0].exec_price, 100.0 + 1e-12);
+}
+
+TEST(AccountTest, TakerProbabilityModelUsesExpectedFeeRate) {
+    Account account(100000.0, 0);
+    account.set_symbol_leverage("BTCUSDT", 10.0);
+    account.set_kline_volume_split_mode(Account::KlineVolumeSplitMode::LegacyTotalOnly);
+    account.set_taker_probability_model_enabled(true);
+    account.set_taker_probability_model_coefficients(-1.0, 2.0, 0.5, 0.5, 0.0);
+
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+
+    ASSERT_TRUE(account.place_order("BTCUSDT", 1.0, 99.0, OrderSide::Buy, PositionSide::Both));
+
+    QTrading::Dto::Market::Binance::KlineDto k;
+    k.OpenPrice = 100.0;
+    k.HighPrice = 110.0;
+    k.LowPrice = 90.0;
+    k.ClosePrice = 100.0;
+    k.Volume = 100.0;
+    k.TakerBuyBaseVolume = 90.0;
+    account.update_positions(std::unordered_map<std::string, QTrading::Dto::Market::Binance::KlineDto>{ {"BTCUSDT", k} });
+
+    auto fills = account.drain_fill_events();
+    ASSERT_EQ(fills.size(), 1u);
+
+    const double p = fills[0].taker_probability;
+    EXPECT_GT(p, 0.0);
+    EXPECT_LT(p, 1.0);
+
+    const double expected_rate = 0.0002 * (1.0 - p) + 0.0005 * p;
+    EXPECT_NEAR(fills[0].fee_rate, expected_rate, 1e-12);
 }
 
 TEST(AccountTest, TickVolumeSplit_UsesTakerBuyBaseVolumePools) {

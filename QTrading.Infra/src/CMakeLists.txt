@@ -22,6 +22,7 @@ add_library(QTrading.Infra.Library STATIC
   Exchanges/BinanceSimulator/Perp/BinanceExchange.PerpApi.cpp
   Exchanges/BinanceSimulator/DataProvider/MarketData.cpp
   Exchanges/BinanceSimulator/DataProvider/FundingRateData.cpp
+  Exchanges/BinanceSimulator/Calibration/CalibrationMetrics.cpp
   Exchanges/BinanceSimulator/BinanceExchange.cpp
 )
 

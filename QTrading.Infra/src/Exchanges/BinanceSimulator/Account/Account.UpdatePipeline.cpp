@@ -13,6 +13,25 @@ using QTrading::Dto::Trading::OrderSide;
 
 namespace {
 
+static bool is_limit_order_marketable_at_open(const Order& ord, const KlineDto& k)
+{
+    if (ord.price <= 0.0) {
+        return true;
+    }
+    if (ord.side == OrderSide::Buy) {
+        return k.OpenPrice <= ord.price;
+    }
+    return k.OpenPrice >= ord.price;
+}
+
+static uint64_t splitmix64(uint64_t x)
+{
+    x += 0x9E3779B97F4A7C15ull;
+    x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ull;
+    x = (x ^ (x >> 27)) * 0x94D049BB133111EBull;
+    return x ^ (x >> 31);
+}
+
 struct PriceExecutionModel {
     double market_exec_slippage{};
     double limit_exec_slippage{};
@@ -108,6 +127,151 @@ struct FillModel {
 
 } // namespace
 
+std::pair<bool, bool> Account::evaluate_can_fill_and_taker_(const Order& ord, const KlineDto& k) const
+{
+    const FillModel fill_model{ kline_volume_split_mode_ };
+    const auto base = policies_.can_fill_and_taker
+        ? policies_.can_fill_and_taker(ord, k)
+        : fill_model.can_fill_and_taker(ord, k);
+
+    if (!base.first) {
+        return base;
+    }
+
+    if (ord.price <= 0.0) {
+        return { true, true };
+    }
+
+    if (intra_bar_path_mode_ == IntraBarPathMode::LegacyCloseHeuristic) {
+        return base;
+    }
+
+    // In path mode, a limit order is taker only when marketable at bar open.
+    return { true, is_limit_order_marketable_at_open(ord, k) };
+}
+
+double Account::limit_fill_probability_(const Order& ord, const KlineDto& k, bool is_taker) const
+{
+    if (ord.price <= 0.0 || is_taker || !limit_fill_probability_enabled_) {
+        return 1.0;
+    }
+
+    const double vol = std::max(1e-12, k.Volume);
+    const double range = std::max(1e-12, k.HighPrice - k.LowPrice);
+    const double open_abs = std::max(1e-12, std::abs(k.OpenPrice));
+    const double size_ratio = std::clamp(ord.quantity / vol, 0.0, 10.0);
+    const double volatility = std::clamp(range / open_abs, 0.0, 10.0);
+
+    double penetration = 0.0;
+    if (ord.side == OrderSide::Buy) {
+        penetration = (ord.price - k.LowPrice) / range;
+    }
+    else {
+        penetration = (k.HighPrice - ord.price) / range;
+    }
+    penetration = std::clamp(penetration, 0.0, 2.0);
+
+    double taker_buy_ratio = 0.5;
+    if (k.TakerBuyBaseVolume > 0.0) {
+        taker_buy_ratio = std::clamp(k.TakerBuyBaseVolume / vol, 0.0, 1.0);
+    }
+    const double favorable_flow = (ord.side == OrderSide::Buy) ? (1.0 - taker_buy_ratio) : taker_buy_ratio;
+    const double flow_centered = (favorable_flow - 0.5) * 2.0;
+
+    const double z = fill_prob_intercept_
+        + fill_prob_penetration_weight_ * penetration
+        - fill_prob_size_ratio_weight_ * size_ratio
+        + fill_prob_taker_flow_weight_ * flow_centered
+        + fill_prob_volatility_weight_ * volatility;
+
+    const double p = 1.0 / (1.0 + std::exp(-z));
+    if (!std::isfinite(p)) {
+        return 1.0;
+    }
+    return std::clamp(p, 0.0, 1.0);
+}
+
+std::pair<double, double> Account::apply_market_impact_slippage_(const Order& ord,
+    const KlineDto& k,
+    double base_fill_price,
+    double fill_qty) const
+{
+    if (!market_impact_slippage_enabled_ || fill_qty <= 0.0 || base_fill_price <= 0.0) {
+        return { base_fill_price, 0.0 };
+    }
+
+    const double vol = std::max(1e-12, k.Volume);
+    const double open_abs = std::max(1e-12, std::abs(k.OpenPrice));
+    const double size_ratio = std::clamp(fill_qty / vol, 0.0, 10.0);
+    const double volatility = std::clamp(std::abs(k.ClosePrice - k.OpenPrice) / open_abs, 0.0, 10.0);
+    const double spread_proxy = std::clamp((k.HighPrice - k.LowPrice) / open_abs, 0.0, 10.0);
+    const double beta = std::max(0.0, impact_beta_);
+    const double impact_bps = impact_b0_bps_
+        + impact_b1_bps_ * std::pow(size_ratio, beta)
+        + impact_b2_bps_ * volatility
+        + impact_b3_bps_ * spread_proxy;
+    const double impact_pct = std::max(0.0, impact_bps) / 10000.0;
+
+    double impacted = base_fill_price;
+    if (ord.side == OrderSide::Buy) {
+        impacted = std::min(k.HighPrice, base_fill_price * (1.0 + impact_pct));
+        if (ord.price > 0.0) {
+            impacted = std::min(ord.price, impacted);
+        }
+    }
+    else {
+        impacted = std::max(k.LowPrice, base_fill_price * (1.0 - impact_pct));
+        if (ord.price > 0.0) {
+            impacted = std::max(ord.price, impacted);
+        }
+    }
+
+    return { impacted, std::max(0.0, impact_bps) };
+}
+
+double Account::taker_probability_(const Order& ord, const KlineDto& k, bool base_is_taker) const
+{
+    if (base_is_taker || ord.price <= 0.0) {
+        return 1.0;
+    }
+    if (!taker_probability_model_enabled_) {
+        return base_is_taker ? 1.0 : 0.0;
+    }
+
+    const double vol = std::max(1e-12, k.Volume);
+    const double range = std::max(1e-12, k.HighPrice - k.LowPrice);
+    const double open_abs = std::max(1e-12, std::abs(k.OpenPrice));
+    const double size_ratio = std::clamp(ord.quantity / vol, 0.0, 10.0);
+    const double volatility = std::clamp(range / open_abs, 0.0, 10.0);
+
+    double penetration = 0.0;
+    if (ord.side == OrderSide::Buy) {
+        penetration = std::clamp((ord.price - k.LowPrice) / range, 0.0, 2.0);
+    }
+    else {
+        penetration = std::clamp((k.HighPrice - ord.price) / range, 0.0, 2.0);
+    }
+
+    double taker_buy_ratio = 0.5;
+    if (k.TakerBuyBaseVolume > 0.0) {
+        taker_buy_ratio = std::clamp(k.TakerBuyBaseVolume / vol, 0.0, 1.0);
+    }
+    const double same_side_flow = (ord.side == OrderSide::Buy) ? taker_buy_ratio : (1.0 - taker_buy_ratio);
+    const double flow_centered = (same_side_flow - 0.5) * 2.0;
+
+    const double z = taker_prob_intercept_
+        + taker_prob_same_side_flow_weight_ * flow_centered
+        + taker_prob_size_ratio_weight_ * size_ratio
+        + taker_prob_volatility_weight_ * volatility
+        - taker_prob_penetration_weight_ * penetration;
+
+    const double p = 1.0 / (1.0 + std::exp(-z));
+    if (!std::isfinite(p)) {
+        return 0.0;
+    }
+    return std::clamp(p, 0.0, 1.0);
+}
+
 void Account::process_open_orders_pipeline_(bool& dirty, bool& open_orders_changed, bool& positions_changed)
 {
     if (open_orders_.empty()) {
@@ -121,7 +285,6 @@ void Account::process_open_orders_pipeline_(bool& dirty, bool& open_orders_chang
     const double spot_maker_fee = std::get<0>(spot_fee_rates);
     const double spot_taker_fee = std::get<1>(spot_fee_rates);
 
-    const FillModel fill_model{ kline_volume_split_mode_ };
     std::pmr::vector<unsigned char> keep_open_order{ &tick_memory_ };
     std::pmr::vector<Order> next_open_orders{ &tick_memory_ };
     std::vector<Order> single_leftover;
@@ -136,6 +299,9 @@ void Account::process_open_orders_pipeline_(bool& dirty, bool& open_orders_chang
         double fill_qty;
         double fill_price;
         bool is_taker;
+        double taker_probability;
+        double fill_probability;
+        double impact_slippage_bps;
     };
     struct SymbolPlan {
         std::pmr::vector<FillPlanEntry> fills;
@@ -213,42 +379,173 @@ void Account::process_open_orders_pipeline_(bool& dirty, bool& open_orders_chang
             plan.fills.reserve(indices.size());
             plan.has_data = true;
 
-            const size_t max_checks = max_match_orders_per_symbol_;
-            size_t checked = 0;
-            for (size_t idx : indices) {
-                if (max_checks > 0 && checked >= max_checks) {
-                    break;
+            const bool use_path_model =
+                (!use_dir_liq && intra_bar_path_mode_ != IntraBarPathMode::LegacyCloseHeuristic);
+
+            if (!use_path_model) {
+                const size_t max_checks = max_match_orders_per_symbol_;
+                size_t checked = 0;
+                for (size_t idx : indices) {
+                    if (max_checks > 0 && checked >= max_checks) {
+                        break;
+                    }
+                    if (total_vol <= 0.0) break;
+
+                    const auto [can_fill, base_is_taker] = evaluate_can_fill_and_taker_(open_orders_[idx], k);
+                    if (!can_fill) continue;
+
+                    const Order& ord = open_orders_[idx];
+                    const double taker_prob = taker_probability_(ord, k, base_is_taker);
+                    const bool is_taker = taker_prob >= 0.5;
+                    const double fill_prob = limit_fill_probability_(ord, k, is_taker);
+                    const double desired_qty = ord.quantity * fill_prob;
+                    double fill_qty = 0.0;
+                    if (use_dir_liq) {
+                        const bool order_is_buy = (ord.side == OrderSide::Buy);
+                        double& dir_liq = order_is_buy ? sell_liq : buy_liq;
+                        if (dir_liq <= 0.0) continue;
+                        fill_qty = std::min({ desired_qty, total_vol, dir_liq });
+                        if (fill_qty < 1e-8) continue;
+                        total_vol -= fill_qty;
+                        dir_liq -= fill_qty;
+                    }
+                    else {
+                        fill_qty = std::min(desired_qty, total_vol);
+                        if (fill_qty < 1e-8) continue;
+                        total_vol -= fill_qty;
+                    }
+
+                    const double base_fill_price = policies_.execution_price
+                        ? policies_.execution_price(ord, k, market_execution_slippage_, limit_execution_slippage_)
+                        : PriceExecutionModel{ market_execution_slippage_, limit_execution_slippage_ }.execution_price(ord, k);
+                    const auto [fill_price, impact_bps] = apply_market_impact_slippage_(ord, k, base_fill_price, fill_qty);
+
+                    plan.fills.push_back(FillPlanEntry{ idx, fill_qty, fill_price, is_taker, taker_prob, fill_prob, impact_bps });
+                    ++checked;
                 }
-                if (total_vol <= 0.0) break;
+            }
+            else {
+                const size_t n = indices.size();
+                std::vector<double> fill_a(n, 0.0);
+                std::vector<double> fill_b(n, 0.0);
+                std::vector<unsigned char> can_fill(n, 0);
+                std::vector<unsigned char> is_taker(n, 0);
+                std::vector<unsigned char> marketable_open(n, 0);
+                std::vector<double> taker_prob(n, 0.0);
+                std::vector<double> fill_prob(n, 1.0);
+                std::vector<double> desired_qty(n, 0.0);
 
-                const auto [can_fill, is_taker] = policies_.can_fill_and_taker
-                    ? policies_.can_fill_and_taker(open_orders_[idx], k)
-                    : fill_model.can_fill_and_taker(open_orders_[idx], k);
-                if (!can_fill) continue;
-
-                const Order& ord = open_orders_[idx];
-                double fill_qty = 0.0;
-                if (use_dir_liq) {
-                    const bool order_is_buy = (ord.side == OrderSide::Buy);
-                    double& dir_liq = order_is_buy ? sell_liq : buy_liq;
-                    if (dir_liq <= 0.0) continue;
-                    fill_qty = std::min({ ord.quantity, total_vol, dir_liq });
-                    if (fill_qty < 1e-8) continue;
-                    total_vol -= fill_qty;
-                    dir_liq -= fill_qty;
+                for (size_t local = 0; local < n; ++local) {
+                    const Order& ord = open_orders_[indices[local]];
+                    const auto [ok, base_taker] = evaluate_can_fill_and_taker_(ord, k);
+                    if (!ok) {
+                        continue;
+                    }
+                    const double p_taker = taker_probability_(ord, k, base_taker);
+                    const bool taker = p_taker >= 0.5;
+                    can_fill[local] = 1;
+                    is_taker[local] = taker ? 1 : 0;
+                    taker_prob[local] = p_taker;
+                    if (ord.price > 0.0 && taker) {
+                        marketable_open[local] = 1;
+                    }
+                    fill_prob[local] = limit_fill_probability_(ord, k, taker);
+                    desired_qty[local] = ord.quantity * fill_prob[local];
                 }
-                else {
-                    fill_qty = std::min(ord.quantity, total_vol);
-                    if (fill_qty < 1e-8) continue;
-                    total_vol -= fill_qty;
+
+                auto simulate_path = [&](bool sell_first, std::vector<double>& out) {
+                    std::fill(out.begin(), out.end(), 0.0);
+                    double rem = total_vol_init;
+                    const size_t max_checks = max_match_orders_per_symbol_;
+                    size_t checked = 0;
+                    const int first_phase = sell_first ? 1 : 2;
+                    const int second_phase = sell_first ? 2 : 1;
+
+                    auto run_phase = [&](int phase) {
+                        for (size_t local = 0; local < n; ++local) {
+                            if (rem <= 0.0) {
+                                return;
+                            }
+                            if (max_checks > 0 && checked >= max_checks) {
+                                return;
+                            }
+                            if (can_fill[local] == 0) {
+                                continue;
+                            }
+
+                            const Order& ord = open_orders_[indices[local]];
+                            int order_phase = 0;
+                            if (ord.price <= 0.0 || marketable_open[local] != 0) {
+                                order_phase = 0;
+                            }
+                            else {
+                                order_phase = (ord.side == OrderSide::Sell) ? 1 : 2;
+                            }
+                            if (order_phase != phase) {
+                                continue;
+                            }
+
+                            const double qty = std::min(desired_qty[local], rem);
+                            if (qty < 1e-8) {
+                                continue;
+                            }
+                            out[local] = qty;
+                            rem -= qty;
+                            ++checked;
+                        }
+                    };
+
+                    run_phase(0);
+                    run_phase(first_phase);
+                    run_phase(second_phase);
+                };
+
+                simulate_path(true, fill_a);   // O -> H -> L -> C
+                simulate_path(false, fill_b);  // O -> L -> H -> C
+
+                double weight_a = 0.5;
+                if (intra_bar_path_mode_ == IntraBarPathMode::MonteCarloPath) {
+                    const size_t samples = std::max<size_t>(1, intra_bar_monte_carlo_samples_);
+                    uint64_t state = intra_bar_random_seed_ ^ (static_cast<uint64_t>(sym_id) * 0x9E3779B97F4A7C15ull)
+                        ^ static_cast<uint64_t>(k.Timestamp);
+                    size_t pick_a = 0;
+                    for (size_t s = 0; s < samples; ++s) {
+                        state = splitmix64(state + static_cast<uint64_t>(s));
+                        if ((state & 1ull) != 0ull) {
+                            ++pick_a;
+                        }
+                    }
+                    weight_a = static_cast<double>(pick_a) / static_cast<double>(samples);
                 }
 
-                const double fill_price = policies_.execution_price
-                    ? policies_.execution_price(ord, k, market_execution_slippage_, limit_execution_slippage_)
-                    : PriceExecutionModel{ market_execution_slippage_, limit_execution_slippage_ }.execution_price(ord, k);
+                double consumed = 0.0;
+                for (size_t local = 0; local < n; ++local) {
+                    if (can_fill[local] == 0) {
+                        continue;
+                    }
+                    const double qty = fill_a[local] * weight_a + fill_b[local] * (1.0 - weight_a);
+                    if (qty < 1e-8) {
+                        continue;
+                    }
+                    const size_t idx = indices[local];
+                    const Order& ord = open_orders_[idx];
+                    const double base_fill_price = policies_.execution_price
+                        ? policies_.execution_price(ord, k, market_execution_slippage_, limit_execution_slippage_)
+                        : PriceExecutionModel{ market_execution_slippage_, limit_execution_slippage_ }.execution_price(ord, k);
+                    const auto [fill_price, impact_bps] = apply_market_impact_slippage_(ord, k, base_fill_price, qty);
+                    plan.fills.push_back(FillPlanEntry{
+                        idx,
+                        qty,
+                        fill_price,
+                        is_taker[local] != 0,
+                        taker_prob[local],
+                        fill_prob[local],
+                        impact_bps
+                    });
+                    consumed += qty;
+                }
 
-                plan.fills.push_back(FillPlanEntry{ idx, fill_qty, fill_price, is_taker });
-                ++checked;
+                total_vol = std::max(0.0, total_vol_init - consumed);
             }
 
             plan.remaining_vol = total_vol;
@@ -290,14 +587,17 @@ void Account::process_open_orders_pipeline_(bool& dirty, bool& open_orders_chang
             const double fill_qty = entry.fill_qty;
             const double fill_price = entry.fill_price;
             const bool is_taker = entry.is_taker;
+            const double taker_probability = entry.taker_probability;
+            const double fill_probability = entry.fill_probability;
+            const double impact_slippage_bps = entry.impact_slippage_bps;
             const double order_qty = ord.quantity;
             const double order_price = ord.price;
 
             const double notional = fill_qty * fill_price;
             const bool is_spot = (ord.instrument_type == InstrumentType::Spot);
-            const double fee_rate = is_taker
-                ? (is_spot ? spot_taker_fee : perp_taker_fee)
-                : (is_spot ? spot_maker_fee : perp_maker_fee);
+            const double maker_rate = is_spot ? spot_maker_fee : perp_maker_fee;
+            const double taker_rate = is_spot ? spot_taker_fee : perp_taker_fee;
+            const double fee_rate = maker_rate * (1.0 - taker_probability) + taker_rate * taker_probability;
             const double fee = notional * fee_rate;
 
             keep_open_order[entry.idx] = false;
@@ -332,6 +632,9 @@ void Account::process_open_orders_pipeline_(bool& dirty, bool& open_orders_chang
             fill.exec_price = fill_price;
             fill.remaining_qty = remaining_qty;
             fill.is_taker = is_taker;
+            fill.taker_probability = taker_probability;
+            fill.fill_probability = fill_probability;
+            fill.impact_slippage_bps = impact_slippage_bps;
             fill.fee = fee;
             fill.fee_rate = fee_rate;
             fill.closing_position_id = ord.closing_position_id;
