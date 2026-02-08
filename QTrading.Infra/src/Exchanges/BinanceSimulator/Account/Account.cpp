@@ -499,24 +499,52 @@ bool Account::place_order(const std::string& symbol,
     double price,
     OrderSide side,
     PositionSide position_side,
-    bool reduce_only)
+    bool reduce_only,
+    const std::string& client_order_id,
+    SelfTradePreventionMode stp_mode)
 {
+    clear_last_order_reject_info_();
     if (quantity <= 0) {
         if (enable_console_output_) {
             std::cerr << "[place_order] Invalid quantity <= 0\n";
         }
-        return false;
+        return reject_order_(OrderRejectInfo::Code::InvalidQuantity, "Invalid quantity <= 0");
     }
 
     const auto& instrument_spec = resolve_instrument_spec_(symbol);
     if (!validate_order_filters_(symbol, quantity, price, side, instrument_spec)) {
         return false;
     }
-    if (instrument_spec.type == InstrumentType::Spot) {
-        return place_spot_order(symbol, quantity, price, side, position_side, reduce_only, instrument_spec);
+    if (!client_order_id.empty() && has_open_order_with_client_id_(client_order_id)) {
+        if (enable_console_output_) {
+            std::cerr << "[place_order] duplicate clientOrderId among open orders.\n";
+        }
+        return reject_order_(OrderRejectInfo::Code::DuplicateClientOrderId, "duplicate clientOrderId among open orders");
     }
 
-    return place_perp_order(symbol, quantity, price, side, position_side, reduce_only, instrument_spec);
+    const size_t stp_conflicts = count_stp_conflicting_orders_(symbol, side, price, instrument_spec.type);
+    if (stp_conflicts > 0) {
+        if (stp_mode == SelfTradePreventionMode::ExpireMaker ||
+            stp_mode == SelfTradePreventionMode::ExpireBoth) {
+            const size_t cancelled = cancel_stp_conflicting_orders_(symbol, side, price, instrument_spec.type);
+            if (cancelled > 0) {
+                mark_open_orders_dirty_();
+                ++state_version_;
+            }
+        }
+        if (stp_mode == SelfTradePreventionMode::ExpireTaker) {
+            return reject_order_(OrderRejectInfo::Code::StpExpiredTaker, "STP expired taker order");
+        }
+        if (stp_mode == SelfTradePreventionMode::ExpireBoth) {
+            return reject_order_(OrderRejectInfo::Code::StpExpiredBoth, "STP expired both sides");
+        }
+    }
+
+    if (instrument_spec.type == InstrumentType::Spot) {
+        return place_spot_order(symbol, quantity, price, side, position_side, reduce_only, client_order_id, stp_mode, instrument_spec);
+    }
+
+    return place_perp_order(symbol, quantity, price, side, position_side, reduce_only, client_order_id, stp_mode, instrument_spec);
 }
 
 bool Account::has_reducible_position_for_order_(const Order& ord) const
@@ -528,9 +556,18 @@ bool Account::place_order(const std::string& symbol,
     double quantity,
     OrderSide side,
     PositionSide position_side,
-    bool reduce_only)
+    bool reduce_only,
+    const std::string& client_order_id,
+    SelfTradePreventionMode stp_mode)
 {
-    return place_order(symbol, quantity, 0.0, side, position_side, reduce_only);
+    return place_order(symbol, quantity, 0.0, side, position_side, reduce_only, client_order_id, stp_mode);
+}
+
+std::optional<Account::OrderRejectInfo> Account::consume_last_order_reject_info()
+{
+    std::optional<OrderRejectInfo> out;
+    out.swap(last_order_reject_info_);
+    return out;
 }
 
 /// @brief Merge positions of the same symbol & direction into one.
@@ -707,9 +744,7 @@ void Account::update_positions(const std::unordered_map<std::string, KlineDto>& 
             p.maintenance_margin = 0.0;
             continue;
         }
-        double mmr, maxLev;
-        std::tie(mmr, maxLev) = get_tier_info(p.notional);
-        p.maintenance_margin = p.notional * mmr;
+        p.maintenance_margin = maintenance_margin_for_notional_(p.notional);
     }
 
     auto snapshot = get_perp_balance();
@@ -868,12 +903,40 @@ const std::vector<Position>& Account::get_all_positions() const {
 /// @param notional Position notional.
 /// @return Tuple(maintenance_margin_rate, max_leverage).
 std::tuple<double, double> Account::get_tier_info(double notional) const {
+    const double n = std::max(0.0, notional);
     for (const auto& tier : margin_tiers) {
-        if (notional <= tier.notional_upper) {
+        if (n <= tier.notional_upper) {
             return std::make_tuple(tier.maintenance_margin_rate, tier.max_leverage);
         }
     }
     return std::make_tuple(margin_tiers.front().maintenance_margin_rate, margin_tiers.front().max_leverage);
+}
+
+double Account::maintenance_margin_for_notional_(double notional) const
+{
+    const double n = std::max(0.0, notional);
+    if (margin_tiers.empty()) {
+        return 0.0;
+    }
+
+    // Binance bracket-style cumulative deduction to keep piecewise function continuous.
+    double deduction = 0.0;
+    for (size_t i = 0; i < margin_tiers.size(); ++i) {
+        const auto& tier = margin_tiers[i];
+        if (i > 0) {
+            const auto& prev = margin_tiers[i - 1];
+            deduction += prev.notional_upper * (tier.maintenance_margin_rate - prev.maintenance_margin_rate);
+        }
+
+        if (n <= tier.notional_upper) {
+            const double mm = n * tier.maintenance_margin_rate - deduction;
+            return std::max(0.0, mm);
+        }
+    }
+
+    const auto& back = margin_tiers.back();
+    const double mm = n * back.maintenance_margin_rate - deduction;
+    return std::max(0.0, mm);
 }
 
 /// @brief Get maker and taker fee rates by instrument type and VIP level.
@@ -908,7 +971,7 @@ bool Account::validate_order_filters_(const std::string& symbol,
     double quantity,
     double price,
     OrderSide side,
-    const QTrading::Dto::Trading::InstrumentSpec& instrument_spec) const
+    const QTrading::Dto::Trading::InstrumentSpec& instrument_spec)
 {
     const bool is_market = (price <= 0.0);
 
@@ -917,19 +980,19 @@ bool Account::validate_order_filters_(const std::string& symbol,
             if (enable_console_output_) {
                 std::cerr << "[place_order] PRICE_FILTER reject: below min_price.\n";
             }
-            return false;
+            return reject_order_(OrderRejectInfo::Code::PriceFilterBelowMin, "PRICE_FILTER reject: below min_price");
         }
         if (instrument_spec.max_price > 0.0 && price - 1e-12 > instrument_spec.max_price) {
             if (enable_console_output_) {
                 std::cerr << "[place_order] PRICE_FILTER reject: above max_price.\n";
             }
-            return false;
+            return reject_order_(OrderRejectInfo::Code::PriceFilterAboveMax, "PRICE_FILTER reject: above max_price");
         }
         if (instrument_spec.price_tick_size > 0.0 && !is_multiple_of_step(price, instrument_spec.price_tick_size)) {
             if (enable_console_output_) {
                 std::cerr << "[place_order] PRICE_FILTER reject: invalid tick size step.\n";
             }
-            return false;
+            return reject_order_(OrderRejectInfo::Code::PriceFilterInvalidTick, "PRICE_FILTER reject: invalid tick size step");
         }
     }
 
@@ -947,19 +1010,19 @@ bool Account::validate_order_filters_(const std::string& symbol,
         if (enable_console_output_) {
             std::cerr << "[place_order] LOT_SIZE reject: below min_qty.\n";
         }
-        return false;
+        return reject_order_(OrderRejectInfo::Code::LotSizeBelowMinQty, "LOT_SIZE reject: below min_qty");
     }
     if (max_qty > 0.0 && quantity - 1e-12 > max_qty) {
         if (enable_console_output_) {
             std::cerr << "[place_order] LOT_SIZE reject: above max_qty.\n";
         }
-        return false;
+        return reject_order_(OrderRejectInfo::Code::LotSizeAboveMaxQty, "LOT_SIZE reject: above max_qty");
     }
     if (qty_step > 0.0 && !is_multiple_of_step(quantity, qty_step)) {
         if (enable_console_output_) {
             std::cerr << "[place_order] LOT_SIZE reject: invalid qty step.\n";
         }
-        return false;
+        return reject_order_(OrderRejectInfo::Code::LotSizeInvalidStep, "LOT_SIZE reject: invalid qty step");
     }
 
     double notional_est = 0.0;
@@ -985,19 +1048,19 @@ bool Account::validate_order_filters_(const std::string& symbol,
             if (enable_console_output_) {
                 std::cerr << "[place_order] NOTIONAL reject: no reference price for notional estimation.\n";
             }
-            return false;
+            return reject_order_(OrderRejectInfo::Code::NotionalNoReferencePrice, "NOTIONAL reject: no reference price for notional estimation");
         }
         if (instrument_spec.min_notional > 0.0 && notional_est + 1e-12 < instrument_spec.min_notional) {
             if (enable_console_output_) {
                 std::cerr << "[place_order] NOTIONAL reject: below min_notional.\n";
             }
-            return false;
+            return reject_order_(OrderRejectInfo::Code::NotionalBelowMin, "NOTIONAL reject: below min_notional");
         }
         if (instrument_spec.max_notional > 0.0 && notional_est - 1e-12 > instrument_spec.max_notional) {
             if (enable_console_output_) {
                 std::cerr << "[place_order] NOTIONAL reject: above max_notional.\n";
             }
-            return false;
+            return reject_order_(OrderRejectInfo::Code::NotionalAboveMax, "NOTIONAL reject: above max_notional");
         }
     }
 
@@ -1032,18 +1095,101 @@ bool Account::validate_order_filters_(const std::string& symbol,
                 if (enable_console_output_) {
                     std::cerr << "[place_order] PERCENT_PRICE reject: above multiplier up bound.\n";
                 }
-                return false;
+                return reject_order_(OrderRejectInfo::Code::PercentPriceAboveBound, "PERCENT_PRICE reject: above multiplier up bound");
             }
             if (down > 0.0 && price + 1e-12 < ref_price * down) {
                 if (enable_console_output_) {
                     std::cerr << "[place_order] PERCENT_PRICE reject: below multiplier down bound.\n";
                 }
-                return false;
+                return reject_order_(OrderRejectInfo::Code::PercentPriceBelowBound, "PERCENT_PRICE reject: below multiplier down bound");
             }
         }
     }
 
     return true;
+}
+
+void Account::clear_last_order_reject_info_()
+{
+    last_order_reject_info_.reset();
+}
+
+bool Account::reject_order_(OrderRejectInfo::Code code, std::string message)
+{
+    last_order_reject_info_ = OrderRejectInfo{ code, std::move(message) };
+    return false;
+}
+
+bool Account::has_open_order_with_client_id_(const std::string& client_order_id) const
+{
+    if (client_order_id.empty()) {
+        return false;
+    }
+    for (const auto& o : open_orders_) {
+        if (o.client_order_id == client_order_id) {
+            return true;
+        }
+    }
+    return false;
+}
+
+size_t Account::count_stp_conflicting_orders_(const std::string& symbol,
+    OrderSide incoming_side,
+    double incoming_price,
+    InstrumentType instrument_type) const
+{
+    auto is_cross = [&](const Order& resting) -> bool {
+        if (resting.symbol != symbol || resting.instrument_type != instrument_type) {
+            return false;
+        }
+        if (resting.side == incoming_side) {
+            return false;
+        }
+        if (incoming_price <= 0.0 || resting.price <= 0.0) {
+            return true;
+        }
+        if (incoming_side == OrderSide::Buy) {
+            return incoming_price + 1e-12 >= resting.price;
+        }
+        return incoming_price <= resting.price + 1e-12;
+    };
+
+    size_t count = 0;
+    for (const auto& o : open_orders_) {
+        if (is_cross(o)) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+size_t Account::cancel_stp_conflicting_orders_(const std::string& symbol,
+    OrderSide incoming_side,
+    double incoming_price,
+    InstrumentType instrument_type)
+{
+    auto is_cross = [&](const Order& resting) -> bool {
+        if (resting.symbol != symbol || resting.instrument_type != instrument_type) {
+            return false;
+        }
+        if (resting.side == incoming_side) {
+            return false;
+        }
+        if (incoming_price <= 0.0 || resting.price <= 0.0) {
+            return true;
+        }
+        if (incoming_side == OrderSide::Buy) {
+            return incoming_price + 1e-12 >= resting.price;
+        }
+        return incoming_price <= resting.price + 1e-12;
+    };
+
+    const size_t before = open_orders_.size();
+    open_orders_.erase(
+        std::remove_if(open_orders_.begin(), open_orders_.end(),
+            [&](const Order& o) { return is_cross(o); }),
+        open_orders_.end());
+    return before - open_orders_.size();
 }
 
 /// @brief Adjust leverage on existing positions for a symbol.
@@ -1061,8 +1207,8 @@ bool Account::adjust_position_leverage(const std::string& symbol, double oldLev,
     std::vector<double> newMaint(related.size());
     for (size_t i = 0; i < related.size(); ++i) {
         Position& p = related[i].get();
-        double mmr, maxLev;
-        std::tie(mmr, maxLev) = get_tier_info(p.notional);
+        double maxLev = 1.0;
+        std::tie(std::ignore, maxLev) = get_tier_info(p.notional);
         if (newLev > maxLev) {
             if (enable_console_output_) {
                 std::cerr << "[adjust_position_leverage] newLev=" << newLev << " > maxLev=" << maxLev << "\n";
@@ -1073,7 +1219,7 @@ bool Account::adjust_position_leverage(const std::string& symbol, double oldLev,
         double newM = p.notional / newLev;
         double diff = newM - oldM;
         totalDiff += diff;
-        newMaint[i] = p.notional * mmr;
+        newMaint[i] = maintenance_margin_for_notional_(p.notional);
     }
     double eq = get_equity();
     if (totalDiff > 0) {

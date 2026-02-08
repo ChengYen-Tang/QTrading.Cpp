@@ -253,6 +253,7 @@ BinanceExchange::BinanceExchange(
         }
     }
     last_close_by_symbol_.assign(symbols_.size(), 0.0);
+    last_close_ts_by_symbol_.assign(symbols_.size(), 0);
     has_last_close_.assign(symbols_.size(), 0);
 
     funding_md_.resize(datasets.size());
@@ -439,9 +440,14 @@ bool BinanceExchange::step()
         log_ctx_.event_seq = 0;
         set_global_timestamp(ts);
         dto = make_pooled<MultiKlineDto>();
-        build_multikline(ts, *dto);
-
-        collect_funding_events(ts, funding_events_scratch_);
+        if (funding_apply_timing_ == FundingApplyTiming::BeforeMatching) {
+            collect_funding_events(ts, funding_events_scratch_);
+            build_multikline(ts, *dto);
+        }
+        else {
+            build_multikline(ts, *dto);
+            collect_funding_events(ts, funding_events_scratch_);
+        }
 
         cur_ver = account_engine_->get_state_version();
         curP = account_engine_->get_all_positions();
@@ -507,7 +513,7 @@ bool BinanceExchange::step()
     return true;
 }
 
-void BinanceExchange::enqueue_deferred_order_locked_(uint64_t due_step, std::function<void(Account&)> fn)
+void BinanceExchange::enqueue_deferred_order_locked_(uint64_t due_step, std::function<void(Account&, uint64_t)> fn)
 {
     deferred_order_commands_.push_back(DeferredOrderCommand{ due_step, std::move(fn) });
 }
@@ -524,9 +530,61 @@ void BinanceExchange::flush_deferred_orders_locked_(uint64_t step_seq)
             ++i;
             continue;
         }
-        cmd.fn(*account_engine_);
+        cmd.fn(*account_engine_, step_seq);
         deferred_order_commands_.erase(deferred_order_commands_.begin() + static_cast<std::ptrdiff_t>(i));
     }
+}
+
+void BinanceExchange::push_async_order_ack_locked_(AsyncOrderAck ack)
+{
+    async_order_acks_.push_back(std::move(ack));
+}
+
+std::pair<int, std::string> BinanceExchange::map_binance_reject_(const std::optional<Account::OrderRejectInfo>& reject)
+{
+    using Code = Account::OrderRejectInfo::Code;
+    if (!reject.has_value() || reject->code == Code::None) {
+        return { 0, {} };
+    }
+
+    switch (reject->code) {
+    case Code::InvalidQuantity:
+        return { -4003, "Quantity less than zero." };
+    case Code::DuplicateClientOrderId:
+        return { -4111, "DUPLICATED_CLIENT_TRAN_ID" };
+    case Code::StpExpiredTaker:
+    case Code::StpExpiredBoth:
+        return { -2010, "Order would trigger self-trade prevention." };
+    case Code::SpotHedgeModeUnsupported:
+    case Code::HedgeModePositionSideRequired:
+        return { -4061, "Order's position side does not match user's setting." };
+    case Code::StrictHedgeReduceOnlyDisabled:
+    case Code::ReduceOnlyNoReduciblePosition:
+        return { -2022, "ReduceOnly Order is rejected." };
+    case Code::PriceFilterBelowMin:
+    case Code::PriceFilterAboveMax:
+    case Code::PriceFilterInvalidTick:
+        return { -1013, "Filter failure: PRICE_FILTER" };
+    case Code::LotSizeBelowMinQty:
+    case Code::LotSizeAboveMaxQty:
+    case Code::LotSizeInvalidStep:
+        return { -1013, "Filter failure: LOT_SIZE" };
+    case Code::NotionalNoReferencePrice:
+    case Code::NotionalBelowMin:
+    case Code::NotionalAboveMax:
+        return { -1013, "Filter failure: NOTIONAL" };
+    case Code::PercentPriceAboveBound:
+    case Code::PercentPriceBelowBound:
+        return { -1013, "Filter failure: PERCENT_PRICE" };
+    case Code::SpotInsufficientCash:
+    case Code::SpotNoInventory:
+    case Code::SpotQuantityExceedsInventory:
+    case Code::SpotNoLongPositionToClose:
+    default:
+        break;
+    }
+
+    return { -2010, "NEW_ORDER_REJECTED" };
 }
 
 /// @brief Get a snapshot of all current positions.
@@ -593,6 +651,38 @@ size_t BinanceExchange::order_latency_bars() const
 {
     std::lock_guard<std::mutex> lk(account_mtx_);
     return order_latency_bars_;
+}
+
+std::vector<BinanceExchange::AsyncOrderAck> BinanceExchange::drain_async_order_acks()
+{
+    std::lock_guard<std::mutex> lk(account_mtx_);
+    std::vector<AsyncOrderAck> out;
+    out.swap(async_order_acks_);
+    return out;
+}
+
+void BinanceExchange::set_funding_apply_timing(FundingApplyTiming timing)
+{
+    std::lock_guard<std::mutex> lk(account_mtx_);
+    funding_apply_timing_ = timing;
+}
+
+BinanceExchange::FundingApplyTiming BinanceExchange::funding_apply_timing() const
+{
+    std::lock_guard<std::mutex> lk(account_mtx_);
+    return funding_apply_timing_;
+}
+
+void BinanceExchange::set_funding_mark_price_max_age_ms(uint64_t max_age_ms)
+{
+    std::lock_guard<std::mutex> lk(account_mtx_);
+    funding_mark_price_max_age_ms_ = max_age_ms;
+}
+
+uint64_t BinanceExchange::funding_mark_price_max_age_ms() const
+{
+    std::lock_guard<std::mutex> lk(account_mtx_);
+    return funding_mark_price_max_age_ms_;
 }
 
 void BinanceExchange::set_uncertainty_band_bps(double bps)
@@ -699,6 +789,7 @@ void BinanceExchange::build_multikline(uint64_t ts, MultiKlineDto& out)
             out.klines_by_id[i] = k;
             kline_snap_cache_.emplace(sym, k);
             last_close_by_symbol_[i] = k.ClosePrice;
+            last_close_ts_by_symbol_[i] = k.Timestamp;
             has_last_close_[i] = 1;
             ++cursor_[i];
 
@@ -1134,8 +1225,20 @@ void BinanceExchange::collect_funding_events(uint64_t ts, std::vector<FundingEve
                 has_price = true;
             }
             else if (i < last_close_by_symbol_.size() && has_last_close_[i]) {
-                price = last_close_by_symbol_[i];
-                has_price = true;
+                bool age_ok = true;
+                if (funding_mark_price_max_age_ms_ > 0 && i < last_close_ts_by_symbol_.size()) {
+                    const uint64_t last_ts = last_close_ts_by_symbol_[i];
+                    if (fr.FundingTime < last_ts) {
+                        age_ok = false;
+                    }
+                    else {
+                        age_ok = (fr.FundingTime - last_ts) <= funding_mark_price_max_age_ms_;
+                    }
+                }
+                if (age_ok) {
+                    price = last_close_by_symbol_[i];
+                    has_price = true;
+                }
             }
 
             std::vector<Account::FundingApplyResult> applied;
@@ -1210,11 +1313,23 @@ bool BinanceExchange::interpolate_mark_price_(size_t sym_id, uint64_t ts, double
     }
 
     if (has_prev) {
-        out_price = data.get_kline(lo - 1).ClosePrice;
+        const auto& prev = data.get_kline(lo - 1);
+        if (funding_mark_price_max_age_ms_ > 0) {
+            if (ts < prev.Timestamp || (ts - prev.Timestamp) > funding_mark_price_max_age_ms_) {
+                return false;
+            }
+        }
+        out_price = prev.ClosePrice;
         return std::isfinite(out_price) && out_price > 0.0;
     }
     if (has_next) {
-        out_price = data.get_kline(lo).ClosePrice;
+        const auto& next = data.get_kline(lo);
+        if (funding_mark_price_max_age_ms_ > 0) {
+            if (next.Timestamp < ts || (next.Timestamp - ts) > funding_mark_price_max_age_ms_) {
+                return false;
+            }
+        }
+        out_price = next.ClosePrice;
         return std::isfinite(out_price) && out_price > 0.0;
     }
     return false;
@@ -1346,7 +1461,9 @@ static bool order_equal(const dto::Order& x, const dto::Order& y)
         x.position_side == y.position_side &&
         x.reduce_only == y.reduce_only &&
         x.closing_position_id == y.closing_position_id &&
-        x.instrument_type == y.instrument_type;
+        x.instrument_type == y.instrument_type &&
+        x.client_order_id == y.client_order_id &&
+        x.stp_mode == y.stp_mode;
 }
 
 template<typename T, typename Eq>

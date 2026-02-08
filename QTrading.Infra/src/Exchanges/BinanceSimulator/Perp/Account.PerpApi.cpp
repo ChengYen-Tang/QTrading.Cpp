@@ -34,20 +34,24 @@ bool Account::PerpApi::place_order(const std::string& symbol,
     double price,
     OrderSide side,
     PositionSide position_side,
-    bool reduce_only)
+    bool reduce_only,
+    const std::string& client_order_id,
+    SelfTradePreventionMode stp_mode)
 {
     owner_->set_instrument_type(symbol, InstrumentType::Perp);
-    return owner_->place_order(symbol, quantity, price, side, position_side, reduce_only);
+    return owner_->place_order(symbol, quantity, price, side, position_side, reduce_only, client_order_id, stp_mode);
 }
 
 bool Account::PerpApi::place_order(const std::string& symbol,
     double quantity,
     OrderSide side,
     PositionSide position_side,
-    bool reduce_only)
+    bool reduce_only,
+    const std::string& client_order_id,
+    SelfTradePreventionMode stp_mode)
 {
     owner_->set_instrument_type(symbol, InstrumentType::Perp);
-    return owner_->place_order(symbol, quantity, side, position_side, reduce_only);
+    return owner_->place_order(symbol, quantity, side, position_side, reduce_only, client_order_id, stp_mode);
 }
 
 void Account::PerpApi::close_position(const std::string& symbol, double price)

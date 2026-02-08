@@ -12,6 +12,8 @@ bool Account::place_perp_order(const std::string& symbol,
     OrderSide side,
     PositionSide position_side,
     bool reduce_only,
+    const std::string& client_order_id,
+    SelfTradePreventionMode stp_mode,
     const QTrading::Dto::Trading::InstrumentSpec& instrument_spec)
 {
     if (!instrument_spec.allow_short && side == OrderSide::Sell) {
@@ -49,19 +51,19 @@ bool Account::place_perp_order(const std::string& symbol,
             if (enable_console_output_) {
                 std::cerr << "[place_order] Spot sell rejected: no available spot inventory.\n";
             }
-            return false;
+            return reject_order_(OrderRejectInfo::Code::SpotNoInventory, "Spot sell rejected: no available spot inventory");
         }
         if (quantity > sellable_qty + 1e-8) {
             if (enable_console_output_) {
                 std::cerr << "[place_order] Spot sell rejected: quantity exceeds available inventory.\n";
             }
-            return false;
+            return reject_order_(OrderRejectInfo::Code::SpotQuantityExceedsInventory, "Spot sell rejected: quantity exceeds available inventory");
         }
         if (held_position_id < 0) {
             if (enable_console_output_) {
                 std::cerr << "[place_order] Spot sell rejected: no long position to close.\n";
             }
-            return false;
+            return reject_order_(OrderRejectInfo::Code::SpotNoLongPositionToClose, "Spot sell rejected: no long position to close");
         }
 
         const int oid = generate_order_id();
@@ -76,6 +78,8 @@ bool Account::place_perp_order(const std::string& symbol,
             held_position_id
         };
         closing_ord.instrument_type = instrument_spec.type;
+        closing_ord.client_order_id = client_order_id;
+        closing_ord.stp_mode = static_cast<int>(stp_mode);
         open_orders_.push_back(closing_ord);
         mark_open_orders_dirty_();
         ++state_version_;
@@ -91,18 +95,18 @@ bool Account::place_perp_order(const std::string& symbol,
         if (enable_console_output_) {
             std::cerr << "[place_order] Hedge-mode order must specify position_side (Long/Short).\n";
         }
-        return false;
+        return reject_order_(OrderRejectInfo::Code::HedgeModePositionSideRequired, "Hedge-mode order must specify position_side (Long/Short)");
     }
     if (strict_binance_mode_ && hedge_mode_ && reduce_only) {
         if (enable_console_output_) {
             std::cerr << "[place_order] Hedge-mode reduce_only is disabled in strict Binance mode.\n";
         }
-        return false;
+        return reject_order_(OrderRejectInfo::Code::StrictHedgeReduceOnlyDisabled, "Hedge-mode reduce_only is disabled in strict Binance mode");
     }
 
     // In one-way mode, attempt to process reverse (flip) orders.
     if (!hedge_mode_) {
-        if (handleOneWayReverseOrder(symbol, quantity, price, side)) {
+        if (handleOneWayReverseOrder(symbol, quantity, price, side, client_order_id, stp_mode)) {
             return true;
         }
     }
@@ -124,7 +128,7 @@ bool Account::place_perp_order(const std::string& symbol,
             if (enable_console_output_) {
                 std::cerr << "[place_order] reduce_only rejected: no reducible position.\n";
             }
-            return false;
+            return reject_order_(OrderRejectInfo::Code::ReduceOnlyNoReduciblePosition, "reduce_only rejected: no reducible position");
         }
     }
 
@@ -140,6 +144,8 @@ bool Account::place_perp_order(const std::string& symbol,
         -1
     };
     new_ord.instrument_type = instrument_spec.type;
+    new_ord.client_order_id = client_order_id;
+    new_ord.stp_mode = static_cast<int>(stp_mode);
     open_orders_.push_back(new_ord);
     mark_open_orders_dirty_();
     ++state_version_;

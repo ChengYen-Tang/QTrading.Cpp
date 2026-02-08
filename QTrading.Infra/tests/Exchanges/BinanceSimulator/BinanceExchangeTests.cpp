@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <optional>
 #include <type_traits>
+#include <limits>
 
 #include "Exchanges/BinanceSimulator/BinanceExchange.hpp"
 
@@ -223,6 +224,108 @@ TEST_F(BinanceExchangeFixture, OrderLatencyBarsDelaysPlacementUntilFutureStep)
     EXPECT_EQ(ex.get_all_positions().size(), 1u);
 }
 
+TEST_F(BinanceExchangeFixture, OrderLatencyBarsPublishesPendingThenAcceptedAsyncAck)
+{
+    writeCsv("btc.csv", {
+        {      0,1,1,1,1,100, 30000,100,1,0,0 },
+        {  60000,1,1,1,1,100, 90000,100,1,0,0 }
+        });
+
+    BinanceExchange ex({ {"BTCUSDT",(tmpDir / "btc.csv").string()} }, logger, /*balance*/ 1000.0);
+    ex.set_order_latency_bars(1);
+    auto mCh = ex.get_market_channel();
+
+    ASSERT_TRUE(ex.step());
+    (void)mCh->Receive();
+
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+    ASSERT_TRUE(ex.perp.place_order(
+        "BTCUSDT",
+        1.0,
+        0.0,
+        OrderSide::Buy,
+        PositionSide::Both,
+        false,
+        "cid-lat-1",
+        Account::SelfTradePreventionMode::ExpireMaker));
+
+    auto acks = ex.drain_async_order_acks();
+    ASSERT_EQ(acks.size(), 1u);
+    EXPECT_EQ(acks[0].status, BinanceExchange::AsyncOrderAck::Status::Pending);
+    EXPECT_EQ(acks[0].instrument_type, QTrading::Dto::Trading::InstrumentType::Perp);
+    EXPECT_EQ(acks[0].symbol, "BTCUSDT");
+    EXPECT_EQ(acks[0].submitted_step, 1u);
+    EXPECT_EQ(acks[0].due_step, 2u);
+    EXPECT_EQ(acks[0].resolved_step, 0u);
+    EXPECT_EQ(acks[0].reject_code, Account::OrderRejectInfo::Code::None);
+    EXPECT_TRUE(acks[0].reject_message.empty());
+    EXPECT_EQ(acks[0].client_order_id, "cid-lat-1");
+    EXPECT_EQ(acks[0].stp_mode, Account::SelfTradePreventionMode::ExpireMaker);
+    EXPECT_EQ(acks[0].binance_error_code, 0);
+    EXPECT_TRUE(acks[0].binance_error_message.empty());
+    const uint64_t req_id = acks[0].request_id;
+
+    ASSERT_TRUE(ex.step());
+    (void)mCh->Receive();
+
+    acks = ex.drain_async_order_acks();
+    ASSERT_EQ(acks.size(), 1u);
+    EXPECT_EQ(acks[0].request_id, req_id);
+    EXPECT_EQ(acks[0].status, BinanceExchange::AsyncOrderAck::Status::Accepted);
+    EXPECT_EQ(acks[0].resolved_step, 2u);
+    EXPECT_EQ(acks[0].reject_code, Account::OrderRejectInfo::Code::None);
+    EXPECT_TRUE(acks[0].reject_message.empty());
+    EXPECT_EQ(acks[0].client_order_id, "cid-lat-1");
+    EXPECT_EQ(acks[0].stp_mode, Account::SelfTradePreventionMode::ExpireMaker);
+    EXPECT_EQ(acks[0].binance_error_code, 0);
+    EXPECT_TRUE(acks[0].binance_error_message.empty());
+    EXPECT_EQ(ex.get_all_positions().size(), 1u);
+}
+
+TEST_F(BinanceExchangeFixture, OrderLatencyBarsPublishesPendingThenRejectedAsyncAck)
+{
+    writeCsv("btc.csv", {
+        {      0,100,100,100,100,100, 30000,100,1,0,0 },
+        {  60000,100,100,100,100,100, 90000,100,1,0,0 }
+        });
+
+    BinanceExchange ex({ {"BTCUSDT",(tmpDir / "btc.csv").string()} }, logger, /*balance*/ 1000.0);
+    ex.set_order_latency_bars(1);
+    auto mCh = ex.get_market_channel();
+
+    ASSERT_TRUE(ex.step());
+    (void)mCh->Receive();
+
+    using QTrading::Dto::Trading::OrderSide;
+    ASSERT_TRUE(ex.spot.place_order("BTCUSDT", 1.0, 100.0, OrderSide::Sell));
+
+    auto acks = ex.drain_async_order_acks();
+    ASSERT_EQ(acks.size(), 1u);
+    EXPECT_EQ(acks[0].status, BinanceExchange::AsyncOrderAck::Status::Pending);
+    EXPECT_EQ(acks[0].instrument_type, QTrading::Dto::Trading::InstrumentType::Spot);
+    EXPECT_EQ(acks[0].reject_code, Account::OrderRejectInfo::Code::None);
+    EXPECT_TRUE(acks[0].reject_message.empty());
+    EXPECT_EQ(acks[0].binance_error_code, 0);
+    EXPECT_TRUE(acks[0].binance_error_message.empty());
+    const uint64_t req_id = acks[0].request_id;
+
+    ASSERT_TRUE(ex.step());
+    (void)mCh->Receive();
+
+    acks = ex.drain_async_order_acks();
+    ASSERT_EQ(acks.size(), 1u);
+    EXPECT_EQ(acks[0].request_id, req_id);
+    EXPECT_EQ(acks[0].status, BinanceExchange::AsyncOrderAck::Status::Rejected);
+    EXPECT_EQ(acks[0].resolved_step, 2u);
+    EXPECT_EQ(acks[0].reject_code, Account::OrderRejectInfo::Code::SpotNoInventory);
+    EXPECT_FALSE(acks[0].reject_message.empty());
+    EXPECT_EQ(acks[0].binance_error_code, -2010);
+    EXPECT_FALSE(acks[0].binance_error_message.empty());
+    EXPECT_TRUE(ex.get_all_positions().empty());
+    EXPECT_TRUE(ex.get_all_open_orders().empty());
+}
+
 /// @brief Test that snapshot getters return consistent data before/after fills.
 TEST_F(BinanceExchangeFixture, SnapshotConsistent)
 {
@@ -396,6 +499,93 @@ TEST_F(BinanceExchangeFixture, FundingTimestampUsesInterpolatedMarkPriceBetweenB
     ASSERT_TRUE(ex.step());
     mCh->Receive();
     EXPECT_FALSE(ex.step());
+}
+
+TEST_F(BinanceExchangeFixture, FundingApplyTimingControlsSameTimestampFunding)
+{
+    writeCsv("btc.csv", {
+        {      0, 100,100,100,100,1000, 30000,100,1,0,0 },
+        {  60000, 200,200,200,200,1000, 90000,100,1,0,0 }
+        });
+
+    writeFundingCsv("btc_funding.csv", {
+        {  60000, 0.001, 100.0 }
+        });
+
+    auto run_case = [&](BinanceExchange::FundingApplyTiming timing) -> double {
+        BinanceExchange ex(
+            { {"BTCUSDT", (tmpDir / "btc.csv").string(),
+                std::optional<std::string>((tmpDir / "btc_funding.csv").string())} },
+            logger,
+            /*balance*/ 1000.0);
+        ex.set_funding_apply_timing(timing);
+
+        auto mCh = ex.get_market_channel();
+        using QTrading::Dto::Trading::OrderSide;
+        BinanceExchange::StatusSnapshot snap{};
+
+        if (!ex.step()) {
+            ADD_FAILURE() << "step#1 failed";
+            return std::numeric_limits<double>::quiet_NaN();
+        }
+        mCh->Receive();
+        if (!ex.perp.place_order("BTCUSDT", 1.0, OrderSide::Buy)) {
+            ADD_FAILURE() << "place_order failed";
+            return std::numeric_limits<double>::quiet_NaN();
+        }
+
+        if (!ex.step()) {
+            ADD_FAILURE() << "step#2 failed";
+            return std::numeric_limits<double>::quiet_NaN();
+        }
+        mCh->Receive();
+        ex.FillStatusSnapshot(snap);
+        return snap.wallet_balance;
+    };
+
+    const double before_matching = run_case(BinanceExchange::FundingApplyTiming::BeforeMatching);
+    const double after_matching = run_case(BinanceExchange::FundingApplyTiming::AfterMatching);
+
+    // Same-timestamp funding at mark=100, rate=0.001 on long => 0.1 USDT difference.
+    EXPECT_NEAR(before_matching - after_matching, 0.1, 1e-6);
+}
+
+TEST_F(BinanceExchangeFixture, FundingMarkPriceMaxAgeSkipsStaleOneSidedInterpolation)
+{
+    writeCsv("btc.csv", {
+        {      0, 100,100,100,100,1000, 30000,100,1,0,0 }
+        });
+
+    // Funding only appears much later with no mark price.
+    writeFundingCsv("btc_funding.csv", {
+        { 600000, 0.001, std::nullopt }
+        });
+
+    BinanceExchange ex(
+        { {"BTCUSDT", (tmpDir / "btc.csv").string(),
+            std::optional<std::string>((tmpDir / "btc_funding.csv").string())} },
+        logger,
+        /*balance*/ 1000.0);
+    ex.set_funding_mark_price_max_age_ms(60000); // 1 minute max-age
+
+    auto mCh = ex.get_market_channel();
+    using QTrading::Dto::Trading::OrderSide;
+    BinanceExchange::StatusSnapshot snap{};
+
+    ASSERT_TRUE(ex.perp.place_order("BTCUSDT", 1.0, OrderSide::Buy));
+
+    ASSERT_TRUE(ex.step());
+    mCh->Receive();
+    ex.FillStatusSnapshot(snap);
+    const double after_entry = snap.wallet_balance;
+
+    // Next step is funding-only timestamp (no kline). Funding should be skipped due to stale fallback.
+    ASSERT_TRUE(ex.step());
+    mCh->Receive();
+    ex.FillStatusSnapshot(snap);
+    const double after_funding_ts = snap.wallet_balance;
+
+    EXPECT_NEAR(after_funding_ts, after_entry, 1e-8);
 }
 
 TEST_F(BinanceExchangeFixture, NoFundingPathKeepsBalance)

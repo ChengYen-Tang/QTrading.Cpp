@@ -24,6 +24,43 @@ using namespace QTrading::dto;
 class Account {
 public:
     struct FundingApplyResult;
+    enum class SelfTradePreventionMode {
+        None = 0,
+        ExpireTaker = 1,
+        ExpireMaker = 2,
+        ExpireBoth = 3,
+    };
+    struct OrderRejectInfo {
+        enum class Code {
+            None = 0,
+            InvalidQuantity = 1,
+            DuplicateClientOrderId = 2,
+            StpExpiredTaker = 3,
+            StpExpiredBoth = 4,
+            SpotHedgeModeUnsupported = 5,
+            SpotInsufficientCash = 6,
+            SpotNoInventory = 7,
+            SpotQuantityExceedsInventory = 8,
+            SpotNoLongPositionToClose = 9,
+            HedgeModePositionSideRequired = 10,
+            StrictHedgeReduceOnlyDisabled = 11,
+            ReduceOnlyNoReduciblePosition = 12,
+            PriceFilterBelowMin = 13,
+            PriceFilterAboveMax = 14,
+            PriceFilterInvalidTick = 15,
+            LotSizeBelowMinQty = 16,
+            LotSizeAboveMaxQty = 17,
+            LotSizeInvalidStep = 18,
+            NotionalNoReferencePrice = 19,
+            NotionalBelowMin = 20,
+            NotionalAboveMax = 21,
+            PercentPriceAboveBound = 22,
+            PercentPriceBelowBound = 23,
+        };
+
+        Code code{ Code::None };
+        std::string message;
+    };
 
     class SpotApi {
     public:
@@ -36,12 +73,16 @@ public:
             double quantity,
             double price,
             QTrading::Dto::Trading::OrderSide side,
-            bool reduce_only = false);
+            bool reduce_only = false,
+            const std::string& client_order_id = {},
+            SelfTradePreventionMode stp_mode = SelfTradePreventionMode::None);
 
         bool place_order(const std::string& symbol,
             double quantity,
             QTrading::Dto::Trading::OrderSide side,
-            bool reduce_only = false);
+            bool reduce_only = false,
+            const std::string& client_order_id = {},
+            SelfTradePreventionMode stp_mode = SelfTradePreventionMode::None);
 
         void close_position(const std::string& symbol, double price = 0.0);
         void cancel_open_orders(const std::string& symbol);
@@ -64,13 +105,17 @@ public:
             double price,
             QTrading::Dto::Trading::OrderSide side,
             QTrading::Dto::Trading::PositionSide position_side = QTrading::Dto::Trading::PositionSide::Both,
-            bool reduce_only = false);
+            bool reduce_only = false,
+            const std::string& client_order_id = {},
+            SelfTradePreventionMode stp_mode = SelfTradePreventionMode::None);
 
         bool place_order(const std::string& symbol,
             double quantity,
             QTrading::Dto::Trading::OrderSide side,
             QTrading::Dto::Trading::PositionSide position_side = QTrading::Dto::Trading::PositionSide::Both,
-            bool reduce_only = false);
+            bool reduce_only = false,
+            const std::string& client_order_id = {},
+            SelfTradePreventionMode stp_mode = SelfTradePreventionMode::None);
 
         void close_position(const std::string& symbol, double price = 0.0);
         void close_position(const std::string& symbol,
@@ -183,13 +228,18 @@ public:
         double price,
         QTrading::Dto::Trading::OrderSide side,
         QTrading::Dto::Trading::PositionSide position_side = QTrading::Dto::Trading::PositionSide::Both,
-        bool reduce_only = false);
+        bool reduce_only = false,
+        const std::string& client_order_id = {},
+        SelfTradePreventionMode stp_mode = SelfTradePreventionMode::None);
 
     bool place_order(const std::string& symbol,
         double quantity,
         QTrading::Dto::Trading::OrderSide side,
         QTrading::Dto::Trading::PositionSide position_side = QTrading::Dto::Trading::PositionSide::Both,
-        bool reduce_only = false);
+        bool reduce_only = false,
+        const std::string& client_order_id = {},
+        SelfTradePreventionMode stp_mode = SelfTradePreventionMode::None);
+    std::optional<OrderRejectInfo> consume_last_order_reject_info();
 
     void update_positions(const std::unordered_map<std::string, std::pair<double, double>>& symbol_price_volume);
     void update_positions(const std::unordered_map<std::string, QTrading::Dto::Market::Binance::KlineDto>& symbol_kline);
@@ -392,11 +442,13 @@ private:
     mutable uint64_t balance_cache_version_{ static_cast<uint64_t>(-1) };
     uint64_t balance_version_{ 0 };
     std::vector<FillEvent> fill_events_{};
+    std::optional<OrderRejectInfo> last_order_reject_info_{};
 
     int generate_order_id();
     int generate_position_id();
 
     std::tuple<double, double> get_tier_info(double notional) const;
+    double maintenance_margin_for_notional_(double notional) const;
     std::tuple<double, double> get_fee_rates(QTrading::Dto::Trading::InstrumentType instrument_type) const;
     bool adjust_position_leverage(const std::string& symbol, double oldLev, double newLev);
 
@@ -404,13 +456,20 @@ private:
 
     void merge_positions();
 
-    bool handleOneWayReverseOrder(const std::string& symbol, double quantity, double price, QTrading::Dto::Trading::OrderSide side);
+    bool handleOneWayReverseOrder(const std::string& symbol,
+        double quantity,
+        double price,
+        QTrading::Dto::Trading::OrderSide side,
+        const std::string& client_order_id,
+        SelfTradePreventionMode stp_mode);
     bool place_spot_order(const std::string& symbol,
         double quantity,
         double price,
         QTrading::Dto::Trading::OrderSide side,
         QTrading::Dto::Trading::PositionSide position_side,
         bool reduce_only,
+        const std::string& client_order_id,
+        SelfTradePreventionMode stp_mode,
         const QTrading::Dto::Trading::InstrumentSpec& instrument_spec);
     bool place_perp_order(const std::string& symbol,
         double quantity,
@@ -418,12 +477,14 @@ private:
         QTrading::Dto::Trading::OrderSide side,
         QTrading::Dto::Trading::PositionSide position_side,
         bool reduce_only,
+        const std::string& client_order_id,
+        SelfTradePreventionMode stp_mode,
         const QTrading::Dto::Trading::InstrumentSpec& instrument_spec);
     bool validate_order_filters_(const std::string& symbol,
         double quantity,
         double price,
         QTrading::Dto::Trading::OrderSide side,
-        const QTrading::Dto::Trading::InstrumentSpec& instrument_spec) const;
+        const QTrading::Dto::Trading::InstrumentSpec& instrument_spec);
     bool has_reducible_position_for_order_(const Order& ord) const;
     void update_unrealized_for_symbol_(const std::string& symbol, double close_price);
     bool has_open_perp_position_() const;
@@ -473,6 +534,17 @@ private:
     void ensure_symbol_capacity_(size_t id);
     void mark_open_orders_dirty_();
     void mark_balance_dirty_();
+    void clear_last_order_reject_info_();
+    bool reject_order_(OrderRejectInfo::Code code, std::string message);
+    bool has_open_order_with_client_id_(const std::string& client_order_id) const;
+    size_t count_stp_conflicting_orders_(const std::string& symbol,
+        QTrading::Dto::Trading::OrderSide incoming_side,
+        double incoming_price,
+        QTrading::Dto::Trading::InstrumentType instrument_type) const;
+    size_t cancel_stp_conflicting_orders_(const std::string& symbol,
+        QTrading::Dto::Trading::OrderSide incoming_side,
+        double incoming_price,
+        QTrading::Dto::Trading::InstrumentType instrument_type);
     const QTrading::Dto::Trading::InstrumentSpec& resolve_instrument_spec_(const std::string& symbol) const;
 
 public:

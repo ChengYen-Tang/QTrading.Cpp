@@ -46,17 +46,19 @@ void Account::apply_perp_liquidation_(double taker_fee, bool& open_orders_change
 
     constexpr double kWarningZoneRatio = 1.05;
     constexpr double kWarningReductionFraction = 0.15;
-    const bool warning_zone =
-        (snapshot.MaintenanceMargin > 0.0) &&
-        (snapshot.MarginBalance >= snapshot.MaintenanceMargin) &&
-        (snapshot.MarginBalance < snapshot.MaintenanceMargin * kWarningZoneRatio);
-    const bool distressed = snapshot.MarginBalance < snapshot.MaintenanceMargin;
+    constexpr int kMaxLiquidationStepsPerTick = 8;
+    const auto in_warning_zone = [&](const QTrading::Dto::Account::BalanceSnapshot& s) -> bool {
+        return (s.MaintenanceMargin > 0.0) &&
+            (s.MarginBalance >= s.MaintenanceMargin) &&
+            (s.MarginBalance < s.MaintenanceMargin * kWarningZoneRatio);
+    };
+
+    bool distressed = snapshot.MarginBalance < snapshot.MaintenanceMargin;
+    bool warning_zone = in_warning_zone(snapshot);
     if (!warning_zone && !distressed) {
         return;
     }
-
     positions_changed = true;
-    constexpr int kMaxLiquidationStepsPerTick = 8;
 
     if (distressed) {
         std::cerr << "[update_positions] Liquidation triggered! marginBalance=" << snapshot.MarginBalance
@@ -67,26 +69,33 @@ void Account::apply_perp_liquidation_(double taker_fee, bool& open_orders_change
             << ", maintenanceMargin=" << snapshot.MaintenanceMargin << "\n";
     }
 
+    // Phase 1: cancel all perp open orders first.
     if (distressed) {
-        const size_t open_before = open_orders_.size();
+        const size_t before = open_orders_.size();
         open_orders_.erase(
             std::remove_if(open_orders_.begin(), open_orders_.end(),
-                [](const Order& o) {
-                    return o.instrument_type == InstrumentType::Perp && o.closing_position_id < 0;
-                }),
+                [](const Order& o) { return o.instrument_type == InstrumentType::Perp; }),
             open_orders_.end());
-        if (open_orders_.size() != open_before) {
+        if (open_orders_.size() != before) {
             open_orders_changed = true;
             mark_open_orders_dirty_();
+            rebuild_open_order_index_();
         }
-        rebuild_open_order_index_();
+        snapshot = get_perp_balance();
+        distressed = snapshot.MarginBalance < snapshot.MaintenanceMargin;
+        warning_zone = in_warning_zone(snapshot);
     }
 
+    // Phase 2: staged partial liquidation.
     for (int step = 0; step < kMaxLiquidationStepsPerTick; ++step) {
         snapshot = get_perp_balance();
         if (!has_open_perp_position_()) break;
         const bool step_distressed = snapshot.MarginBalance < snapshot.MaintenanceMargin;
-        if (!step_distressed && step > 0) break;
+        if (!step_distressed) {
+            if (!(warning_zone && step == 0)) {
+                break;
+            }
+        }
 
         int worst_idx = -1;
         double worst_unreal = 0.0;
@@ -145,7 +154,6 @@ void Account::apply_perp_liquidation_(double taker_fee, bool& open_orders_change
         if (step_distressed && deficit > 0.0 && denom > 1e-12) {
             desired_close = std::min(pos.quantity, std::max(desired_close, deficit / denom));
         }
-
         desired_close = std::clamp(desired_close, 1e-8, pos.quantity);
 
         const double close_qty = std::min({ pos.quantity, vol_avail, desired_close });
@@ -221,6 +229,7 @@ void Account::apply_perp_liquidation_(double taker_fee, bool& open_orders_change
         }
     }
 
+    // Phase 3: unresolved residual handling (no ADL/insurance modeling yet).
     snapshot = get_perp_balance();
     if (has_open_perp_position_() && snapshot.MarginBalance < snapshot.MaintenanceMargin) {
         std::cerr << "[update_positions] Liquidation unresolved after steps, forcing account bankruptcy\n";
@@ -240,8 +249,8 @@ void Account::apply_perp_liquidation_(double taker_fee, bool& open_orders_change
             if (open_orders_.size() != before) {
                 open_orders_changed = true;
                 mark_open_orders_dirty_();
+                rebuild_open_order_index_();
             }
-            rebuild_open_order_index_();
         }
         order_to_position_.clear();
         for (const auto& p : positions_) {

@@ -589,6 +589,82 @@ TEST(AccountTest, CancelOrderByID) {
     EXPECT_FALSE(account.get_all_positions().empty());
 }
 
+TEST(AccountTest, ClientOrderIdMustBeUniqueAmongOpenOrders) {
+    Account account(10000.0, 0);
+
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+
+    ASSERT_TRUE(account.place_order(
+        "BTCUSDT", 1.0, 100.0, OrderSide::Buy, PositionSide::Both, false, "cid-1"));
+    EXPECT_EQ(account.get_all_open_orders().size(), 1u);
+    EXPECT_EQ(account.get_all_open_orders()[0].client_order_id, "cid-1");
+
+    EXPECT_FALSE(account.place_order(
+        "BTCUSDT", 1.0, 99.0, OrderSide::Sell, PositionSide::Both, false, "cid-1"));
+    auto rej = account.consume_last_order_reject_info();
+    ASSERT_TRUE(rej.has_value());
+    EXPECT_EQ(rej->code, Account::OrderRejectInfo::Code::DuplicateClientOrderId);
+    EXPECT_EQ(account.get_all_open_orders().size(), 1u);
+}
+
+TEST(AccountTest, StpExpireTakerRejectsCrossingIncomingOrder) {
+    Account account(10000.0, 0);
+
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+
+    ASSERT_TRUE(account.place_order(
+        "BTCUSDT", 1.0, 100.0, OrderSide::Buy, PositionSide::Both));
+    EXPECT_EQ(account.get_all_open_orders().size(), 1u);
+
+    EXPECT_FALSE(account.place_order(
+        "BTCUSDT", 1.0, 99.0, OrderSide::Sell, PositionSide::Both, false, {},
+        Account::SelfTradePreventionMode::ExpireTaker));
+    auto rej = account.consume_last_order_reject_info();
+    ASSERT_TRUE(rej.has_value());
+    EXPECT_EQ(rej->code, Account::OrderRejectInfo::Code::StpExpiredTaker);
+    EXPECT_EQ(account.get_all_open_orders().size(), 1u);
+    EXPECT_EQ(account.get_all_open_orders()[0].side, OrderSide::Buy);
+}
+
+TEST(AccountTest, StpExpireMakerCancelsConflictingRestingOrder) {
+    Account account(10000.0, 0);
+
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+
+    ASSERT_TRUE(account.place_order(
+        "BTCUSDT", 1.0, 100.0, OrderSide::Buy, PositionSide::Both));
+    EXPECT_EQ(account.get_all_open_orders().size(), 1u);
+
+    ASSERT_TRUE(account.place_order(
+        "BTCUSDT", 1.0, 99.0, OrderSide::Sell, PositionSide::Both, false, {},
+        Account::SelfTradePreventionMode::ExpireMaker));
+    const auto& ord = account.get_all_open_orders();
+    ASSERT_EQ(ord.size(), 1u);
+    EXPECT_EQ(ord[0].side, OrderSide::Sell);
+}
+
+TEST(AccountTest, StpExpireBothCancelsRestingAndRejectsIncomingOrder) {
+    Account account(10000.0, 0);
+
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+
+    ASSERT_TRUE(account.place_order(
+        "BTCUSDT", 1.0, 100.0, OrderSide::Buy, PositionSide::Both));
+    EXPECT_EQ(account.get_all_open_orders().size(), 1u);
+
+    EXPECT_FALSE(account.place_order(
+        "BTCUSDT", 1.0, 99.0, OrderSide::Sell, PositionSide::Both, false, {},
+        Account::SelfTradePreventionMode::ExpireBoth));
+    auto rej = account.consume_last_order_reject_info();
+    ASSERT_TRUE(rej.has_value());
+    EXPECT_EQ(rej->code, Account::OrderRejectInfo::Code::StpExpiredBoth);
+    EXPECT_TRUE(account.get_all_open_orders().empty());
+}
+
 /// @brief Verifies liquidation clears all positions and zeroes balance.
 TEST(AccountTest, Liquidation) {
     Account account(350000.0, 0);
@@ -630,6 +706,34 @@ TEST(AccountTest, LiquidationWarningZoneTriggersStagedReduction) {
     ASSERT_FALSE(pos.empty());
     EXPECT_LT(pos[0].quantity, qty_before);
     EXPECT_GT(pos[0].quantity, 0.0);
+}
+
+TEST(AccountTest, DistressedLiquidationCancelsPerpOpenOrdersBeforeReduction) {
+    Account account(350000.0, 0);
+    account.set_symbol_leverage("BTCUSDT", 75.0);
+
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+
+    ASSERT_TRUE(account.place_order("BTCUSDT", 5000.0, 500.0, OrderSide::Buy, PositionSide::Both));
+    account.update_positions(partialMarketDataBTC(500.0, 10000.0));
+    ASSERT_EQ(account.get_all_positions().size(), 1u);
+
+    account.close_position("BTCUSDT", 700.0);
+    ASSERT_EQ(account.get_all_open_orders().size(), 1u);
+    EXPECT_GE(account.get_all_open_orders()[0].closing_position_id, 0);
+
+    testing::internal::CaptureStderr();
+    account.update_positions(partialMarketDataBTC(432.4, 10000.0));
+    std::string logs = testing::internal::GetCapturedStderr();
+
+    EXPECT_TRUE(logs.find("Liquidation triggered") != std::string::npos);
+
+    const auto& pos = account.get_all_positions();
+    ASSERT_FALSE(pos.empty());
+    EXPECT_LT(pos[0].quantity, 5000.0);
+    EXPECT_GT(pos[0].quantity, 0.0);
+    EXPECT_TRUE(account.get_all_open_orders().empty());
 }
 
 TEST(AccountTest, PerpLiquidationDoesNotConsumeSpotPosition) {
@@ -1000,6 +1104,26 @@ TEST(AccountTest, AdjustLeverageWithExistingPositions) {
 
     account.set_symbol_leverage("BTCUSDT", 40.0);
     EXPECT_DOUBLE_EQ(account.get_symbol_leverage("BTCUSDT"), 40.0);
+}
+
+TEST(AccountTest, MaintenanceMarginUsesBracketDeductionAboveFirstTier) {
+    Account account(1'000'000.0, 0);
+    account.set_symbol_leverage("BTCUSDT", 100.0);
+
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+
+    ASSERT_TRUE(account.place_order("BTCUSDT", 1.0, 100000.0, OrderSide::Buy, PositionSide::Both));
+    account.update_positions(partialMarketDataBTC(100000.0, 1000.0));
+
+    const auto& positions = account.get_all_positions();
+    ASSERT_EQ(positions.size(), 1u);
+
+    // Tier2 (<=600k): mmr=0.005 with bracket deduction:
+    // deduction = 50,000 * (0.005 - 0.004) = 50
+    // maint = 100,000 * 0.005 - 50 = 450
+    EXPECT_NEAR(positions[0].maintenance_margin, 450.0, 1e-9);
+    EXPECT_LT(positions[0].maintenance_margin, 500.0);
 }
 
 TEST(AccountTest, SingleMode_MultipleSymbols) {
@@ -1671,7 +1795,7 @@ TEST(AccountTest, MarketImpactSlippageRespectsLimitProtection) {
     EXPECT_LE(fills[0].exec_price, 100.0 + 1e-12);
 }
 
-TEST(AccountTest, TakerProbabilityModelUsesExpectedFeeRate) {
+TEST(AccountTest, TakerProbabilityModelUsesDiscreteFeeRate) {
     Account account(100000.0, 0);
     account.set_symbol_leverage("BTCUSDT", 10.0);
     account.set_kline_volume_split_mode(Account::KlineVolumeSplitMode::LegacyTotalOnly);
@@ -1699,7 +1823,7 @@ TEST(AccountTest, TakerProbabilityModelUsesExpectedFeeRate) {
     EXPECT_GT(p, 0.0);
     EXPECT_LT(p, 1.0);
 
-    const double expected_rate = 0.0002 * (1.0 - p) + 0.0005 * p;
+    const double expected_rate = fills[0].is_taker ? 0.0005 : 0.0002;
     EXPECT_NEAR(fills[0].fee_rate, expected_rate, 1e-12);
 }
 

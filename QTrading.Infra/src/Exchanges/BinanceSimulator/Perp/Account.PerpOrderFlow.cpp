@@ -17,9 +17,8 @@ bool Account::processPerpOpeningOrder(Order& ord, double fill_qty, double fill_p
     const auto& instrument_spec = resolve_instrument_spec_(ord.symbol);
     const double lev = get_symbol_leverage(ord.symbol);
 
-    double mmr = 0.0;
     double max_lev = 1.0;
-    std::tie(mmr, max_lev) = get_tier_info(notional);
+    std::tie(std::ignore, max_lev) = get_tier_info(notional);
 
     if (instrument_spec.max_leverage > 0.0 && lev > instrument_spec.max_leverage) {
         if (enable_console_output_) {
@@ -37,7 +36,7 @@ bool Account::processPerpOpeningOrder(Order& ord, double fill_qty, double fill_p
     }
 
     const double init_margin = notional / lev;
-    const double maint_margin = notional * mmr;
+    const double maint_margin = maintenance_margin_for_notional_(notional);
     const auto snap = get_perp_balance();
     const double required = init_margin + fee;
     if (snap.AvailableBalance < required) {

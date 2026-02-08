@@ -14,13 +14,15 @@ bool Account::place_spot_order(const std::string& symbol,
     OrderSide side,
     PositionSide position_side,
     bool reduce_only,
+    const std::string& client_order_id,
+    SelfTradePreventionMode stp_mode,
     const QTrading::Dto::Trading::InstrumentSpec& instrument_spec)
 {
     if (hedge_mode_) {
         if (enable_console_output_) {
             std::cerr << "[place_order] Spot symbol does not support hedge mode.\n";
         }
-        return false;
+        return reject_order_(OrderRejectInfo::Code::SpotHedgeModeUnsupported, "Spot symbol does not support hedge mode");
     }
 
     if (position_side != PositionSide::Both) {
@@ -54,7 +56,7 @@ bool Account::place_spot_order(const std::string& symbol,
                 if (enable_console_output_) {
                     std::cerr << "[place_order] Spot buy rejected: insufficient spot available cash.\n";
                 }
-                return false;
+                return reject_order_(OrderRejectInfo::Code::SpotInsufficientCash, "Spot buy rejected: insufficient spot available cash");
             }
         }
     }
@@ -94,19 +96,19 @@ bool Account::place_spot_order(const std::string& symbol,
             if (enable_console_output_) {
                 std::cerr << "[place_order] Spot sell rejected: no available spot inventory.\n";
             }
-            return false;
+            return reject_order_(OrderRejectInfo::Code::SpotNoInventory, "Spot sell rejected: no available spot inventory");
         }
         if (quantity > sellable_qty + 1e-8) {
             if (enable_console_output_) {
                 std::cerr << "[place_order] Spot sell rejected: quantity exceeds available inventory.\n";
             }
-            return false;
+            return reject_order_(OrderRejectInfo::Code::SpotQuantityExceedsInventory, "Spot sell rejected: quantity exceeds available inventory");
         }
         if (held_position_id < 0) {
             if (enable_console_output_) {
                 std::cerr << "[place_order] Spot sell rejected: no long position to close.\n";
             }
-            return false;
+            return reject_order_(OrderRejectInfo::Code::SpotNoLongPositionToClose, "Spot sell rejected: no long position to close");
         }
 
         const int oid = generate_order_id();
@@ -121,6 +123,8 @@ bool Account::place_spot_order(const std::string& symbol,
             held_position_id
         };
         closing_ord.instrument_type = instrument_spec.type;
+        closing_ord.client_order_id = client_order_id;
+        closing_ord.stp_mode = static_cast<int>(stp_mode);
         open_orders_.push_back(closing_ord);
         mark_open_orders_dirty_();
         ++state_version_;
@@ -143,7 +147,7 @@ bool Account::place_spot_order(const std::string& symbol,
             if (enable_console_output_) {
                 std::cerr << "[place_order] reduce_only rejected: no reducible position.\n";
             }
-            return false;
+            return reject_order_(OrderRejectInfo::Code::ReduceOnlyNoReduciblePosition, "reduce_only rejected: no reducible position");
         }
     }
 
@@ -159,6 +163,8 @@ bool Account::place_spot_order(const std::string& symbol,
         -1
     };
     new_ord.instrument_type = instrument_spec.type;
+    new_ord.client_order_id = client_order_id;
+    new_ord.stp_mode = static_cast<int>(stp_mode);
     open_orders_.push_back(new_ord);
     mark_open_orders_dirty_();
     ++state_version_;

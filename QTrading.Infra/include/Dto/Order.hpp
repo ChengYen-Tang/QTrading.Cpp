@@ -36,6 +36,12 @@ namespace QTrading::dto {
 
         /// @brief Instrument type captured at order creation for routing/logging.
         QTrading::Dto::Trading::InstrumentType instrument_type{ QTrading::Dto::Trading::InstrumentType::Perp };
+
+        /// @brief Optional client-provided order id. Must be unique among open orders when provided.
+        std::string client_order_id;
+
+        /// @brief STP mode associated with this order (0=None, 1=ExpireTaker, 2=ExpireMaker, 3=ExpireBoth).
+        int stp_mode{ 0 };
     };
 
 }  // namespace QTrading::dto

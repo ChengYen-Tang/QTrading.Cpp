@@ -13,6 +13,7 @@
 #include <thread>
 #include <atomic>
 #include <memory_resource>
+#include <utility>
 
 #include "Exchanges/IExchange.h"
 #include "Exchanges/BinanceSimulator/DataProvider/MarketData.hpp"
@@ -64,12 +65,16 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
                 double quantity,
                 double price,
                 QTrading::Dto::Trading::OrderSide side,
-                bool reduce_only = false);
+                bool reduce_only = false,
+                const std::string& client_order_id = {},
+                Account::SelfTradePreventionMode stp_mode = Account::SelfTradePreventionMode::None);
 
             bool place_order(const std::string& symbol,
                 double quantity,
                 QTrading::Dto::Trading::OrderSide side,
-                bool reduce_only = false);
+                bool reduce_only = false,
+                const std::string& client_order_id = {},
+                Account::SelfTradePreventionMode stp_mode = Account::SelfTradePreventionMode::None);
 
             void close_position(const std::string& symbol, double price = 0.0);
             void cancel_open_orders(const std::string& symbol);
@@ -87,13 +92,17 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
                 double price,
                 QTrading::Dto::Trading::OrderSide side,
                 QTrading::Dto::Trading::PositionSide position_side = QTrading::Dto::Trading::PositionSide::Both,
-                bool reduce_only = false);
+                bool reduce_only = false,
+                const std::string& client_order_id = {},
+                Account::SelfTradePreventionMode stp_mode = Account::SelfTradePreventionMode::None);
 
             bool place_order(const std::string& symbol,
                 double quantity,
                 QTrading::Dto::Trading::OrderSide side,
                 QTrading::Dto::Trading::PositionSide position_side = QTrading::Dto::Trading::PositionSide::Both,
-                bool reduce_only = false);
+                bool reduce_only = false,
+                const std::string& client_order_id = {},
+                Account::SelfTradePreventionMode stp_mode = Account::SelfTradePreventionMode::None);
 
             void close_position(const std::string& symbol, double price = 0.0);
             void close_position(const std::string& symbol,
@@ -196,6 +205,43 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
         bool transfer_perp_to_spot(double amount);
         void set_order_latency_bars(size_t bars);
         size_t order_latency_bars() const;
+        struct AsyncOrderAck {
+            enum class Status {
+                Pending = 0,
+                Accepted = 1,
+                Rejected = 2,
+            };
+
+            uint64_t request_id{ 0 };
+            Status status{ Status::Pending };
+            QTrading::Dto::Trading::InstrumentType instrument_type{ QTrading::Dto::Trading::InstrumentType::Perp };
+            std::string symbol;
+            double quantity{ 0.0 };
+            double price{ 0.0 }; // <=0 indicates market-style request
+            QTrading::Dto::Trading::OrderSide side{ QTrading::Dto::Trading::OrderSide::Buy };
+            QTrading::Dto::Trading::PositionSide position_side{ QTrading::Dto::Trading::PositionSide::Both };
+            bool reduce_only{ false };
+            uint64_t submitted_step{ 0 };
+            uint64_t due_step{ 0 };
+            uint64_t resolved_step{ 0 }; // 0 until final Accepted/Rejected
+            Account::OrderRejectInfo::Code reject_code{ Account::OrderRejectInfo::Code::None };
+            std::string reject_message;
+            std::string client_order_id;
+            Account::SelfTradePreventionMode stp_mode{ Account::SelfTradePreventionMode::None };
+            int binance_error_code{ 0 };
+            std::string binance_error_message;
+        };
+        std::vector<AsyncOrderAck> drain_async_order_acks();
+        enum class FundingApplyTiming {
+            BeforeMatching = 0,
+            AfterMatching = 1,
+        };
+        void set_funding_apply_timing(FundingApplyTiming timing);
+        FundingApplyTiming funding_apply_timing() const;
+        // Max allowed age (ms) for using last close as funding mark-price fallback.
+        // 0 means no limit.
+        void set_funding_mark_price_max_age_ms(uint64_t max_age_ms);
+        uint64_t funding_mark_price_max_age_ms() const;
         void set_uncertainty_band_bps(double bps);
         double uncertainty_band_bps() const;
         /// @brief Close all channels and mark simulation complete.
@@ -319,15 +365,20 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
         std::unordered_map<std::string, QTrading::Dto::Market::Binance::KlineDto> kline_snap_cache_;
         std::vector<size_t> kline_counts_;
         std::vector<double> last_close_by_symbol_;
+        std::vector<uint64_t> last_close_ts_by_symbol_;
         std::vector<uint8_t> has_last_close_;
         size_t order_latency_bars_{ 0 };
+        FundingApplyTiming funding_apply_timing_{ FundingApplyTiming::BeforeMatching };
+        uint64_t funding_mark_price_max_age_ms_{ 0 };
         uint64_t processed_steps_{ 0 };
         double uncertainty_band_bps_{ 0.0 };
         struct DeferredOrderCommand {
             uint64_t due_step{ 0 };
-            std::function<void(Account&)> fn{};
+            std::function<void(Account&, uint64_t)> fn{};
         };
         std::deque<DeferredOrderCommand> deferred_order_commands_;
+        std::vector<AsyncOrderAck> async_order_acks_{};
+        uint64_t next_async_order_request_id_{ 1 };
 
         /// @brief Find the next timestamp to emit across all symbols.
         /// @param[out] ts Next timestamp (ms since epoch).
@@ -363,8 +414,10 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
         void stop_log_thread_();
         void log_worker_();
         void enqueue_log_task_(LogTask&& task);
-        void enqueue_deferred_order_locked_(uint64_t due_step, std::function<void(Account&)> fn);
+        void enqueue_deferred_order_locked_(uint64_t due_step, std::function<void(Account&, uint64_t)> fn);
         void flush_deferred_orders_locked_(uint64_t step_seq);
+        void push_async_order_ack_locked_(AsyncOrderAck ack);
+        static std::pair<int, std::string> map_binance_reject_(const std::optional<Account::OrderRejectInfo>& reject);
         bool interpolate_mark_price_(size_t sym_id, uint64_t ts, double& out_price) const;
 
     public:

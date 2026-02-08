@@ -597,7 +597,7 @@ void Account::process_open_orders_pipeline_(bool& dirty, bool& open_orders_chang
             const bool is_spot = (ord.instrument_type == InstrumentType::Spot);
             const double maker_rate = is_spot ? spot_maker_fee : perp_maker_fee;
             const double taker_rate = is_spot ? spot_taker_fee : perp_taker_fee;
-            const double fee_rate = maker_rate * (1.0 - taker_probability) + taker_rate * taker_probability;
+            const double fee_rate = is_taker ? taker_rate : maker_rate;
             const double fee = notional * fee_rate;
 
             keep_open_order[entry.idx] = false;

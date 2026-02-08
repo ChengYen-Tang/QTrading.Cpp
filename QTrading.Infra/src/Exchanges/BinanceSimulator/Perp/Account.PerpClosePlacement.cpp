@@ -11,7 +11,12 @@ using QTrading::Dto::Trading::PositionSide;
 /// @param price     Order price.
 /// @param is_long   Direction of the new order.
 /// @return true if the order was converted into a closing/reverse order.
-bool Account::handleOneWayReverseOrder(const std::string& symbol, double quantity, double price, OrderSide side) {
+bool Account::handleOneWayReverseOrder(const std::string& symbol,
+    double quantity,
+    double price,
+    OrderSide side,
+    const std::string& client_order_id,
+    SelfTradePreventionMode stp_mode) {
     // In one-way mode we maintain at most one net position per symbol.
     const auto symbol_type = resolve_instrument_spec_(symbol).type;
     auto it = position_indices_by_symbol_.find(symbol);
@@ -49,6 +54,8 @@ bool Account::handleOneWayReverseOrder(const std::string& symbol, double quantit
             pos.id
         };
         closingOrd.instrument_type = symbol_type;
+        closingOrd.client_order_id = client_order_id;
+        closingOrd.stp_mode = static_cast<int>(stp_mode);
         open_orders_.push_back(closingOrd);
         mark_open_orders_dirty_();
         return true;
@@ -68,6 +75,8 @@ bool Account::handleOneWayReverseOrder(const std::string& symbol, double quantit
             pos.id
         };
         closingOrd.instrument_type = symbol_type;
+        closingOrd.client_order_id = client_order_id.empty() ? std::string{} : (client_order_id + ":close");
+        closingOrd.stp_mode = static_cast<int>(stp_mode);
         open_orders_.push_back(closingOrd);
     }
 
@@ -86,6 +95,8 @@ bool Account::handleOneWayReverseOrder(const std::string& symbol, double quantit
             -1
         };
         newOpen.instrument_type = symbol_type;
+        newOpen.client_order_id = client_order_id.empty() ? std::string{} : (client_order_id + ":open");
+        newOpen.stp_mode = static_cast<int>(stp_mode);
         open_orders_.push_back(newOpen);
     }
     mark_open_orders_dirty_();
