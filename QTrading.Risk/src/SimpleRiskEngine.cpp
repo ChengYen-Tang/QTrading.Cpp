@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <limits>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -82,6 +83,14 @@ double ClampNonNegative(double value)
     return value;
 }
 
+double ClampPositive(double value, double fallback)
+{
+    if (!std::isfinite(value) || value <= 0.0) {
+        return fallback;
+    }
+    return value;
+}
+
 double EffectiveLegNotional(const QTrading::Risk::SimpleRiskEngine::Config& cfg)
 {
     const double desired = std::abs(cfg.notional_usdt);
@@ -89,6 +98,14 @@ double EffectiveLegNotional(const QTrading::Risk::SimpleRiskEngine::Config& cfg)
         ? cfg.max_leg_notional_usdt
         : desired;
     return std::min(desired, cap);
+}
+
+double MaxLegCap(const QTrading::Risk::SimpleRiskEngine::Config& cfg)
+{
+    if (std::isfinite(cfg.max_leg_notional_usdt) && (cfg.max_leg_notional_usdt > 0.0)) {
+        return cfg.max_leg_notional_usdt;
+    }
+    return std::numeric_limits<double>::infinity();
 }
 
 } // namespace
@@ -124,6 +141,32 @@ SimpleRiskEngine::SimpleRiskEngine(Config cfg)
     cfg_.basis_level_ema_alpha = ClampAlpha(cfg_.basis_level_ema_alpha);
     OverrideDoubleFromEnv("QTR_FC_GROSS_DEVIATION_TRIGGER_RATIO", cfg_.gross_deviation_trigger_ratio);
     OverrideDoubleFromEnv("QTR_FC_GROSS_DEVIATION_TRIGGER_NOTIONAL_THRESHOLD", cfg_.gross_deviation_trigger_notional_threshold);
+    OverrideDoubleFromEnv("QTR_FC_CARRY_CONFIDENCE_MIN_SCALE", cfg_.carry_confidence_min_scale);
+    OverrideDoubleFromEnv("QTR_FC_CARRY_CONFIDENCE_MAX_SCALE", cfg_.carry_confidence_max_scale);
+    OverrideDoubleFromEnv("QTR_FC_CARRY_CONFIDENCE_POWER", cfg_.carry_confidence_power);
+    OverrideDoubleFromEnv("QTR_FC_CARRY_CONFIDENCE_MIN_LEVERAGE_SCALE", cfg_.carry_confidence_min_leverage_scale);
+    OverrideDoubleFromEnv("QTR_FC_CARRY_CONFIDENCE_MAX_LEVERAGE_SCALE", cfg_.carry_confidence_max_leverage_scale);
+    OverrideDoubleFromEnv("QTR_FC_CARRY_CONFIDENCE_LEVERAGE_POWER", cfg_.carry_confidence_leverage_power);
+    OverrideDoubleFromEnv("QTR_FC_DUAL_LEDGER_AUTO_NOTIONAL_RATIO", cfg_.dual_ledger_auto_notional_ratio);
+    OverrideDoubleFromEnv("QTR_FC_DUAL_LEDGER_AUTO_NOTIONAL_EMA_ALPHA", cfg_.dual_ledger_auto_notional_ema_alpha);
+    OverrideDoubleFromEnv("QTR_FC_DUAL_LEDGER_SPOT_AVAILABLE_USAGE", cfg_.dual_ledger_spot_available_usage);
+    OverrideDoubleFromEnv("QTR_FC_DUAL_LEDGER_PERP_AVAILABLE_USAGE", cfg_.dual_ledger_perp_available_usage);
+    cfg_.carry_confidence_min_scale = Clamp01(cfg_.carry_confidence_min_scale);
+    cfg_.carry_confidence_max_scale = ClampPositive(cfg_.carry_confidence_max_scale, 1.0);
+    if (cfg_.carry_confidence_max_scale < cfg_.carry_confidence_min_scale) {
+        cfg_.carry_confidence_max_scale = cfg_.carry_confidence_min_scale;
+    }
+    cfg_.carry_confidence_power = ClampPositive(cfg_.carry_confidence_power, 1.0);
+    cfg_.carry_confidence_min_leverage_scale = ClampPositive(cfg_.carry_confidence_min_leverage_scale, 1.0);
+    cfg_.carry_confidence_max_leverage_scale = ClampPositive(cfg_.carry_confidence_max_leverage_scale, 1.0);
+    if (cfg_.carry_confidence_max_leverage_scale < cfg_.carry_confidence_min_leverage_scale) {
+        cfg_.carry_confidence_max_leverage_scale = cfg_.carry_confidence_min_leverage_scale;
+    }
+    cfg_.carry_confidence_leverage_power = ClampPositive(cfg_.carry_confidence_leverage_power, 1.0);
+    cfg_.dual_ledger_auto_notional_ratio = ClampNonNegative(cfg_.dual_ledger_auto_notional_ratio);
+    cfg_.dual_ledger_auto_notional_ema_alpha = ClampAlpha(cfg_.dual_ledger_auto_notional_ema_alpha);
+    cfg_.dual_ledger_spot_available_usage = Clamp01(cfg_.dual_ledger_spot_available_usage);
+    cfg_.dual_ledger_perp_available_usage = Clamp01(cfg_.dual_ledger_perp_available_usage);
 
     for (const auto& kv : cfg_.instrument_types) {
         instrument_registry_.Set(kv.first, kv.second);
@@ -150,6 +193,18 @@ double SimpleRiskEngine::leverage_for_instrument_(const std::string& instrument)
     return std::min(target, spec.max_leverage);
 }
 
+double SimpleRiskEngine::leverage_for_instrument_scaled_(const std::string& instrument, double scale) const
+{
+    const auto& spec = instrument_registry_.Resolve(instrument);
+    if (spec.max_leverage <= 1.0) {
+        return 1.0;
+    }
+
+    const double base = leverage_for_instrument_(instrument);
+    const double safe_scale = ClampPositive(scale, 1.0);
+    return std::min(base * safe_scale, spec.max_leverage);
+}
+
 RiskTarget SimpleRiskEngine::position(const QTrading::Intent::TradeIntent& intent,
     const AccountState& account,
     const std::shared_ptr<QTrading::Dto::Market::Binance::MultiKlineDto>& market)
@@ -170,7 +225,16 @@ RiskTarget SimpleRiskEngine::position(const QTrading::Intent::TradeIntent& inten
 
     const bool is_carry = (intent.strategy == "funding_carry") ||
         (intent.structure == "delta_neutral_carry");
-    const double leg_notional_usdt = EffectiveLegNotional(cfg_);
+    const double configured_leg_notional = EffectiveLegNotional(cfg_);
+    const double carry_confidence = Clamp01(intent.confidence);
+    const double confidence_notional_scale =
+        cfg_.carry_confidence_min_scale +
+        (cfg_.carry_confidence_max_scale - cfg_.carry_confidence_min_scale) *
+        std::pow(carry_confidence, cfg_.carry_confidence_power);
+    const double confidence_leverage_scale =
+        cfg_.carry_confidence_min_leverage_scale +
+        (cfg_.carry_confidence_max_leverage_scale - cfg_.carry_confidence_min_leverage_scale) *
+        std::pow(carry_confidence, cfg_.carry_confidence_leverage_power);
 
     if (is_carry && market && intent.legs.size() >= 2) {
         double gross = 0.0;
@@ -236,11 +300,11 @@ RiskTarget SimpleRiskEngine::position(const QTrading::Intent::TradeIntent& inten
 
         bool gross_deviation_exceeded = false;
         if (gross > 0.0 &&
-            (leg_notional_usdt >= cfg_.gross_deviation_trigger_notional_threshold) &&
+            (configured_leg_notional >= cfg_.gross_deviation_trigger_notional_threshold) &&
             std::isfinite(cfg_.gross_deviation_trigger_ratio) &&
             cfg_.gross_deviation_trigger_ratio >= 0.0)
         {
-            const double target_gross = leg_notional_usdt * static_cast<double>(intent.legs.size());
+            const double target_gross = configured_leg_notional * static_cast<double>(intent.legs.size());
             if (target_gross > 0.0) {
                 const double deviation = std::abs(gross - target_gross) / target_gross;
                 gross_deviation_exceeded = (deviation >= cfg_.gross_deviation_trigger_ratio);
@@ -252,7 +316,13 @@ RiskTarget SimpleRiskEngine::position(const QTrading::Intent::TradeIntent& inten
             if (ratio < cfg_.rebalance_threshold_ratio) {
                 for (const auto& leg : intent.legs) {
                     out.target_positions[leg.instrument] = current_notional[leg.instrument];
-                    out.leverage[leg.instrument] = leverage_for_instrument_(leg.instrument);
+                    if (is_perp_instrument_(leg.instrument)) {
+                        out.leverage[leg.instrument] =
+                            leverage_for_instrument_scaled_(leg.instrument, confidence_leverage_scale);
+                    }
+                    else {
+                        out.leverage[leg.instrument] = leverage_for_instrument_(leg.instrument);
+                    }
                 }
                 return out;
             }
@@ -265,6 +335,74 @@ RiskTarget SimpleRiskEngine::position(const QTrading::Intent::TradeIntent& inten
                 spot_price = price_by_symbol.begin()->second;
             }
             if (spot_price.has_value() && *spot_price > 0.0) {
+                // Carry can scale using dual-ledger capacity while still respecting max-leg cap.
+                double target_leg_notional = configured_leg_notional;
+                const double leg_cap = MaxLegCap(cfg_);
+                if (cfg_.dual_ledger_auto_notional_ratio > 0.0 &&
+                    account.total_cash_balance.has_value() &&
+                    std::isfinite(*account.total_cash_balance) &&
+                    *account.total_cash_balance > 0.0)
+                {
+                    const double raw_auto_target =
+                        *account.total_cash_balance * cfg_.dual_ledger_auto_notional_ratio;
+                    if (!auto_notional_ema_initialized_) {
+                        auto_notional_ema_ = raw_auto_target;
+                        auto_notional_ema_initialized_ = true;
+                    }
+                    else {
+                        const double alpha = cfg_.dual_ledger_auto_notional_ema_alpha;
+                        auto_notional_ema_ =
+                            auto_notional_ema_ * (1.0 - alpha) + raw_auto_target * alpha;
+                    }
+                    const double auto_target = auto_notional_ema_;
+                    target_leg_notional = std::max(target_leg_notional, auto_target);
+                }
+
+                if (account.spot_balance.has_value()) {
+                    double spot_capacity = std::numeric_limits<double>::infinity();
+                    const double spot_available = std::max(0.0, account.spot_balance->AvailableBalance);
+                    for (const auto& leg : intent.legs) {
+                        if (!is_spot_instrument_(leg.instrument)) {
+                            continue;
+                        }
+                        const auto nit = current_notional.find(leg.instrument);
+                        const double current_abs = (nit == current_notional.end())
+                            ? 0.0
+                            : std::abs(nit->second);
+                        const double capacity = current_abs + spot_available * cfg_.dual_ledger_spot_available_usage;
+                        spot_capacity = std::min(spot_capacity, capacity);
+                    }
+                    target_leg_notional = std::min(target_leg_notional, spot_capacity);
+                }
+
+                if (account.perp_balance.has_value()) {
+                    double perp_capacity = std::numeric_limits<double>::infinity();
+                    const double perp_available = std::max(0.0, account.perp_balance->AvailableBalance);
+                    for (const auto& leg : intent.legs) {
+                        if (!is_perp_instrument_(leg.instrument)) {
+                            continue;
+                        }
+                        const auto nit = current_notional.find(leg.instrument);
+                        const double current_abs = (nit == current_notional.end())
+                            ? 0.0
+                            : std::abs(nit->second);
+                        const double lev = std::max(
+                            1.0,
+                            leverage_for_instrument_scaled_(leg.instrument, confidence_leverage_scale));
+                        const double capacity = current_abs + perp_available * lev * cfg_.dual_ledger_perp_available_usage;
+                        perp_capacity = std::min(perp_capacity, capacity);
+                    }
+                    target_leg_notional = std::min(target_leg_notional, perp_capacity);
+                }
+
+                target_leg_notional = std::min(target_leg_notional, leg_cap);
+                target_leg_notional = std::max(0.0, target_leg_notional);
+
+                // Dynamic sizing: downscale carry size in weaker signal regimes.
+                // confidence=1 keeps full target, while lower confidence shrinks toward min scale.
+                target_leg_notional *= confidence_notional_scale;
+                target_leg_notional = std::min(target_leg_notional, leg_cap);
+
                 double scale = 1.0;
                 if (perp_price.has_value()) {
                     const double basis_pct = (*perp_price - *spot_price) / *spot_price;
@@ -322,12 +460,18 @@ RiskTarget SimpleRiskEngine::position(const QTrading::Intent::TradeIntent& inten
                     }
                 }
 
-                const double base_qty = (leg_notional_usdt * scale) / *spot_price;
+                const double base_qty = (target_leg_notional * scale) / *spot_price;
                 for (const auto& leg : intent.legs) {
                     const double price = price_by_symbol[leg.instrument];
                     const double sign = (leg.side == QTrading::Intent::TradeSide::Long) ? 1.0 : -1.0;
                     out.target_positions[leg.instrument] = base_qty * price * sign;
-                    out.leverage[leg.instrument] = leverage_for_instrument_(leg.instrument);
+                    if (is_perp_instrument_(leg.instrument)) {
+                        out.leverage[leg.instrument] =
+                            leverage_for_instrument_scaled_(leg.instrument, confidence_leverage_scale);
+                    }
+                    else {
+                        out.leverage[leg.instrument] = leverage_for_instrument_(leg.instrument);
+                    }
                 }
                 return out;
             }
@@ -336,8 +480,8 @@ RiskTarget SimpleRiskEngine::position(const QTrading::Intent::TradeIntent& inten
 
     for (const auto& leg : intent.legs) {
         const double signed_notional = (leg.side == QTrading::Intent::TradeSide::Long)
-            ? leg_notional_usdt
-            : -leg_notional_usdt;
+            ? configured_leg_notional
+            : -configured_leg_notional;
         out.target_positions[leg.instrument] = signed_notional;
         out.leverage[leg.instrument] = leverage_for_instrument_(leg.instrument);
     }

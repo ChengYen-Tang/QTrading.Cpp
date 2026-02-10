@@ -34,6 +34,9 @@ struct TradeIntent {
     std::string position_mode;
     /// @brief Urgency hint.
     std::string urgency;
+    /// @brief Strategy confidence passed from signal (0..1).
+    ///        Risk engine may use this to scale target size dynamically.
+    double confidence = 1.0;
     /// @brief Free-form reason or context.
     std::string reason;
     /// @brief Ordered legs for the structure.

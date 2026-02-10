@@ -8,6 +8,7 @@ TEST(FundingCarryIntentBuilderTests, BuildsReceiveFundingLegsOnActiveSignal)
     QTrading::Signal::SignalDecision signal;
     signal.status = QTrading::Signal::SignalStatus::Active;
     signal.urgency = QTrading::Signal::SignalUrgency::High;
+    signal.confidence = 0.42;
     signal.strategy = "funding_carry";
     signal.ts_ms = 123;
 
@@ -17,6 +18,7 @@ TEST(FundingCarryIntentBuilderTests, BuildsReceiveFundingLegsOnActiveSignal)
     EXPECT_EQ(intent.legs[0].side, QTrading::Intent::TradeSide::Long);
     EXPECT_EQ(intent.legs[1].instrument, "BTCUSDT_PERP");
     EXPECT_EQ(intent.legs[1].side, QTrading::Intent::TradeSide::Short);
+    EXPECT_DOUBLE_EQ(intent.confidence, 0.42);
 }
 
 TEST(FundingCarryIntentBuilderTests, BuildsPayFundingLegsWhenConfigured)

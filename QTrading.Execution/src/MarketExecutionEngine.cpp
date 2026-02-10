@@ -96,6 +96,10 @@ MarketExecutionEngine::MarketExecutionEngine(
     OverrideDoubleFromEnv("QTR_FC_CARRY_LARGE_NOTIONAL_THRESHOLD", cfg_.carry_large_notional_threshold);
     OverrideUint64FromEnv("QTR_FC_CARRY_LARGE_NOTIONAL_COOLDOWN_MS", cfg_.carry_large_notional_cooldown_ms);
     OverrideDoubleFromEnv("QTR_FC_CARRY_MAX_PARTICIPATION_RATE", cfg_.carry_max_participation_rate);
+    OverrideDoubleFromEnv("QTR_FC_CARRY_BOOTSTRAP_GAP_RATIO", cfg_.carry_bootstrap_gap_ratio);
+    OverrideDoubleFromEnv("QTR_FC_CARRY_BOOTSTRAP_STEP_RATIO", cfg_.carry_bootstrap_step_ratio);
+    OverrideDoubleFromEnv("QTR_FC_CARRY_BOOTSTRAP_PARTICIPATION_RATE", cfg_.carry_bootstrap_participation_rate);
+    OverrideUint64FromEnv("QTR_FC_CARRY_BOOTSTRAP_COOLDOWN_MS", cfg_.carry_bootstrap_cooldown_ms);
     OverrideDoubleFromEnv("QTR_FC_CARRY_MIN_REBALANCE_NOTIONAL_RATIO", cfg_.carry_min_rebalance_notional_ratio);
     {
         uint64_t per_day = static_cast<uint64_t>(cfg_.carry_max_rebalances_per_day);
@@ -108,6 +112,9 @@ MarketExecutionEngine::MarketExecutionEngine(
     cfg_.carry_large_notional_step_ratio = Clamp01(cfg_.carry_large_notional_step_ratio);
     cfg_.carry_large_notional_threshold = ClampPositive(cfg_.carry_large_notional_threshold, 50000.0);
     cfg_.carry_max_participation_rate = Clamp01(cfg_.carry_max_participation_rate);
+    cfg_.carry_bootstrap_gap_ratio = Clamp01(cfg_.carry_bootstrap_gap_ratio);
+    cfg_.carry_bootstrap_step_ratio = Clamp01(cfg_.carry_bootstrap_step_ratio);
+    cfg_.carry_bootstrap_participation_rate = Clamp01(cfg_.carry_bootstrap_participation_rate);
     cfg_.carry_min_rebalance_notional_ratio = ClampNonNegative(cfg_.carry_min_rebalance_notional_ratio);
 }
 
@@ -235,12 +242,25 @@ std::vector<ExecutionOrder> MarketExecutionEngine::plan(
                 !reduce_only;
             double symbol_min_notional = effective_min_notional;
             double symbol_step_ratio = cfg_.carry_max_rebalance_step_ratio;
+            double symbol_participation_rate = cfg_.carry_max_participation_rate;
             if (is_carry_rebalance) {
                 const double target_abs_notional = std::fabs(target_notional);
                 uint64_t symbol_cooldown_ms = cfg_.carry_rebalance_cooldown_ms;
                 symbol_min_notional = std::max(
                     symbol_min_notional,
                     target_abs_notional * cfg_.carry_min_rebalance_notional_ratio);
+
+                if (target_abs_notional > 0.0) {
+                    const double gap_ratio = std::fabs(delta_notional) / target_abs_notional;
+                    if (gap_ratio >= cfg_.carry_bootstrap_gap_ratio) {
+                        symbol_step_ratio = std::max(symbol_step_ratio, cfg_.carry_bootstrap_step_ratio);
+                        symbol_participation_rate = std::max(
+                            symbol_participation_rate,
+                            cfg_.carry_bootstrap_participation_rate);
+                        symbol_cooldown_ms = std::min(symbol_cooldown_ms, cfg_.carry_bootstrap_cooldown_ms);
+                    }
+                }
+
                 if (target_abs_notional >= cfg_.carry_large_notional_threshold) {
                     symbol_step_ratio = std::min(symbol_step_ratio, cfg_.carry_large_notional_step_ratio);
                     symbol_cooldown_ms = std::max(
@@ -262,10 +282,10 @@ std::vector<ExecutionOrder> MarketExecutionEngine::plan(
                         std::fabs(target_notional) * symbol_step_ratio);
                     delta_notional = std::clamp(delta_notional, -max_step, max_step);
                 }
-                if (cfg_.carry_max_participation_rate > 0.0) {
+                if (symbol_participation_rate > 0.0) {
                     const double quote_volume = QuoteVolumeFromId(market, id);
                     if (quote_volume > 0.0) {
-                        const double volume_cap = quote_volume * cfg_.carry_max_participation_rate;
+                        const double volume_cap = quote_volume * symbol_participation_rate;
                         delta_notional = std::clamp(delta_notional, -volume_cap, volume_cap);
                     }
                 }
@@ -340,12 +360,25 @@ std::vector<ExecutionOrder> MarketExecutionEngine::plan(
             !reduce_only;
         double symbol_min_notional = effective_min_notional;
         double symbol_step_ratio = cfg_.carry_max_rebalance_step_ratio;
+        double symbol_participation_rate = cfg_.carry_max_participation_rate;
         if (is_carry_rebalance) {
             const double target_abs_notional = std::fabs(target_notional);
             uint64_t symbol_cooldown_ms = cfg_.carry_rebalance_cooldown_ms;
             symbol_min_notional = std::max(
                 symbol_min_notional,
                 target_abs_notional * cfg_.carry_min_rebalance_notional_ratio);
+
+            if (target_abs_notional > 0.0) {
+                const double gap_ratio = std::fabs(delta_notional) / target_abs_notional;
+                if (gap_ratio >= cfg_.carry_bootstrap_gap_ratio) {
+                    symbol_step_ratio = std::max(symbol_step_ratio, cfg_.carry_bootstrap_step_ratio);
+                    symbol_participation_rate = std::max(
+                        symbol_participation_rate,
+                        cfg_.carry_bootstrap_participation_rate);
+                    symbol_cooldown_ms = std::min(symbol_cooldown_ms, cfg_.carry_bootstrap_cooldown_ms);
+                }
+            }
+
             if (target_abs_notional >= cfg_.carry_large_notional_threshold) {
                 symbol_step_ratio = std::min(symbol_step_ratio, cfg_.carry_large_notional_step_ratio);
                 symbol_cooldown_ms = std::max(
@@ -373,12 +406,12 @@ std::vector<ExecutionOrder> MarketExecutionEngine::plan(
         if (pit == price_by_symbol.end() || pit->second <= 0.0) {
             continue;
         }
-        if (is_carry_rebalance && cfg_.carry_max_participation_rate > 0.0) {
+        if (is_carry_rebalance && symbol_participation_rate > 0.0) {
             auto kit = market->klines.find(symbol);
             if (kit != market->klines.end() && kit->second.has_value()) {
                 const double quote_volume = std::max(0.0, kit->second->QuoteVolume);
                 if (quote_volume > 0.0) {
-                    const double volume_cap = quote_volume * cfg_.carry_max_participation_rate;
+                    const double volume_cap = quote_volume * symbol_participation_rate;
                     delta_notional = std::clamp(delta_notional, -volume_cap, volume_cap);
                 }
             }

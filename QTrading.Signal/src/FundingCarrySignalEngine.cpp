@@ -1,5 +1,6 @@
 #include "Signal/FundingCarrySignalEngine.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <optional>
@@ -10,6 +11,7 @@ namespace {
 constexpr double kBasisToFundingScale = 0.25;
 constexpr double kFundingProxyEmaAlpha = 0.10;
 constexpr double kGateEpsilon = 1e-12;
+constexpr double kDefaultFundingConfidenceScale = 0.00005;
 
 void OverrideDoubleFromEnv(const char* name, double& value)
 {
@@ -38,6 +40,72 @@ void OverrideUint64FromEnv(const char* name, uint64_t& value)
         // Ignore malformed env values and keep code-level defaults.
     }
 }
+
+double Clamp01(double value)
+{
+    if (!std::isfinite(value)) {
+        return 0.0;
+    }
+    if (value < 0.0) {
+        return 0.0;
+    }
+    if (value > 1.0) {
+        return 1.0;
+    }
+    return value;
+}
+
+double FundingConfidenceScale()
+{
+    static const double value = [] {
+        double scale = kDefaultFundingConfidenceScale;
+        const char* raw = std::getenv("QTR_FC_CONFIDENCE_FUNDING_SCALE");
+        if (raw && *raw) {
+            try {
+                scale = std::abs(std::stod(raw));
+            }
+            catch (...) {
+                // Ignore malformed env values and keep default.
+            }
+        }
+        return std::max(scale, kGateEpsilon);
+    }();
+    return value;
+}
+
+double NormalizedFundingScore(const QTrading::Signal::FundingCarrySignalEngine::Config& cfg,
+    double funding_proxy_ema,
+    bool funding_gate_enabled)
+{
+    if (!funding_gate_enabled) {
+        // When funding gates are disabled, still expose funding regime quality
+        // so Risk can scale carry size continuously instead of hard on/off.
+        const double normalized = std::tanh(funding_proxy_ema / FundingConfidenceScale());
+        return Clamp01(0.5 + 0.5 * normalized);
+    }
+
+    const double low = std::min(cfg.exit_min_funding_rate, cfg.entry_min_funding_rate);
+    const double high = std::max(cfg.exit_min_funding_rate, cfg.entry_min_funding_rate);
+    const double width = std::max(high - low, kGateEpsilon);
+    return Clamp01((funding_proxy_ema - low) / width);
+}
+
+double NormalizedBasisScore(const QTrading::Signal::FundingCarrySignalEngine::Config& cfg,
+    double basis_pct,
+    bool basis_gate_enabled)
+{
+    const double basis_abs = std::abs(basis_pct);
+    if (!basis_gate_enabled) {
+        // Mild penalty when no explicit gate is configured.
+        return 1.0 / (1.0 + basis_abs * 100.0);
+    }
+
+    const double tight = std::min(cfg.entry_max_basis_pct, cfg.exit_max_basis_pct);
+    const double loose = std::max(cfg.entry_max_basis_pct, cfg.exit_max_basis_pct);
+    const double width = std::max(loose - tight, kGateEpsilon);
+    const double normalized = Clamp01((basis_abs - tight) / width);
+    return 1.0 - normalized;
+}
 }
 
 FundingCarrySignalEngine::FundingCarrySignalEngine(Config cfg)
@@ -46,6 +114,7 @@ FundingCarrySignalEngine::FundingCarrySignalEngine(Config cfg)
     // Optional env overrides so research sweeps can tune behavior without editing service wiring.
     OverrideDoubleFromEnv("QTR_FC_ENTRY_MIN_FUNDING_RATE", cfg_.entry_min_funding_rate);
     OverrideDoubleFromEnv("QTR_FC_EXIT_MIN_FUNDING_RATE", cfg_.exit_min_funding_rate);
+    OverrideDoubleFromEnv("QTR_FC_HARD_NEGATIVE_FUNDING_RATE", cfg_.hard_negative_funding_rate);
     OverrideDoubleFromEnv("QTR_FC_ENTRY_MAX_BASIS_PCT", cfg_.entry_max_basis_pct);
     OverrideDoubleFromEnv("QTR_FC_EXIT_MAX_BASIS_PCT", cfg_.exit_max_basis_pct);
     OverrideUint64FromEnv("QTR_FC_COOLDOWN_MS", cfg_.cooldown_ms);
@@ -136,6 +205,16 @@ SignalDecision FundingCarrySignalEngine::on_market(
 
     const double basis_pct = (*perp_close - *spot_close) / *spot_close;
     const double funding_proxy = basis_pct * kBasisToFundingScale;
+    std::optional<double> latest_observed_funding_rate;
+    if (has_symbol_ids_ &&
+        perp_id_ < market->funding_by_id.size() &&
+        market->funding_by_id[perp_id_].has_value())
+    {
+        latest_observed_funding_rate = market->funding_by_id[perp_id_]->Rate;
+    }
+    const double funding_signal = latest_observed_funding_rate.has_value()
+        ? *latest_observed_funding_rate
+        : funding_proxy;
     const bool enable_funding_gate =
         (std::abs(cfg_.entry_min_funding_rate) > kGateEpsilon) ||
         (std::abs(cfg_.exit_min_funding_rate) > kGateEpsilon);
@@ -144,25 +223,28 @@ SignalDecision FundingCarrySignalEngine::on_market(
         (cfg_.exit_max_basis_pct < 1.0 - kGateEpsilon);
 
     if (!funding_proxy_initialized_) {
-        funding_proxy_ema_ = funding_proxy;
+        funding_proxy_ema_ = funding_signal;
         funding_proxy_initialized_ = true;
     }
     else {
         funding_proxy_ema_ =
             funding_proxy_ema_ * (1.0 - kFundingProxyEmaAlpha) +
-            funding_proxy * kFundingProxyEmaAlpha;
+            funding_signal * kFundingProxyEmaAlpha;
     }
     if (active_) {
         const bool can_exit = (cfg_.min_hold_ms == 0) ||
             (out.ts_ms >= active_since_ts_ + cfg_.min_hold_ms);
         const bool exit_funding =
             enable_funding_gate && (funding_proxy_ema_ < cfg_.exit_min_funding_rate);
+        const bool hard_negative_funding =
+            (cfg_.hard_negative_funding_rate > -1.0) &&
+            (funding_signal <= cfg_.hard_negative_funding_rate);
         const bool exit_basis =
             enable_basis_gate && (std::abs(basis_pct) > cfg_.exit_max_basis_pct);
         const bool catastrophic_basis =
             enable_basis_gate && (std::abs(basis_pct) > (cfg_.exit_max_basis_pct * 2.0));
         const bool normal_exit = can_exit && (exit_funding || exit_basis);
-        if (normal_exit || catastrophic_basis) {
+        if (normal_exit || catastrophic_basis || hard_negative_funding) {
             active_ = false;
             last_exit_ts_ = out.ts_ms;
             active_since_ts_ = 0;
@@ -184,7 +266,16 @@ SignalDecision FundingCarrySignalEngine::on_market(
 
     // Active by design: funding is earned over time, so urgency is low.
     out.status = active_ ? SignalStatus::Active : SignalStatus::Inactive;
-    out.confidence = active_ ? 1.0 : 0.0;
+    if (active_) {
+        const double funding_score =
+            NormalizedFundingScore(cfg_, funding_proxy_ema_, enable_funding_gate);
+        const double basis_score =
+            NormalizedBasisScore(cfg_, basis_pct, enable_basis_gate);
+        out.confidence = Clamp01(funding_score * basis_score);
+    }
+    else {
+        out.confidence = 0.0;
+    }
     out.urgency = SignalUrgency::Low;
     return out;
 }

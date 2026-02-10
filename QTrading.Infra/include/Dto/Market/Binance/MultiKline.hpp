@@ -6,6 +6,7 @@
 #include <unordered_map>
 #include <vector>
 #include "Dto/Market/Base.hpp"
+#include "Dto/Market/Binance/FundingRate.hpp"
 #include "Dto/Market/Binance/Kline.hpp"
 
 namespace QTrading::Dto::Market::Binance {
@@ -19,6 +20,9 @@ namespace QTrading::Dto::Market::Binance {
         std::shared_ptr<const std::vector<std::string>> symbols;
         /// @brief Per-symbol minute bar data aligned to symbols (index-based).
         std::vector<std::optional<KlineDto>> klines_by_id;
+        /// @brief Latest known funding snapshot per symbol aligned to symbols.
+        /// @details This is piecewise-constant between funding updates (e.g., 8h cadence).
+        std::vector<std::optional<FundingRateDto>> funding_by_id;
     };
 
 }  // namespace QTrading::Dto::Market::Binance

@@ -50,7 +50,29 @@ public:
         /// @brief Only apply gross-deviation trigger when per-leg target notional is above this threshold.
         double gross_deviation_trigger_notional_threshold = 50000.0;
         /// @brief Hard cap for per-leg target notional to avoid unstable churn at oversized capacity.
-        double max_leg_notional_usdt = 200000.0;
+        double max_leg_notional_usdt = 292000.0;
+        /// @brief Minimum carry sizing scale when confidence is near zero (0..1).
+        double carry_confidence_min_scale = 1.0;
+        /// @brief Maximum carry sizing scale when confidence is near one (>0).
+        double carry_confidence_max_scale = 1.0;
+        /// @brief Curvature of confidence scaling; >1 biases toward smaller sizes.
+        double carry_confidence_power = 1.25;
+        /// @brief Minimum leverage scale for perp legs under low carry confidence (>0).
+        double carry_confidence_min_leverage_scale = 1.0;
+        /// @brief Maximum leverage scale for perp legs under high carry confidence (>0).
+        double carry_confidence_max_leverage_scale = 1.0;
+        /// @brief Curvature for leverage scaling by confidence; >1 suppresses high leverage more.
+        double carry_confidence_leverage_power = 1.0;
+        /// @brief When > 0, carry notional target can scale up to this fraction of total cash.
+        ///        Example: 0.20 with 1,000,000 total cash targets 200,000 notional per leg.
+        double dual_ledger_auto_notional_ratio = 0.292;
+        /// @brief EMA alpha (0..1) for smoothing auto-notional target from total cash.
+        ///        1.0 keeps current behavior (no smoothing), smaller values reduce churn.
+        double dual_ledger_auto_notional_ema_alpha = 1.0;
+        /// @brief Fraction of spot available cash considered usable for incremental carry sizing.
+        double dual_ledger_spot_available_usage = 0.95;
+        /// @brief Fraction of perp available balance considered usable for incremental carry sizing.
+        double dual_ledger_perp_available_usage = 1.00;
         /// @brief Optional explicit instrument typing; when empty, fallback inference is used.
         std::unordered_map<std::string, QTrading::Dto::Trading::InstrumentType> instrument_types;
     };
@@ -65,6 +87,7 @@ private:
     bool is_spot_instrument_(const std::string& instrument) const;
     bool is_perp_instrument_(const std::string& instrument) const;
     double leverage_for_instrument_(const std::string& instrument) const;
+    double leverage_for_instrument_scaled_(const std::string& instrument, double scale) const;
 
     Config cfg_;
     QTrading::Dto::Trading::InstrumentRegistry instrument_registry_{};
@@ -72,6 +95,8 @@ private:
     double basis_level_ema_{ 0.0 };
     double basis_level_ema_prev_{ 0.0 };
     bool neg_basis_scale_active_{ false };
+    bool auto_notional_ema_initialized_{ false };
+    double auto_notional_ema_{ 0.0 };
 };
 
 } // namespace QTrading::Risk

@@ -16,21 +16,29 @@ public:
     struct Config {
         double min_notional = 5.0;
         /// @brief Minimum milliseconds between non-reducing carry rebalances per symbol.
-        uint64_t carry_rebalance_cooldown_ms = 30ull * 60ull * 1000ull;
+        uint64_t carry_rebalance_cooldown_ms = 180ull * 60ull * 1000ull;
         /// @brief Max fraction of target notional to adjust in one carry rebalance.
-        double carry_max_rebalance_step_ratio = 0.06;
+        double carry_max_rebalance_step_ratio = 0.012;
         /// @brief For large target notionals, step ratio is clamped by this value.
-        double carry_large_notional_step_ratio = 0.05;
+        double carry_large_notional_step_ratio = 0.006;
         /// @brief Threshold for activating large-notional step clamp.
-        double carry_large_notional_threshold = 50000.0;
+        double carry_large_notional_threshold = 150000.0;
         /// @brief Minimum milliseconds between carry rebalances for large notionals.
-        uint64_t carry_large_notional_cooldown_ms = 60ull * 60ull * 1000ull;
+        uint64_t carry_large_notional_cooldown_ms = 360ull * 60ull * 1000ull;
         /// @brief Max fraction of current-bar quote volume used for one carry rebalance.
-        double carry_max_participation_rate = 0.001;
+        double carry_max_participation_rate = 0.0004;
+        /// @brief Bootstrap mode activates when current gap/target ratio exceeds this threshold.
+        double carry_bootstrap_gap_ratio = 0.25;
+        /// @brief In bootstrap mode, allow larger one-step adjustment.
+        double carry_bootstrap_step_ratio = 0.50;
+        /// @brief In bootstrap mode, allow a higher participation cap.
+        double carry_bootstrap_participation_rate = 0.01;
+        /// @brief In bootstrap mode, use shorter cooldown for faster initial convergence.
+        uint64_t carry_bootstrap_cooldown_ms = 5ull * 60ull * 1000ull;
         /// @brief Scales carry min rebalance notional with target notionals (e.g. 0.000125 * 200000 = 25).
         double carry_min_rebalance_notional_ratio = 0.00025;
         /// @brief Max number of carry rebalances per symbol per UTC day (0 = disabled).
-        uint32_t carry_max_rebalances_per_day = 48;
+        uint32_t carry_max_rebalances_per_day = 6;
     };
 
     MarketExecutionEngine(

@@ -23,6 +23,9 @@ public:
         std::string perp_symbol;
         double entry_min_funding_rate = 0.0;
         double exit_min_funding_rate = 0.0;
+        /// @brief Emergency funding floor; when current observed funding <= this threshold,
+        ///        position exits immediately (ignores min_hold). Set <= -1 to disable.
+        double hard_negative_funding_rate = -1.0;
         double entry_max_basis_pct = 1.0;
         double exit_max_basis_pct = 1.0;
         uint64_t cooldown_ms = 0;

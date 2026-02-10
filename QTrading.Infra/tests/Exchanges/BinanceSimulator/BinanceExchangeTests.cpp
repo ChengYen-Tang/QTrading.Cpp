@@ -550,6 +550,68 @@ TEST_F(BinanceExchangeFixture, FundingApplyTimingControlsSameTimestampFunding)
     EXPECT_NEAR(before_matching - after_matching, 0.1, 1e-6);
 }
 
+TEST_F(BinanceExchangeFixture, MarketSnapshotFundingUsesPreviousPeriodUntilUpdateIsApplied)
+{
+    writeCsv("btc.csv", {
+        {      0, 100,100,100,100,1000, 30000,100,1,0,0 },
+        {  60000, 200,200,200,200,1000, 90000,100,1,0,0 }
+        });
+
+    writeFundingCsv("btc_funding.csv", {
+        {      0, 0.0002, 100.0 },
+        {  60000, 0.0010, 100.0 }
+        });
+
+    auto funding_seen_at_step2 = [&](BinanceExchange::FundingApplyTiming timing) -> double {
+        BinanceExchange ex(
+            { {"BTCUSDT", (tmpDir / "btc.csv").string(),
+                std::optional<std::string>((tmpDir / "btc_funding.csv").string())} },
+            logger,
+            /*balance*/ 1000.0);
+        ex.set_funding_apply_timing(timing);
+
+        auto mCh = ex.get_market_channel();
+
+        if (!ex.step()) {
+            ADD_FAILURE() << "step#1 failed";
+            return std::numeric_limits<double>::quiet_NaN();
+        }
+        auto dto1 = mCh->Receive();
+        if (!dto1.has_value() || dto1->get()->Timestamp != 0u) {
+            ADD_FAILURE() << "unexpected dto1";
+            return std::numeric_limits<double>::quiet_NaN();
+        }
+
+        if (!ex.step()) {
+            ADD_FAILURE() << "step#2 failed";
+            return std::numeric_limits<double>::quiet_NaN();
+        }
+        auto dto2 = mCh->Receive();
+        if (!dto2.has_value() || dto2->get()->Timestamp != 60000u) {
+            ADD_FAILURE() << "unexpected dto2";
+            return std::numeric_limits<double>::quiet_NaN();
+        }
+        if (!dto2->get()->symbols ||
+            dto2->get()->symbols->size() != 1u ||
+            (*dto2->get()->symbols)[0] != "BTCUSDT" ||
+            dto2->get()->funding_by_id.size() != 1u ||
+            !dto2->get()->funding_by_id[0].has_value())
+        {
+            ADD_FAILURE() << "unexpected funding snapshot shape";
+            return std::numeric_limits<double>::quiet_NaN();
+        }
+        return dto2->get()->funding_by_id[0]->Rate;
+    };
+
+    const double before_matching = funding_seen_at_step2(BinanceExchange::FundingApplyTiming::BeforeMatching);
+    const double after_matching = funding_seen_at_step2(BinanceExchange::FundingApplyTiming::AfterMatching);
+
+    // BeforeMatching applies and publishes the new rate at t=60000.
+    EXPECT_NEAR(before_matching, 0.0010, 1e-12);
+    // AfterMatching still sees previous period at the same timestamp.
+    EXPECT_NEAR(after_matching, 0.0002, 1e-12);
+}
+
 TEST_F(BinanceExchangeFixture, FundingMarkPriceMaxAgeSkipsStaleOneSidedInterpolation)
 {
     writeCsv("btc.csv", {

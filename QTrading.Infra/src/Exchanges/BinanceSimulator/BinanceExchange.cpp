@@ -259,6 +259,9 @@ BinanceExchange::BinanceExchange(
     funding_md_.resize(datasets.size());
     funding_cursor_.assign(datasets.size(), 0);
     has_funding_.assign(datasets.size(), 0);
+    last_funding_rate_by_symbol_.assign(datasets.size(), 0.0);
+    last_funding_time_by_symbol_.assign(datasets.size(), 0);
+    has_last_funding_.assign(datasets.size(), 0);
     for (size_t i = 0; i < datasets.size(); ++i) {
         const auto& ds = datasets[i];
         if (ds.funding_csv.has_value() && !ds.funding_csv->empty()) {
@@ -771,6 +774,8 @@ void BinanceExchange::build_multikline(uint64_t ts, MultiKlineDto& out)
     }
     out.klines_by_id.clear();
     out.klines_by_id.resize(symbols_.size());
+    out.funding_by_id.clear();
+    out.funding_by_id.resize(symbols_.size());
 
     kline_snap_cache_.clear();
     kline_snap_cache_.reserve(md_.size());
@@ -808,6 +813,12 @@ void BinanceExchange::build_multikline(uint64_t ts, MultiKlineDto& out)
             if (enable_klines_map_) {
                 out.klines.emplace(sym, std::nullopt);
             }
+        }
+
+        if (i < has_last_funding_.size() && has_last_funding_[i]) {
+            out.funding_by_id[i] = FundingRateDto(
+                last_funding_time_by_symbol_[i],
+                last_funding_rate_by_symbol_[i]);
         }
     }
     if (!kline_snap_cache_.empty())
@@ -1214,6 +1225,11 @@ void BinanceExchange::collect_funding_events(uint64_t ts, std::vector<FundingEve
         const size_t end = data.upper_bound_ts(ts);
         while (cur < end) {
             const auto& fr = data.get_funding(cur);
+            if (i < has_last_funding_.size()) {
+                has_last_funding_[i] = 1;
+                last_funding_rate_by_symbol_[i] = fr.Rate;
+                last_funding_time_by_symbol_[i] = fr.FundingTime;
+            }
 
             double price = 0.0;
             bool has_price = false;

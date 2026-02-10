@@ -18,6 +18,7 @@ TradeIntent FundingCarryIntentBuilder::build(const QTrading::Signal::SignalDecis
     out.position_mode = "hedge";
     out.urgency = (signal.urgency == QTrading::Signal::SignalUrgency::High) ? "high" :
         (signal.urgency == QTrading::Signal::SignalUrgency::Medium) ? "med" : "low";
+    out.confidence = (signal.confidence > 0.0) ? signal.confidence : 1.0;
     out.reason = "funding_carry";
 
     if (signal.status != QTrading::Signal::SignalStatus::Active) {

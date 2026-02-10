@@ -302,6 +302,9 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
         std::vector<std::unique_ptr<FundingRateData>> funding_md_; ///< Optional funding data per symbol.
         std::vector<size_t>                         funding_cursor_; ///< Funding read index per symbol.
         std::vector<uint8_t>                        has_funding_;
+        std::vector<double>                         last_funding_rate_by_symbol_;
+        std::vector<uint64_t>                       last_funding_time_by_symbol_;
+        std::vector<uint8_t>                        has_last_funding_;
         std::shared_ptr<Account>                    account_engine_;  ///< Simulated margin account engine.
         mutable std::mutex                          account_mtx_;
 

@@ -212,6 +212,7 @@ TEST(MarketExecutionEngineTests, CarryRebalanceStepRatioCapsOrderSize)
     cfg.min_notional = 10.0;
     cfg.carry_rebalance_cooldown_ms = 0;
     cfg.carry_max_rebalance_step_ratio = 0.1;
+    cfg.carry_bootstrap_step_ratio = 0.1; // Match base step to isolate step-ratio cap behavior.
     QTrading::Execution::MarketExecutionEngine engine(ex, cfg);
 
     QTrading::Risk::RiskTarget target;
@@ -348,4 +349,39 @@ TEST(MarketExecutionEngineTests, CarryMinNotionalRatioPreventsTinyLargeBookRebal
     auto orders = engine.plan(target, signal, MakeMarketWithQuoteVolume(1, "BTCUSDT_PERP", 10000.0, 1'000'000.0));
     // Delta is only 50 notional; dynamic min notional is 100, so this micro rebalance is skipped.
     EXPECT_TRUE(orders.empty());
+}
+
+TEST(MarketExecutionEngineTests, CarryBootstrapModeAcceleratesInitialConvergence)
+{
+    auto ex = std::make_shared<FakeExchange>();
+
+    QTrading::Execution::MarketExecutionEngine::Config cfg;
+    cfg.min_notional = 10.0;
+    cfg.carry_rebalance_cooldown_ms = 60'000;
+    cfg.carry_max_rebalance_step_ratio = 0.06;
+    cfg.carry_max_participation_rate = 0.001;
+    cfg.carry_bootstrap_gap_ratio = 0.25;
+    cfg.carry_bootstrap_step_ratio = 1.0;
+    cfg.carry_bootstrap_participation_rate = 0.05;
+    cfg.carry_bootstrap_cooldown_ms = 0;
+    cfg.carry_large_notional_threshold = 1'000'000.0; // Avoid large-notional clamp in this test.
+    cfg.carry_min_rebalance_notional_ratio = 0.0;
+    QTrading::Execution::MarketExecutionEngine engine(ex, cfg);
+
+    QTrading::Risk::RiskTarget target;
+    target.target_positions["BTCUSDT_PERP"] = 1000.0;
+    target.leverage["BTCUSDT_PERP"] = 2.0;
+
+    QTrading::Signal::SignalDecision signal;
+    signal.strategy = "funding_carry";
+    signal.urgency = QTrading::Signal::SignalUrgency::Low;
+
+    auto orders = engine.plan(
+        target,
+        signal,
+        MakeMarketWithQuoteVolume(1, "BTCUSDT_PERP", 10000.0, 1000.0));
+
+    ASSERT_EQ(orders.size(), 1u);
+    // Bootstrap upgrades both step and participation caps, so first order can be 50 notional.
+    EXPECT_NEAR(orders[0].qty, 50.0 / 10000.0, 1e-9);
 }

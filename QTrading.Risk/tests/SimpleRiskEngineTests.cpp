@@ -368,3 +368,233 @@ TEST(SimpleRiskEngineTests, DualLedgerSnapshotsKeepCarryRebalancePathStable)
     EXPECT_DOUBLE_EQ(out.leverage["BTCUSDT_SPOT"], 1.0);
     EXPECT_DOUBLE_EQ(out.leverage["BTCUSDT_PERP"], 2.0);
 }
+
+TEST(SimpleRiskEngineTests, CarryDualLedgerAutoNotionalUsesTotalCashRatio)
+{
+    QTrading::Risk::SimpleRiskEngine::Config cfg;
+    cfg.notional_usdt = 1000.0;
+    cfg.max_leg_notional_usdt = 200000.0;
+    cfg.leverage = 2.0;
+    cfg.max_leverage = 3.0;
+    cfg.dual_ledger_auto_notional_ratio = 0.10;
+    ApplyDefaultSpotPerpTypes(cfg);
+    QTrading::Risk::SimpleRiskEngine engine(cfg);
+
+    QTrading::Intent::TradeIntent intent;
+    intent.strategy = "funding_carry";
+    intent.structure = "delta_neutral_carry";
+    intent.ts_ms = 1;
+    intent.legs.push_back({ "BTCUSDT_SPOT", QTrading::Intent::TradeSide::Long });
+    intent.legs.push_back({ "BTCUSDT_PERP", QTrading::Intent::TradeSide::Short });
+
+    QTrading::Risk::AccountState account{};
+    QTrading::Dto::Account::BalanceSnapshot spot{};
+    spot.AvailableBalance = 500'000.0;
+    spot.WalletBalance = 500'000.0;
+    account.spot_balance = spot;
+
+    QTrading::Dto::Account::BalanceSnapshot perp{};
+    perp.AvailableBalance = 500'000.0;
+    perp.WalletBalance = 500'000.0;
+    perp.Equity = 500'000.0;
+    account.perp_balance = perp;
+    account.total_cash_balance = 1'000'000.0;
+
+    auto market = MakeTwoLegMarket(1, 100.0, 101.0);
+    auto out = engine.position(intent, account, market);
+
+    EXPECT_NEAR(out.target_positions["BTCUSDT_SPOT"], 100000.0, 1e-6);
+    EXPECT_NEAR(out.target_positions["BTCUSDT_PERP"], -101000.0, 1e-6);
+}
+
+TEST(SimpleRiskEngineTests, CarryDualLedgerCapacityKeepsCurrentSpotExposureWhenCashIsLow)
+{
+    QTrading::Risk::SimpleRiskEngine::Config cfg;
+    cfg.notional_usdt = 1000.0;
+    cfg.max_leg_notional_usdt = 200000.0;
+    cfg.leverage = 2.0;
+    cfg.max_leverage = 3.0;
+    cfg.dual_ledger_auto_notional_ratio = 0.10;
+    cfg.dual_ledger_spot_available_usage = 1.0;
+    cfg.dual_ledger_perp_available_usage = 1.0;
+    ApplyDefaultSpotPerpTypes(cfg);
+    QTrading::Risk::SimpleRiskEngine engine(cfg);
+
+    QTrading::Intent::TradeIntent intent;
+    intent.strategy = "funding_carry";
+    intent.structure = "delta_neutral_carry";
+    intent.ts_ms = 1;
+    intent.legs.push_back({ "BTCUSDT_SPOT", QTrading::Intent::TradeSide::Long });
+    intent.legs.push_back({ "BTCUSDT_PERP", QTrading::Intent::TradeSide::Short });
+
+    QTrading::Risk::AccountState account{};
+    QTrading::dto::Position spot_pos{};
+    spot_pos.symbol = "BTCUSDT_SPOT";
+    spot_pos.quantity = 1000.0; // 100k spot notional at spot=100
+    spot_pos.is_long = true;
+    account.positions.push_back(spot_pos);
+
+    QTrading::dto::Position perp_pos{};
+    perp_pos.symbol = "BTCUSDT_PERP";
+    perp_pos.quantity = 990.09900990099; // ~100k short notional at perp=101
+    perp_pos.is_long = false;
+    account.positions.push_back(perp_pos);
+
+    QTrading::Dto::Account::BalanceSnapshot spot{};
+    spot.AvailableBalance = 100.0; // little remaining spot cash
+    spot.WalletBalance = 100.0;
+    account.spot_balance = spot;
+
+    QTrading::Dto::Account::BalanceSnapshot perp{};
+    perp.AvailableBalance = 10'000.0;
+    perp.WalletBalance = 50'000.0;
+    perp.Equity = 50'000.0;
+    account.perp_balance = perp;
+    account.total_cash_balance = 50'100.0;
+
+    auto market = MakeTwoLegMarket(1, 100.0, 101.0);
+    auto out = engine.position(intent, account, market);
+
+    // Spot capacity includes existing spot inventory notional, so target should not collapse to near zero.
+    EXPECT_GT(out.target_positions["BTCUSDT_SPOT"], 99000.0);
+    EXPECT_LT(out.target_positions["BTCUSDT_SPOT"], 100200.0);
+    EXPECT_LT(out.target_positions["BTCUSDT_PERP"], -99900.0);
+}
+
+TEST(SimpleRiskEngineTests, CarryDualLedgerAutoNotionalEmaSmoothsTargetAfterCashDrop)
+{
+    QTrading::Risk::SimpleRiskEngine::Config cfg;
+    cfg.notional_usdt = 1000.0;
+    cfg.max_leg_notional_usdt = 400000.0;
+    cfg.leverage = 2.0;
+    cfg.max_leverage = 3.0;
+    cfg.dual_ledger_auto_notional_ratio = 0.40;
+    cfg.dual_ledger_auto_notional_ema_alpha = 0.10;
+    cfg.dual_ledger_spot_available_usage = 1.0;
+    cfg.dual_ledger_perp_available_usage = 1.0;
+    ApplyDefaultSpotPerpTypes(cfg);
+    QTrading::Risk::SimpleRiskEngine engine(cfg);
+
+    QTrading::Intent::TradeIntent intent;
+    intent.strategy = "funding_carry";
+    intent.structure = "delta_neutral_carry";
+    intent.ts_ms = 1;
+    intent.legs.push_back({ "BTCUSDT_SPOT", QTrading::Intent::TradeSide::Long });
+    intent.legs.push_back({ "BTCUSDT_PERP", QTrading::Intent::TradeSide::Short });
+
+    QTrading::Risk::AccountState account{};
+    QTrading::Dto::Account::BalanceSnapshot spot{};
+    spot.WalletBalance = 1'000'000.0;
+    spot.AvailableBalance = 1'000'000.0;
+    account.spot_balance = spot;
+
+    QTrading::Dto::Account::BalanceSnapshot perp{};
+    perp.WalletBalance = 1'000'000.0;
+    perp.AvailableBalance = 1'000'000.0;
+    perp.Equity = 1'000'000.0;
+    account.perp_balance = perp;
+
+    auto market = MakeTwoLegMarket(1, 100.0, 101.0);
+
+    // First snapshot: auto target = 400,000 (40% of 1,000,000).
+    account.total_cash_balance = 1'000'000.0;
+    auto out1 = engine.position(intent, account, market);
+    EXPECT_NEAR(out1.target_positions["BTCUSDT_SPOT"], 400000.0, 1e-6);
+
+    // Cash drops to 500,000; with alpha=0.10, smoothed target is:
+    // 0.9 * 400,000 + 0.1 * 200,000 = 380,000 (instead of an abrupt 200,000).
+    intent.ts_ms = 2;
+    account.total_cash_balance = 500'000.0;
+    auto out2 = engine.position(intent, account, market);
+    EXPECT_NEAR(out2.target_positions["BTCUSDT_SPOT"], 380000.0, 1e-6);
+    EXPECT_NEAR(out2.target_positions["BTCUSDT_PERP"], -383800.0, 1e-3);
+}
+
+TEST(SimpleRiskEngineTests, CarryConfidenceScalesDownTargetNotional)
+{
+    QTrading::Risk::SimpleRiskEngine::Config cfg;
+    cfg.notional_usdt = 1000.0;
+    cfg.max_leg_notional_usdt = 1000.0;
+    cfg.leverage = 2.0;
+    cfg.max_leverage = 3.0;
+    cfg.carry_confidence_min_scale = 0.2;
+    cfg.carry_confidence_power = 1.0;
+    ApplyDefaultSpotPerpTypes(cfg);
+    QTrading::Risk::SimpleRiskEngine engine(cfg);
+
+    QTrading::Intent::TradeIntent intent;
+    intent.strategy = "funding_carry";
+    intent.structure = "delta_neutral_carry";
+    intent.ts_ms = 1;
+    intent.confidence = 0.25;
+    intent.legs.push_back({ "BTCUSDT_SPOT", QTrading::Intent::TradeSide::Long });
+    intent.legs.push_back({ "BTCUSDT_PERP", QTrading::Intent::TradeSide::Short });
+
+    QTrading::Risk::AccountState account;
+    auto market = MakeTwoLegMarket(1, 100.0, 101.0);
+    auto out = engine.position(intent, account, market);
+
+    // confidence scale = 0.2 + 0.8 * 0.25 = 0.4 -> target spot leg = 400 notional.
+    EXPECT_NEAR(out.target_positions["BTCUSDT_SPOT"], 400.0, 1e-9);
+    EXPECT_NEAR(out.target_positions["BTCUSDT_PERP"], -404.0, 1e-9);
+}
+
+TEST(SimpleRiskEngineTests, CarryConfidenceCanScaleUpWithinLegCap)
+{
+    QTrading::Risk::SimpleRiskEngine::Config cfg;
+    cfg.notional_usdt = 1000.0;
+    cfg.max_leg_notional_usdt = 1400.0;
+    cfg.leverage = 2.0;
+    cfg.max_leverage = 3.0;
+    cfg.carry_confidence_min_scale = 0.8;
+    cfg.carry_confidence_max_scale = 1.5;
+    cfg.carry_confidence_power = 1.0;
+    ApplyDefaultSpotPerpTypes(cfg);
+    QTrading::Risk::SimpleRiskEngine engine(cfg);
+
+    QTrading::Intent::TradeIntent intent;
+    intent.strategy = "funding_carry";
+    intent.structure = "delta_neutral_carry";
+    intent.ts_ms = 1;
+    intent.confidence = 1.0;
+    intent.legs.push_back({ "BTCUSDT_SPOT", QTrading::Intent::TradeSide::Long });
+    intent.legs.push_back({ "BTCUSDT_PERP", QTrading::Intent::TradeSide::Short });
+
+    QTrading::Risk::AccountState account;
+    auto market = MakeTwoLegMarket(1, 100.0, 101.0);
+    auto out = engine.position(intent, account, market);
+
+    // Raw scale would request 1,500, but max_leg_notional clamps each leg to 1,400.
+    EXPECT_NEAR(out.target_positions["BTCUSDT_SPOT"], 1400.0, 1e-9);
+    EXPECT_NEAR(out.target_positions["BTCUSDT_PERP"], -1414.0, 1e-9);
+}
+
+TEST(SimpleRiskEngineTests, CarryConfidenceScalesPerpLeverage)
+{
+    QTrading::Risk::SimpleRiskEngine::Config cfg;
+    cfg.notional_usdt = 1000.0;
+    cfg.max_leg_notional_usdt = 1000.0;
+    cfg.leverage = 2.0;
+    cfg.max_leverage = 3.0;
+    cfg.carry_confidence_min_leverage_scale = 0.5;
+    cfg.carry_confidence_max_leverage_scale = 1.5;
+    cfg.carry_confidence_leverage_power = 1.0;
+    ApplyDefaultSpotPerpTypes(cfg);
+    QTrading::Risk::SimpleRiskEngine engine(cfg);
+
+    QTrading::Intent::TradeIntent intent;
+    intent.strategy = "funding_carry";
+    intent.structure = "delta_neutral_carry";
+    intent.ts_ms = 1;
+    intent.confidence = 0.25;
+    intent.legs.push_back({ "BTCUSDT_SPOT", QTrading::Intent::TradeSide::Long });
+    intent.legs.push_back({ "BTCUSDT_PERP", QTrading::Intent::TradeSide::Short });
+
+    QTrading::Risk::AccountState account;
+    auto market = MakeTwoLegMarket(1, 100.0, 101.0);
+    auto out = engine.position(intent, account, market);
+
+    // leverage scale = 0.5 + (1.5 - 0.5) * 0.25 = 0.75 -> perp leverage = 2.0 * 0.75 = 1.5
+    EXPECT_NEAR(out.leverage["BTCUSDT_SPOT"], 1.0, 1e-9);
+    EXPECT_NEAR(out.leverage["BTCUSDT_PERP"], 1.5, 1e-9);
+}
