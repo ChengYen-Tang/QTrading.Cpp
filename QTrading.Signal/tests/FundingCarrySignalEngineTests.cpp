@@ -158,6 +158,36 @@ TEST(FundingCarrySignalEngineTests, HardNegativeFundingForcesExitEvenBeforeMinHo
     EXPECT_EQ(s2.status, QTrading::Signal::SignalStatus::Inactive);
 }
 
+TEST(FundingCarrySignalEngineTests, ExitRequiresFundingPersistenceAcrossSettlements)
+{
+    // Funding gate enabled, exit persistence = 2 settlements.
+    QTrading::Signal::FundingCarrySignalEngine engine(
+        { "BTCUSDT_SPOT", "BTCUSDT_PERP", 0.00001, 0.0, -1.0, 1.0, 1.0, 0, 0, 1, 2, true });
+
+    // Enter on positive settlement snapshot.
+    auto s1 = engine.on_market(MakeMarket(1000, true, true, 100.5, 0.0002, 1000));
+    EXPECT_EQ(s1.status, QTrading::Signal::SignalStatus::Active);
+
+    // First negative settlement should not exit yet (needs 2 consecutive).
+    auto s2 = engine.on_market(MakeMarket(2000, true, true, 100.5, -0.0001, 2000));
+    EXPECT_EQ(s2.status, QTrading::Signal::SignalStatus::Active);
+
+    // Second consecutive negative settlement triggers exit.
+    auto s3 = engine.on_market(MakeMarket(3000, true, true, 100.5, -0.0002, 3000));
+    EXPECT_EQ(s3.status, QTrading::Signal::SignalStatus::Inactive);
+}
+
+TEST(FundingCarrySignalEngineTests, FallsBackToBasisProxyWhenObservedFundingIsStale)
+{
+    QTrading::Signal::FundingCarrySignalEngine engine(
+        { "BTCUSDT_SPOT", "BTCUSDT_PERP", 0.00005, 0.0, -1.0, 1.0, 1.0, 0, 0, 1, 1, true, 3600 });
+
+    // Funding timestamp is far older than max age -> stale.
+    // Basis proxy from 100.5/100.0 is positive and should allow entry.
+    auto signal = engine.on_market(MakeMarket(10'000, true, true, 100.5, -0.0005, 0));
+    EXPECT_EQ(signal.status, QTrading::Signal::SignalStatus::Active);
+}
+
 TEST(FundingCarrySignalEngineTests, ConfidenceTracksObservedFundingWhenGateDisabled)
 {
     // Funding gate disabled (entry/exit threshold are zero).

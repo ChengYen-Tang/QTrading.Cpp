@@ -41,6 +41,43 @@ void OverrideUint64FromEnv(const char* name, uint64_t& value)
     }
 }
 
+void OverrideUint32FromEnv(const char* name, uint32_t& value)
+{
+    const char* raw = std::getenv(name);
+    if (!raw || !*raw) {
+        return;
+    }
+    try {
+        value = static_cast<uint32_t>(std::stoul(raw));
+    }
+    catch (...) {
+        // Ignore malformed env values and keep code-level defaults.
+    }
+}
+
+void OverrideBoolFromEnv(const char* name, bool& value)
+{
+    const char* raw = std::getenv(name);
+    if (!raw || !*raw) {
+        return;
+    }
+    const std::string token(raw);
+    if (token == "1" || token == "true" || token == "TRUE" || token == "True") {
+        value = true;
+        return;
+    }
+    if (token == "0" || token == "false" || token == "FALSE" || token == "False") {
+        value = false;
+        return;
+    }
+    try {
+        value = (std::stoll(token) != 0);
+    }
+    catch (...) {
+        // Ignore malformed env values and keep code-level defaults.
+    }
+}
+
 double Clamp01(double value)
 {
     if (!std::isfinite(value)) {
@@ -119,6 +156,12 @@ FundingCarrySignalEngine::FundingCarrySignalEngine(Config cfg)
     OverrideDoubleFromEnv("QTR_FC_EXIT_MAX_BASIS_PCT", cfg_.exit_max_basis_pct);
     OverrideUint64FromEnv("QTR_FC_COOLDOWN_MS", cfg_.cooldown_ms);
     OverrideUint64FromEnv("QTR_FC_MIN_HOLD_MS", cfg_.min_hold_ms);
+    OverrideUint32FromEnv("QTR_FC_ENTRY_PERSISTENCE_SETTLEMENTS", cfg_.entry_persistence_settlements);
+    OverrideUint32FromEnv("QTR_FC_EXIT_PERSISTENCE_SETTLEMENTS", cfg_.exit_persistence_settlements);
+    OverrideBoolFromEnv("QTR_FC_LOCK_FUNDING_TO_SETTLEMENT", cfg_.lock_funding_to_settlement);
+    OverrideUint64FromEnv("QTR_FC_OBSERVED_FUNDING_MAX_AGE_MS", cfg_.observed_funding_max_age_ms);
+    cfg_.entry_persistence_settlements = std::max(cfg_.entry_persistence_settlements, 1u);
+    cfg_.exit_persistence_settlements = std::max(cfg_.exit_persistence_settlements, 1u);
 }
 
 bool FundingCarrySignalEngine::market_has_symbols(
@@ -206,15 +249,36 @@ SignalDecision FundingCarrySignalEngine::on_market(
     const double basis_pct = (*perp_close - *spot_close) / *spot_close;
     const double funding_proxy = basis_pct * kBasisToFundingScale;
     std::optional<double> latest_observed_funding_rate;
+    std::optional<uint64_t> latest_observed_funding_time;
     if (has_symbol_ids_ &&
         perp_id_ < market->funding_by_id.size() &&
         market->funding_by_id[perp_id_].has_value())
     {
-        latest_observed_funding_rate = market->funding_by_id[perp_id_]->Rate;
+        const auto& funding = *market->funding_by_id[perp_id_];
+        latest_observed_funding_rate = funding.Rate;
+        latest_observed_funding_time = funding.FundingTime;
     }
-    const double funding_signal = latest_observed_funding_rate.has_value()
-        ? *latest_observed_funding_rate
-        : funding_proxy;
+    bool observed_funding_valid = false;
+    bool settlement_advanced = false;
+    double funding_signal = funding_proxy;
+    if (latest_observed_funding_rate.has_value() && latest_observed_funding_time.has_value()) {
+        const auto funding_time = *latest_observed_funding_time;
+        const bool not_future = funding_time <= out.ts_ms;
+        const bool within_age = not_future && (
+            !cfg_.observed_funding_max_age_ms ||
+            ((out.ts_ms - funding_time) <= cfg_.observed_funding_max_age_ms));
+        observed_funding_valid = not_future && within_age;
+        if (observed_funding_valid) {
+            funding_signal = *latest_observed_funding_rate;
+            settlement_advanced =
+                (!has_last_observed_funding_time_) ||
+                (funding_time != last_observed_funding_time_);
+            if (settlement_advanced) {
+                has_last_observed_funding_time_ = true;
+                last_observed_funding_time_ = funding_time;
+            }
+        }
+    }
     const bool enable_funding_gate =
         (std::abs(cfg_.entry_min_funding_rate) > kGateEpsilon) ||
         (std::abs(cfg_.exit_min_funding_rate) > kGateEpsilon);
@@ -222,20 +286,55 @@ SignalDecision FundingCarrySignalEngine::on_market(
         (cfg_.entry_max_basis_pct < 1.0 - kGateEpsilon) ||
         (cfg_.exit_max_basis_pct < 1.0 - kGateEpsilon);
 
+    const bool update_funding_ema = !cfg_.lock_funding_to_settlement ||
+        !observed_funding_valid ||
+        settlement_advanced;
     if (!funding_proxy_initialized_) {
         funding_proxy_ema_ = funding_signal;
         funding_proxy_initialized_ = true;
     }
-    else {
+    else if (update_funding_ema) {
         funding_proxy_ema_ =
             funding_proxy_ema_ * (1.0 - kFundingProxyEmaAlpha) +
             funding_signal * kFundingProxyEmaAlpha;
     }
+
+    if (enable_funding_gate) {
+        const bool evaluate_streaks_with_observed =
+            observed_funding_valid && cfg_.lock_funding_to_settlement;
+        if (evaluate_streaks_with_observed) {
+            if (settlement_advanced) {
+                if (funding_signal >= cfg_.entry_min_funding_rate) {
+                    funding_entry_good_streak_ += 1;
+                }
+                else {
+                    funding_entry_good_streak_ = 0;
+                }
+                if (funding_signal < cfg_.exit_min_funding_rate) {
+                    funding_exit_bad_streak_ += 1;
+                }
+                else {
+                    funding_exit_bad_streak_ = 0;
+                }
+            }
+        }
+        else {
+            funding_entry_good_streak_ =
+                (funding_proxy_ema_ >= cfg_.entry_min_funding_rate) ? 1u : 0u;
+            funding_exit_bad_streak_ =
+                (funding_proxy_ema_ < cfg_.exit_min_funding_rate) ? 1u : 0u;
+        }
+    }
+    else {
+        funding_entry_good_streak_ = 0;
+        funding_exit_bad_streak_ = 0;
+    }
+
     if (active_) {
         const bool can_exit = (cfg_.min_hold_ms == 0) ||
             (out.ts_ms >= active_since_ts_ + cfg_.min_hold_ms);
-        const bool exit_funding =
-            enable_funding_gate && (funding_proxy_ema_ < cfg_.exit_min_funding_rate);
+        const bool exit_funding = enable_funding_gate &&
+            (funding_exit_bad_streak_ >= cfg_.exit_persistence_settlements);
         const bool hard_negative_funding =
             (cfg_.hard_negative_funding_rate > -1.0) &&
             (funding_signal <= cfg_.hard_negative_funding_rate);
@@ -254,8 +353,8 @@ SignalDecision FundingCarrySignalEngine::on_market(
         const bool cooldown_ok = (last_exit_ts_ == 0) ||
             (cfg_.cooldown_ms == 0) ||
             (out.ts_ms >= last_exit_ts_ + cfg_.cooldown_ms);
-        const bool enter_funding =
-            !enable_funding_gate || (funding_proxy_ema_ >= cfg_.entry_min_funding_rate);
+        const bool enter_funding = !enable_funding_gate ||
+            (funding_entry_good_streak_ >= cfg_.entry_persistence_settlements);
         const bool enter_basis =
             !enable_basis_gate || (std::abs(basis_pct) <= cfg_.entry_max_basis_pct);
         if (cooldown_ok && enter_funding && enter_basis) {
