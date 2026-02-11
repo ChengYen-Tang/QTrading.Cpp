@@ -36,15 +36,7 @@ bool Account::place_perp_order(const std::string& symbol,
             }
         }
 
-        double pending_close_qty = 0.0;
-        for (const auto& ord : open_orders_) {
-            if (ord.symbol != symbol || ord.side != OrderSide::Sell || ord.quantity <= 1e-8) {
-                continue;
-            }
-            if (ord.closing_position_id >= 0 || ord.reduce_only) {
-                pending_close_qty += ord.quantity;
-            }
-        }
+        const double pending_close_qty = pending_close_sell_qty_for_symbol_(symbol);
 
         const double sellable_qty = std::max(0.0, held_qty - pending_close_qty);
         if (sellable_qty <= 1e-8) {
@@ -80,7 +72,7 @@ bool Account::place_perp_order(const std::string& symbol,
         closing_ord.instrument_type = instrument_spec.type;
         closing_ord.client_order_id = client_order_id;
         closing_ord.stp_mode = static_cast<int>(stp_mode);
-        open_orders_.push_back(closing_ord);
+        append_open_order_(std::move(closing_ord));
         mark_open_orders_dirty_();
         ++state_version_;
         return true;
@@ -146,7 +138,7 @@ bool Account::place_perp_order(const std::string& symbol,
     new_ord.instrument_type = instrument_spec.type;
     new_ord.client_order_id = client_order_id;
     new_ord.stp_mode = static_cast<int>(stp_mode);
-    open_orders_.push_back(new_ord);
+    append_open_order_(std::move(new_ord));
     mark_open_orders_dirty_();
     ++state_version_;
     return true;

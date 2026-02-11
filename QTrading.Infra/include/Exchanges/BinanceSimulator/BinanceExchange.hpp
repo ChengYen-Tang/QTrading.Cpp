@@ -307,11 +307,14 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
         std::vector<uint8_t>                        has_last_funding_;
         std::shared_ptr<Account>                    account_engine_;  ///< Simulated margin account engine.
         mutable std::mutex                          account_mtx_;
+        mutable std::mutex                          state_mtx_;
+        using PositionSnapshotPtr = std::shared_ptr<const std::vector<dto::Position>>;
+        using OrderSnapshotPtr = std::shared_ptr<const std::vector<dto::Order>>;
 
-        std::vector<dto::Position> last_pos_snapshot;   ///< Last-debounced snapshot of positions.
-        std::vector<dto::Order>    last_ord_snapshot;   ///< Last-debounced snapshot of orders.
-        std::vector<dto::Position> last_event_pos_snapshot_;
-        std::vector<dto::Order>    last_event_ord_snapshot_;
+        PositionSnapshotPtr last_pos_snapshot_;   ///< Last-debounced snapshot of positions.
+        OrderSnapshotPtr    last_ord_snapshot_;   ///< Last-debounced snapshot of orders.
+        PositionSnapshotPtr last_event_pos_snapshot_;
+        OrderSnapshotPtr    last_event_ord_snapshot_;
         std::optional<double>      last_wallet_balance_;
         uint64_t                   last_event_version_{ static_cast<uint64_t>(-1) };
 
@@ -322,13 +325,12 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
         QTrading::Infra::Logging::OrderEventBuffer order_event_buffer_{ &log_event_pool_ };
         QTrading::Infra::Logging::MarketEventBuffer market_event_buffer_{ &log_event_pool_ };
         QTrading::Infra::Logging::FundingEventBuffer funding_event_buffer_{ &log_event_pool_ };
-        std::vector<QTrading::Log::FileLogger::FeatherV2::FundingEventDto> funding_events_scratch_;
 
         struct LogTask {
             QTrading::Infra::Logging::StepLogContext ctx;
             MultiKlinePtr market;
-            std::vector<dto::Position> positions;
-            std::vector<dto::Order> orders;
+            PositionSnapshotPtr positions;
+            OrderSnapshotPtr orders;
             std::vector<QTrading::Log::FileLogger::FeatherV2::FundingEventDto> funding_events;
             QTrading::Dto::Account::BalanceSnapshot perp_balance;
             QTrading::Dto::Account::BalanceSnapshot spot_balance;
@@ -365,7 +367,6 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
         uint64_t last_step_ts_{ 0 };
 
         // P1: Reusable per-step buffer to avoid rebuilding an unordered_map each tick.
-        std::unordered_map<std::string, QTrading::Dto::Market::Binance::KlineDto> kline_snap_cache_;
         std::vector<size_t> kline_counts_;
         std::vector<double> last_close_by_symbol_;
         std::vector<uint64_t> last_close_ts_by_symbol_;
@@ -391,20 +392,21 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
         /// @param ts Timestamp to snapshot.
         /// @param[out] out DTO to populate with per-symbol KlineDto or std::nullopt.
         void     build_multikline(uint64_t ts,
-            QTrading::Dto::Market::Binance::MultiKlineDto& out);
+            QTrading::Dto::Market::Binance::MultiKlineDto& out,
+            std::unordered_map<std::string, QTrading::Dto::Market::Binance::KlineDto>& kline_snap_cache);
         /// @brief Log current account balance, positions and orders via logger.
         void log_status_snapshot(const QTrading::Dto::Account::BalanceSnapshot& perp_balance,
             const QTrading::Dto::Account::BalanceSnapshot& spot_balance,
             double total_cash_balance,
             double spot_inventory_value,
-            const std::vector<dto::Position>& positions,
-            const std::vector<dto::Order>& orders,
+            const PositionSnapshotPtr& positions,
+            const OrderSnapshotPtr& orders,
             uint64_t cur_ver);
         /// @brief Log per-step market/account/order/position events with run/step/event sequencing.
         void log_events(QTrading::Infra::Logging::StepLogContext ctx,
             const QTrading::Dto::Market::Binance::MultiKlineDto& market,
-            const std::vector<dto::Position>& cur_positions,
-            const std::vector<dto::Order>& cur_orders,
+            const PositionSnapshotPtr& cur_positions,
+            const OrderSnapshotPtr& cur_orders,
             const std::vector<QTrading::Log::FileLogger::FeatherV2::FundingEventDto>& funding_events,
             const QTrading::Dto::Account::BalanceSnapshot& perp_balance,
             const QTrading::Dto::Account::BalanceSnapshot& spot_balance,
@@ -422,6 +424,9 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
         void push_async_order_ack_locked_(AsyncOrderAck ack);
         static std::pair<int, std::string> map_binance_reject_(const std::optional<Account::OrderRejectInfo>& reject);
         bool interpolate_mark_price_(size_t sym_id, uint64_t ts, double& out_price) const;
+        void collect_funding_events_unlocked_(uint64_t ts,
+            std::vector<QTrading::Log::FileLogger::FeatherV2::FundingEventDto>& out);
+        double progress_pct_unlocked_() const;
 
     public:
         void collect_funding_events(uint64_t ts,

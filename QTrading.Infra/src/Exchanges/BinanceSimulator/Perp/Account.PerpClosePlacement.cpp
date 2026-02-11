@@ -56,7 +56,7 @@ bool Account::handleOneWayReverseOrder(const std::string& symbol,
         closingOrd.instrument_type = symbol_type;
         closingOrd.client_order_id = client_order_id;
         closingOrd.stp_mode = static_cast<int>(stp_mode);
-        open_orders_.push_back(closingOrd);
+        append_open_order_(std::move(closingOrd));
         mark_open_orders_dirty_();
         return true;
     }
@@ -77,7 +77,7 @@ bool Account::handleOneWayReverseOrder(const std::string& symbol,
         closingOrd.instrument_type = symbol_type;
         closingOrd.client_order_id = client_order_id.empty() ? std::string{} : (client_order_id + ":close");
         closingOrd.stp_mode = static_cast<int>(stp_mode);
-        open_orders_.push_back(closingOrd);
+        append_open_order_(std::move(closingOrd));
     }
 
     const double newOpenQty = order_qty - pos_qty;
@@ -97,7 +97,7 @@ bool Account::handleOneWayReverseOrder(const std::string& symbol,
         newOpen.instrument_type = symbol_type;
         newOpen.client_order_id = client_order_id.empty() ? std::string{} : (client_order_id + ":open");
         newOpen.stp_mode = static_cast<int>(stp_mode);
-        open_orders_.push_back(newOpen);
+        append_open_order_(std::move(newOpen));
     }
     mark_open_orders_dirty_();
     return true;
@@ -124,7 +124,7 @@ void Account::place_closing_order(int position_id, double quantity, double price
             position_id
         };
         closingOrd.instrument_type = pos.instrument_type;
-        open_orders_.push_back(closingOrd);
+        append_open_order_(std::move(closingOrd));
         mark_open_orders_dirty_();
         return;
     }

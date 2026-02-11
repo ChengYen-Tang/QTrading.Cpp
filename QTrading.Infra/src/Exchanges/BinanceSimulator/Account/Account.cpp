@@ -180,6 +180,9 @@ Account::Account(const AccountInitConfig& init_config)
     positions_.reserve(1024);
 
     open_order_index_by_id_.reserve(2048);
+    open_order_client_id_count_.reserve(2048);
+    pending_close_sell_qty_by_symbol_.reserve(1024);
+    stp_order_ids_by_bucket_.reserve(2048);
     position_index_by_id_.reserve(2048);
     position_indices_by_symbol_.reserve(1024);
 
@@ -398,6 +401,11 @@ const QTrading::Dto::Trading::InstrumentSpec& Account::resolve_instrument_spec_(
 
 void Account::set_instrument_type(const std::string& symbol, InstrumentType type)
 {
+    const auto& cur = instrument_registry_.Resolve(symbol);
+    if (cur.type == type) {
+        return;
+    }
+
     instrument_registry_.Set(symbol, type);
     if (type == InstrumentType::Spot) {
         symbol_leverage_.erase(symbol);
@@ -522,16 +530,20 @@ bool Account::place_order(const std::string& symbol,
         return reject_order_(OrderRejectInfo::Code::DuplicateClientOrderId, "duplicate clientOrderId among open orders");
     }
 
-    const size_t stp_conflicts = count_stp_conflicting_orders_(symbol, side, price, instrument_spec.type);
-    if (stp_conflicts > 0) {
-        if (stp_mode == SelfTradePreventionMode::ExpireMaker ||
-            stp_mode == SelfTradePreventionMode::ExpireBoth) {
-            const size_t cancelled = cancel_stp_conflicting_orders_(symbol, side, price, instrument_spec.type);
-            if (cancelled > 0) {
-                mark_open_orders_dirty_();
-                ++state_version_;
-            }
+    size_t stp_conflicts = 0;
+    if (stp_mode == SelfTradePreventionMode::ExpireMaker ||
+        stp_mode == SelfTradePreventionMode::ExpireBoth) {
+        stp_conflicts = cancel_stp_conflicting_orders_(symbol, side, price, instrument_spec.type);
+        if (stp_conflicts > 0) {
+            mark_open_orders_dirty_();
+            ++state_version_;
         }
+    }
+    else if (stp_mode == SelfTradePreventionMode::ExpireTaker) {
+        stp_conflicts = count_stp_conflicting_orders_(symbol, side, price, instrument_spec.type);
+    }
+
+    if (stp_conflicts > 0) {
         if (stp_mode == SelfTradePreventionMode::ExpireTaker) {
             return reject_order_(OrderRejectInfo::Code::StpExpiredTaker, "STP expired taker order");
         }
@@ -646,6 +658,9 @@ void Account::update_positions(const std::unordered_map<std::string, KlineDto>& 
     bool dirty = false;
     bool open_orders_changed = false;
     bool positions_changed = false;
+    const auto prev_perp_balance = get_perp_balance();
+    const auto prev_spot_balance = get_spot_balance();
+    const double prev_total_cash_balance = get_total_cash_balance();
     // Reset per-tick scratch allocator before building fill buffers.
     tick_memory_.release();
     fill_events_.clear();
@@ -758,13 +773,27 @@ void Account::update_positions(const std::unordered_map<std::string, KlineDto>& 
         std::cout << std::endl;
     }
 
-    // Track changes from position cleanup/merge as well.
-    // If any position was removed by epsilon-filter, quantity set changed.
-    // (We can't easily know removed count without scanning; mark dirty if we had any positions going into cleanup.)
-    // Any liquidation path or position size adjustment affects externally visible state.
-    if (!open_orders_.empty()) {
-        dirty = true;
-    }
+    auto balance_snapshot_equal = [](const QTrading::Dto::Account::BalanceSnapshot& a,
+        const QTrading::Dto::Account::BalanceSnapshot& b) {
+            return a.WalletBalance == b.WalletBalance &&
+                a.UnrealizedPnl == b.UnrealizedPnl &&
+                a.MarginBalance == b.MarginBalance &&
+                a.PositionInitialMargin == b.PositionInitialMargin &&
+                a.OpenOrderInitialMargin == b.OpenOrderInitialMargin &&
+                a.AvailableBalance == b.AvailableBalance &&
+                a.MaintenanceMargin == b.MaintenanceMargin &&
+                a.Equity == b.Equity;
+        };
+
+    const auto cur_perp_balance = get_perp_balance();
+    const auto cur_spot_balance = get_spot_balance();
+    const double cur_total_cash_balance = get_total_cash_balance();
+    const bool balance_changed =
+        !balance_snapshot_equal(prev_perp_balance, cur_perp_balance) ||
+        !balance_snapshot_equal(prev_spot_balance, cur_spot_balance) ||
+        (prev_total_cash_balance != cur_total_cash_balance);
+
+    dirty = dirty || open_orders_changed || positions_changed || balance_changed;
 
     if (dirty) {
         ++state_version_;
@@ -1125,12 +1154,8 @@ bool Account::has_open_order_with_client_id_(const std::string& client_order_id)
     if (client_order_id.empty()) {
         return false;
     }
-    for (const auto& o : open_orders_) {
-        if (o.client_order_id == client_order_id) {
-            return true;
-        }
-    }
-    return false;
+    auto it = open_order_client_id_count_.find(client_order_id);
+    return it != open_order_client_id_count_.end() && it->second > 0;
 }
 
 size_t Account::count_stp_conflicting_orders_(const std::string& symbol,
@@ -1138,13 +1163,18 @@ size_t Account::count_stp_conflicting_orders_(const std::string& symbol,
     double incoming_price,
     InstrumentType instrument_type) const
 {
-    auto is_cross = [&](const Order& resting) -> bool {
-        if (resting.symbol != symbol || resting.instrument_type != instrument_type) {
-            return false;
-        }
-        if (resting.side == incoming_side) {
-            return false;
-        }
+    auto it_sym = symbol_id_by_name_.find(symbol);
+    if (it_sym == symbol_id_by_name_.end()) {
+        return 0;
+    }
+    const OrderSide resting_side = (incoming_side == OrderSide::Buy) ? OrderSide::Sell : OrderSide::Buy;
+    const StpBucketKey key{ it_sym->second, instrument_type, resting_side };
+    auto it_bucket = stp_order_ids_by_bucket_.find(key);
+    if (it_bucket == stp_order_ids_by_bucket_.end()) {
+        return 0;
+    }
+
+    auto is_cross = [&](const Order& resting) {
         if (incoming_price <= 0.0 || resting.price <= 0.0) {
             return true;
         }
@@ -1155,7 +1185,12 @@ size_t Account::count_stp_conflicting_orders_(const std::string& symbol,
     };
 
     size_t count = 0;
-    for (const auto& o : open_orders_) {
+    for (int order_id : it_bucket->second) {
+        auto it_idx = open_order_index_by_id_.find(order_id);
+        if (it_idx == open_order_index_by_id_.end()) {
+            continue;
+        }
+        const Order& o = open_orders_[it_idx->second];
         if (is_cross(o)) {
             ++count;
         }
@@ -1168,13 +1203,18 @@ size_t Account::cancel_stp_conflicting_orders_(const std::string& symbol,
     double incoming_price,
     InstrumentType instrument_type)
 {
-    auto is_cross = [&](const Order& resting) -> bool {
-        if (resting.symbol != symbol || resting.instrument_type != instrument_type) {
-            return false;
-        }
-        if (resting.side == incoming_side) {
-            return false;
-        }
+    auto it_sym = symbol_id_by_name_.find(symbol);
+    if (it_sym == symbol_id_by_name_.end()) {
+        return 0;
+    }
+    const OrderSide resting_side = (incoming_side == OrderSide::Buy) ? OrderSide::Sell : OrderSide::Buy;
+    const StpBucketKey key{ it_sym->second, instrument_type, resting_side };
+    auto it_bucket = stp_order_ids_by_bucket_.find(key);
+    if (it_bucket == stp_order_ids_by_bucket_.end()) {
+        return 0;
+    }
+
+    auto is_cross = [&](const Order& resting) {
         if (incoming_price <= 0.0 || resting.price <= 0.0) {
             return true;
         }
@@ -1184,12 +1224,43 @@ size_t Account::cancel_stp_conflicting_orders_(const std::string& symbol,
         return incoming_price <= resting.price + 1e-12;
     };
 
-    const size_t before = open_orders_.size();
-    open_orders_.erase(
-        std::remove_if(open_orders_.begin(), open_orders_.end(),
-            [&](const Order& o) { return is_cross(o); }),
-        open_orders_.end());
-    return before - open_orders_.size();
+    std::vector<char> remove_mask(open_orders_.size(), 0);
+    size_t removed = 0;
+    for (int order_id : it_bucket->second) {
+        auto it_idx = open_order_index_by_id_.find(order_id);
+        if (it_idx == open_order_index_by_id_.end()) {
+            continue;
+        }
+        const size_t idx = it_idx->second;
+        if (idx >= open_orders_.size()) {
+            continue;
+        }
+        if (remove_mask[idx]) {
+            continue;
+        }
+        if (is_cross(open_orders_[idx])) {
+            remove_mask[idx] = 1;
+            ++removed;
+        }
+    }
+
+    if (removed == 0) {
+        return 0;
+    }
+
+    size_t write = 0;
+    for (size_t read = 0; read < open_orders_.size(); ++read) {
+        if (remove_mask[read]) {
+            continue;
+        }
+        if (write != read) {
+            open_orders_[write] = std::move(open_orders_[read]);
+        }
+        ++write;
+    }
+    open_orders_.resize(write);
+    rebuild_open_order_index_();
+    return removed;
 }
 
 /// @brief Adjust leverage on existing positions for a symbol.

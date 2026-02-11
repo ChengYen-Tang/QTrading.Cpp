@@ -369,6 +369,29 @@ private:
     std::unordered_map<int, size_t> open_order_index_by_id_;
     std::unordered_map<int, size_t> position_index_by_id_;
     std::unordered_map<std::string, std::vector<size_t>> position_indices_by_symbol_;
+    std::unordered_map<std::string, size_t> open_order_client_id_count_;
+    std::unordered_map<std::string, double> pending_close_sell_qty_by_symbol_;
+    struct StpBucketKey {
+        size_t symbol_id{};
+        QTrading::Dto::Trading::InstrumentType instrument_type{ QTrading::Dto::Trading::InstrumentType::Perp };
+        QTrading::Dto::Trading::OrderSide side{ QTrading::Dto::Trading::OrderSide::Buy };
+        bool operator==(const StpBucketKey& other) const noexcept
+        {
+            return symbol_id == other.symbol_id &&
+                instrument_type == other.instrument_type &&
+                side == other.side;
+        }
+    };
+    struct StpBucketKeyHash {
+        size_t operator()(const StpBucketKey& k) const noexcept
+        {
+            size_t h = std::hash<size_t>{}(k.symbol_id);
+            h ^= (std::hash<int>{}(static_cast<int>(k.instrument_type)) + 0x9e3779b9 + (h << 6) + (h >> 2));
+            h ^= (std::hash<int>{}(static_cast<int>(k.side)) + 0x9e3779b9 + (h << 6) + (h >> 2));
+            return h;
+        }
+    };
+    std::unordered_map<StpBucketKey, std::vector<int>, StpBucketKeyHash> stp_order_ids_by_bucket_;
 
     // Reusable buffers/caches to reduce allocations in update_positions().
     std::pmr::unsynchronized_pool_resource tick_memory_;
@@ -530,6 +553,10 @@ private:
     void rebuild_open_order_index_();
     void rebuild_position_index_();
     void rebuild_per_symbol_cache_();
+    void append_open_order_(Order ord);
+    void index_open_order_entry_(const Order& ord, size_t idx);
+    static bool is_pending_close_sell_order_(const Order& ord);
+    double pending_close_sell_qty_for_symbol_(const std::string& symbol) const;
     size_t get_symbol_id_(const std::string& symbol);
     void ensure_symbol_capacity_(size_t id);
     void mark_open_orders_dirty_();

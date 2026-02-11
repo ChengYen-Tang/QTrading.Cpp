@@ -18,7 +18,6 @@ void Account::close_spot_position_(const std::string& symbol, double price)
             place_closing_order(pos.id, pos.quantity, price);
         }
     }
-    rebuild_open_order_index_();
     if (found) {
         ++state_version_;
         return;

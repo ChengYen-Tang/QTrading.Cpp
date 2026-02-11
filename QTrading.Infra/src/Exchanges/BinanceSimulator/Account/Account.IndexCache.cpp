@@ -42,10 +42,53 @@ size_t Account::get_symbol_id_(const std::string& symbol)
 void Account::rebuild_open_order_index_()
 {
     open_order_index_by_id_.clear();
+    open_order_client_id_count_.clear();
+    pending_close_sell_qty_by_symbol_.clear();
+    stp_order_ids_by_bucket_.clear();
     open_order_index_by_id_.reserve(open_orders_.size());
+    open_order_client_id_count_.reserve(open_orders_.size());
+    pending_close_sell_qty_by_symbol_.reserve(open_orders_.size());
+    stp_order_ids_by_bucket_.reserve(open_orders_.size());
     for (size_t i = 0; i < open_orders_.size(); ++i) {
-        open_order_index_by_id_[open_orders_[i].id] = i;
+        index_open_order_entry_(open_orders_[i], i);
     }
+}
+
+void Account::append_open_order_(Order ord)
+{
+    const size_t idx = open_orders_.size();
+    open_orders_.push_back(std::move(ord));
+    index_open_order_entry_(open_orders_.back(), idx);
+}
+
+void Account::index_open_order_entry_(const Order& ord, size_t idx)
+{
+    open_order_index_by_id_[ord.id] = idx;
+
+    if (!ord.client_order_id.empty()) {
+        ++open_order_client_id_count_[ord.client_order_id];
+    }
+
+    if (is_pending_close_sell_order_(ord)) {
+        pending_close_sell_qty_by_symbol_[ord.symbol] += ord.quantity;
+    }
+
+    const size_t sym_id = get_symbol_id_(ord.symbol);
+    StpBucketKey key{ sym_id, ord.instrument_type, ord.side };
+    stp_order_ids_by_bucket_[key].push_back(ord.id);
+}
+
+bool Account::is_pending_close_sell_order_(const Order& ord)
+{
+    return ord.side == QTrading::Dto::Trading::OrderSide::Sell &&
+        ord.quantity > 1e-8 &&
+        (ord.closing_position_id >= 0 || ord.reduce_only);
+}
+
+double Account::pending_close_sell_qty_for_symbol_(const std::string& symbol) const
+{
+    auto it = pending_close_sell_qty_by_symbol_.find(symbol);
+    return it == pending_close_sell_qty_by_symbol_.end() ? 0.0 : it->second;
 }
 
 void Account::rebuild_position_index_()
