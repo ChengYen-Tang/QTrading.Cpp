@@ -4,6 +4,7 @@
 #include <optional>
 #include <type_traits>
 #include <limits>
+#include <cstdlib>
 
 #include "Exchanges/BinanceSimulator/BinanceExchange.hpp"
 
@@ -25,6 +26,45 @@ class MockLogger : public QTrading::Log::Logger {
         /// @brief No-op consume to disable file output.
         void Consume() override {}
 };
+
+namespace {
+
+void set_env_var(const char* key, const char* value)
+{
+#ifdef _WIN32
+    _putenv_s(key, value);
+#else
+    setenv(key, value, 1);
+#endif
+}
+
+void unset_env_var(const char* key)
+{
+#ifdef _WIN32
+    _putenv_s(key, "");
+#else
+    unsetenv(key);
+#endif
+}
+
+class ScopedEnvVar {
+public:
+    ScopedEnvVar(const char* key, const char* value)
+        : key_(key)
+    {
+        set_env_var(key_.c_str(), value);
+    }
+
+    ~ScopedEnvVar()
+    {
+        unset_env_var(key_.c_str());
+    }
+
+private:
+    std::string key_;
+};
+
+} // namespace
 
 /// @brief Test fixture - provides tmpDir + helper to generate minimal CSV files.
 class BinanceExchangeFixture : public ::testing::Test {
@@ -153,6 +193,63 @@ TEST_F(BinanceExchangeFixture, SymbolsSynchronisedWithHoles)
 
     // ---------- step #4  (EOF) ------------
     EXPECT_FALSE(ex.step());          // nothing left
+}
+
+TEST_F(BinanceExchangeFixture, ReplayWindowFiltersKlineRangeByTimestampEnv)
+{
+    writeCsv("btc.csv", {
+        {      0, 1,1,1,1,100,  30000,100,1,0,0 },
+        {  60000, 2,2,2,2,200,  90000,200,1,0,0 },
+        { 120000, 3,3,3,3,300, 150000,300,1,0,0 }
+        });
+
+    // Keep only the middle bar.
+    ScopedEnvVar start_guard("QTR_SIM_START_TS_MS", "60000");
+    ScopedEnvVar end_guard("QTR_SIM_END_TS_MS", "60000");
+
+    BinanceExchange ex({ {"BTCUSDT",(tmpDir / "btc.csv").string()} }, logger);
+    auto mCh = ex.get_market_channel();
+
+    ASSERT_TRUE(ex.step());
+    auto dto = mCh->Receive();
+    ASSERT_TRUE(dto.has_value());
+    EXPECT_EQ(dto->get()->Timestamp, 60000u);
+
+    EXPECT_FALSE(ex.step());
+}
+
+TEST_F(BinanceExchangeFixture, ReplayWindowFiltersKlineRangeByDateEnv)
+{
+    // 2023-02-03 00:00:00 UTC
+    constexpr uint64_t t0 = 1675382400000ULL;
+    // 2023-02-03 12:00:00 UTC
+    constexpr uint64_t t1 = 1675425600000ULL;
+    // 2023-02-04 00:00:00 UTC
+    constexpr uint64_t t2 = 1675468800000ULL;
+
+    writeCsv("btc.csv", {
+        { t0, 1,1,1,1,100, t0 + 30000,100,1,0,0 },
+        { t1, 2,2,2,2,200, t1 + 30000,200,1,0,0 },
+        { t2, 3,3,3,3,300, t2 + 30000,300,1,0,0 }
+        });
+
+    ScopedEnvVar start_guard("QTR_SIM_START_DATE", "2023-02-03");
+    ScopedEnvVar end_guard("QTR_SIM_END_DATE", "2023-02-03");
+
+    BinanceExchange ex({ {"BTCUSDT",(tmpDir / "btc.csv").string()} }, logger);
+    auto mCh = ex.get_market_channel();
+
+    ASSERT_TRUE(ex.step());
+    auto dto0 = mCh->Receive();
+    ASSERT_TRUE(dto0.has_value());
+    EXPECT_EQ(dto0->get()->Timestamp, t0);
+
+    ASSERT_TRUE(ex.step());
+    auto dto1 = mCh->Receive();
+    ASSERT_TRUE(dto1.has_value());
+    EXPECT_EQ(dto1->get()->Timestamp, t1);
+
+    EXPECT_FALSE(ex.step());
 }
 
 /// @brief Test that position and order channels emit only on state change.

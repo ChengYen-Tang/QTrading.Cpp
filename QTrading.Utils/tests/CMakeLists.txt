@@ -1,6 +1,7 @@
-﻿add_executable(QTrading.Utils.Tests
+add_executable(QTrading.Utils.Tests
   Queue/BoundedChannelTests.cpp
   Queue/UnboundedChannelTests.cpp
+  Time/ReplayTimeRangeTests.cpp
 )
 
 target_include_directories(QTrading.Utils.Tests
@@ -16,3 +17,4 @@ target_link_libraries(QTrading.Utils.Tests
 
 include(GoogleTest)
 gtest_discover_tests(QTrading.Utils.Tests)
+

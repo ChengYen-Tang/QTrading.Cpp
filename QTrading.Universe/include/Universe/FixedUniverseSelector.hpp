@@ -10,7 +10,7 @@ namespace QTrading::Universe {
 class FixedUniverseSelector final : public IUniverseSelector {
 public:
     /// @brief Construct with a fixed universe list.
-    explicit FixedUniverseSelector(std::vector<std::string> symbols);
+    explicit FixedUniverseSelector(std::vector<std::string> symbols = {});
 
     /// @brief Return the fixed universe selection.
     UniverseSelection select() override;

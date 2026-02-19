@@ -11,7 +11,8 @@ target_include_directories(QTrading.Logging.Library
 )
 
 target_link_libraries(QTrading.Logging.Library 
+  PUBLIC
+    Arrow::arrow_shared
   PRIVATE
     Boost::thread
-	Arrow::arrow_shared
 )

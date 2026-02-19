@@ -299,12 +299,17 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
         std::shared_ptr<const std::vector<std::string>> symbols_shared_;
         std::vector<MarketData>                     md_;      ///< CSV-backed data provider per symbol.
         std::vector<size_t>                         cursor_;  ///< Current read index per symbol.
+        std::vector<size_t>                         kline_window_begin_idx_; ///< Inclusive begin index per symbol.
+        std::vector<size_t>                         kline_window_end_idx_;   ///< Exclusive end index per symbol.
         std::vector<std::unique_ptr<FundingRateData>> funding_md_; ///< Optional funding data per symbol.
         std::vector<size_t>                         funding_cursor_; ///< Funding read index per symbol.
+        std::vector<size_t>                         funding_window_end_idx_; ///< Exclusive funding end index per symbol.
         std::vector<uint8_t>                        has_funding_;
         std::vector<double>                         last_funding_rate_by_symbol_;
         std::vector<uint64_t>                       last_funding_time_by_symbol_;
         std::vector<uint8_t>                        has_last_funding_;
+        std::optional<uint64_t>                     replay_start_ts_ms_; ///< Optional replay window start (inclusive).
+        std::optional<uint64_t>                     replay_end_ts_ms_;   ///< Optional replay window end (inclusive).
         std::shared_ptr<Account>                    account_engine_;  ///< Simulated margin account engine.
         mutable std::mutex                          account_mtx_;
         mutable std::mutex                          state_mtx_;

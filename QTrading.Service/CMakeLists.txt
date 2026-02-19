@@ -4,7 +4,9 @@ find_package(Boost CONFIG REQUIRED COMPONENTS thread)
 
 add_executable(QTrading.Service
   QTrading.Service.cpp
+  ServiceHelpers.cpp
   QTrading.Service.h
+  ServiceHelpers.hpp
 )
 
 target_include_directories(QTrading.Service PUBLIC

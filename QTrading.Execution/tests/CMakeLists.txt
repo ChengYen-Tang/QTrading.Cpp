@@ -1,6 +1,9 @@
 find_package(GTest CONFIG REQUIRED)
 
 add_executable(QTrading.Execution.Tests
+  CarryPairImbalanceCoordinatorTests.cpp
+  FundingCarryExecutionOrchestratorTests.cpp
+  LiquidityAwareExecutionSchedulerTests.cpp
   MarketExecutionEngineTests.cpp
 )
 

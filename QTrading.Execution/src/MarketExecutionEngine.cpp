@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace QTrading::Execution {
 namespace {
@@ -32,6 +33,29 @@ void OverrideUint64FromEnv(const char* name, uint64_t& value)
     }
     try {
         value = static_cast<uint64_t>(std::stoull(raw));
+    }
+    catch (...) {
+        // Ignore malformed env values and keep code-level defaults.
+    }
+}
+
+void OverrideBoolFromEnv(const char* name, bool& value)
+{
+    const char* raw = std::getenv(name);
+    if (!raw || !*raw) {
+        return;
+    }
+    const std::string token(raw);
+    if (token == "1" || token == "true" || token == "TRUE" || token == "True") {
+        value = true;
+        return;
+    }
+    if (token == "0" || token == "false" || token == "FALSE" || token == "False") {
+        value = false;
+        return;
+    }
+    try {
+        value = (std::stoll(token) != 0);
     }
     catch (...) {
         // Ignore malformed env values and keep code-level defaults.
@@ -65,6 +89,11 @@ double ClampNonNegative(double value)
     return value;
 }
 
+double Lerp(double lo, double hi, double t)
+{
+    return lo + (hi - lo) * Clamp01(t);
+}
+
 double QuoteVolumeFromId(
     const std::shared_ptr<QTrading::Dto::Market::Binance::MultiKlineDto>& market,
     std::size_t id)
@@ -96,11 +125,30 @@ MarketExecutionEngine::MarketExecutionEngine(
     OverrideDoubleFromEnv("QTR_FC_CARRY_LARGE_NOTIONAL_THRESHOLD", cfg_.carry_large_notional_threshold);
     OverrideUint64FromEnv("QTR_FC_CARRY_LARGE_NOTIONAL_COOLDOWN_MS", cfg_.carry_large_notional_cooldown_ms);
     OverrideDoubleFromEnv("QTR_FC_CARRY_MAX_PARTICIPATION_RATE", cfg_.carry_max_participation_rate);
+    OverrideBoolFromEnv("QTR_FC_CARRY_WINDOW_BUDGET_ENABLE", cfg_.carry_window_budget_enabled);
+    OverrideUint64FromEnv("QTR_FC_CARRY_WINDOW_BUDGET_MS", cfg_.carry_window_budget_ms);
+    OverrideDoubleFromEnv(
+        "QTR_FC_CARRY_WINDOW_BUDGET_PARTICIPATION_RATE",
+        cfg_.carry_window_budget_participation_rate);
     OverrideDoubleFromEnv("QTR_FC_CARRY_BOOTSTRAP_GAP_RATIO", cfg_.carry_bootstrap_gap_ratio);
     OverrideDoubleFromEnv("QTR_FC_CARRY_BOOTSTRAP_STEP_RATIO", cfg_.carry_bootstrap_step_ratio);
     OverrideDoubleFromEnv("QTR_FC_CARRY_BOOTSTRAP_PARTICIPATION_RATE", cfg_.carry_bootstrap_participation_rate);
     OverrideUint64FromEnv("QTR_FC_CARRY_BOOTSTRAP_COOLDOWN_MS", cfg_.carry_bootstrap_cooldown_ms);
     OverrideDoubleFromEnv("QTR_FC_CARRY_MIN_REBALANCE_NOTIONAL_RATIO", cfg_.carry_min_rebalance_notional_ratio);
+    OverrideBoolFromEnv("QTR_FC_CARRY_CONFIDENCE_ADAPTIVE_ENABLE", cfg_.carry_confidence_adaptive_enabled);
+    OverrideDoubleFromEnv("QTR_FC_CARRY_CONFIDENCE_STEP_SCALE_MIN", cfg_.carry_confidence_step_scale_min);
+    OverrideDoubleFromEnv("QTR_FC_CARRY_CONFIDENCE_STEP_SCALE_MAX", cfg_.carry_confidence_step_scale_max);
+    OverrideDoubleFromEnv("QTR_FC_CARRY_CONFIDENCE_PART_SCALE_MIN", cfg_.carry_confidence_participation_scale_min);
+    OverrideDoubleFromEnv("QTR_FC_CARRY_CONFIDENCE_PART_SCALE_MAX", cfg_.carry_confidence_participation_scale_max);
+    OverrideDoubleFromEnv("QTR_FC_CARRY_CONFIDENCE_COOLDOWN_SCALE_MIN", cfg_.carry_confidence_cooldown_scale_min);
+    OverrideDoubleFromEnv("QTR_FC_CARRY_CONFIDENCE_COOLDOWN_SCALE_MAX", cfg_.carry_confidence_cooldown_scale_max);
+    OverrideBoolFromEnv("QTR_FC_CARRY_REQUIRE_TWO_SIDED_REBALANCE", cfg_.carry_require_two_sided_rebalance);
+    OverrideBoolFromEnv("QTR_FC_CARRY_BALANCE_TWO_SIDED_REBALANCE", cfg_.carry_balance_two_sided_rebalance);
+    OverrideBoolFromEnv("QTR_FC_CARRY_MAKER_FIRST_ENABLE", cfg_.carry_maker_first_enabled);
+    OverrideDoubleFromEnv("QTR_FC_CARRY_MAKER_LIMIT_OFFSET_BPS", cfg_.carry_maker_limit_offset_bps);
+    OverrideDoubleFromEnv("QTR_FC_CARRY_MAKER_CATCHUP_GAP_RATIO", cfg_.carry_maker_catchup_gap_ratio);
+    OverrideBoolFromEnv("QTR_FC_CARRY_TARGET_ANCHOR_ENABLE", cfg_.carry_target_anchor_enabled);
+    OverrideDoubleFromEnv("QTR_FC_CARRY_TARGET_ANCHOR_UPDATE_RATIO", cfg_.carry_target_anchor_update_ratio);
     {
         uint64_t per_day = static_cast<uint64_t>(cfg_.carry_max_rebalances_per_day);
         OverrideUint64FromEnv("QTR_FC_CARRY_MAX_REBALANCES_PER_DAY", per_day);
@@ -112,10 +160,30 @@ MarketExecutionEngine::MarketExecutionEngine(
     cfg_.carry_large_notional_step_ratio = Clamp01(cfg_.carry_large_notional_step_ratio);
     cfg_.carry_large_notional_threshold = ClampPositive(cfg_.carry_large_notional_threshold, 50000.0);
     cfg_.carry_max_participation_rate = Clamp01(cfg_.carry_max_participation_rate);
+    cfg_.carry_window_budget_participation_rate =
+        Clamp01(cfg_.carry_window_budget_participation_rate);
     cfg_.carry_bootstrap_gap_ratio = Clamp01(cfg_.carry_bootstrap_gap_ratio);
     cfg_.carry_bootstrap_step_ratio = Clamp01(cfg_.carry_bootstrap_step_ratio);
     cfg_.carry_bootstrap_participation_rate = Clamp01(cfg_.carry_bootstrap_participation_rate);
     cfg_.carry_min_rebalance_notional_ratio = ClampNonNegative(cfg_.carry_min_rebalance_notional_ratio);
+    cfg_.carry_confidence_step_scale_min = ClampNonNegative(cfg_.carry_confidence_step_scale_min);
+    cfg_.carry_confidence_step_scale_max = ClampNonNegative(cfg_.carry_confidence_step_scale_max);
+    if (cfg_.carry_confidence_step_scale_max < cfg_.carry_confidence_step_scale_min) {
+        cfg_.carry_confidence_step_scale_max = cfg_.carry_confidence_step_scale_min;
+    }
+    cfg_.carry_confidence_participation_scale_min = ClampNonNegative(cfg_.carry_confidence_participation_scale_min);
+    cfg_.carry_confidence_participation_scale_max = ClampNonNegative(cfg_.carry_confidence_participation_scale_max);
+    if (cfg_.carry_confidence_participation_scale_max < cfg_.carry_confidence_participation_scale_min) {
+        cfg_.carry_confidence_participation_scale_max = cfg_.carry_confidence_participation_scale_min;
+    }
+    cfg_.carry_confidence_cooldown_scale_min = ClampNonNegative(cfg_.carry_confidence_cooldown_scale_min);
+    cfg_.carry_confidence_cooldown_scale_max = ClampNonNegative(cfg_.carry_confidence_cooldown_scale_max);
+    if (cfg_.carry_confidence_cooldown_scale_max < cfg_.carry_confidence_cooldown_scale_min) {
+        cfg_.carry_confidence_cooldown_scale_max = cfg_.carry_confidence_cooldown_scale_min;
+    }
+    cfg_.carry_maker_limit_offset_bps = ClampNonNegative(cfg_.carry_maker_limit_offset_bps);
+    cfg_.carry_maker_catchup_gap_ratio = ClampNonNegative(cfg_.carry_maker_catchup_gap_ratio);
+    cfg_.carry_target_anchor_update_ratio = ClampNonNegative(cfg_.carry_target_anchor_update_ratio);
 }
 
 std::vector<ExecutionOrder> MarketExecutionEngine::plan(
@@ -127,6 +195,103 @@ std::vector<ExecutionOrder> MarketExecutionEngine::plan(
     if (!exchange_ || !market) {
         return orders;
     }
+    struct CarryRebalanceOrderMeta {
+        std::size_t order_index{ 0 };
+        double signed_notional{ 0.0 };
+        double reference_price{ 0.0 };
+    };
+    std::vector<CarryRebalanceOrderMeta> carry_rebalance_order_meta;
+    carry_rebalance_order_meta.reserve(target.target_positions.size());
+
+    auto apply_two_sided_carry_controls = [&](
+        std::vector<ExecutionOrder>& out_orders,
+        const std::vector<CarryRebalanceOrderMeta>& meta,
+        double min_notional) {
+            if (meta.empty()) {
+                return;
+            }
+            if (!cfg_.carry_require_two_sided_rebalance &&
+                !cfg_.carry_balance_two_sided_rebalance) {
+                return;
+            }
+
+            double total_buy_notional = 0.0;
+            double total_sell_notional = 0.0;
+            for (const auto& m : meta) {
+                if (m.order_index >= out_orders.size()) {
+                    continue;
+                }
+                if (m.signed_notional > 0.0) {
+                    total_buy_notional += m.signed_notional;
+                }
+                else if (m.signed_notional < 0.0) {
+                    total_sell_notional += -m.signed_notional;
+                }
+            }
+
+            if (total_buy_notional <= 0.0 || total_sell_notional <= 0.0) {
+                if (!cfg_.carry_require_two_sided_rebalance) {
+                    return;
+                }
+                std::vector<bool> remove(out_orders.size(), false);
+                for (const auto& m : meta) {
+                    if (m.order_index < remove.size()) {
+                        remove[m.order_index] = true;
+                    }
+                }
+                std::vector<ExecutionOrder> filtered;
+                filtered.reserve(out_orders.size());
+                for (std::size_t i = 0; i < out_orders.size(); ++i) {
+                    if (!remove[i]) {
+                        filtered.push_back(std::move(out_orders[i]));
+                    }
+                }
+                out_orders = std::move(filtered);
+                return;
+            }
+
+            if (!cfg_.carry_balance_two_sided_rebalance) {
+                return;
+            }
+
+            const bool scale_buy = total_buy_notional > total_sell_notional;
+            const double larger = scale_buy ? total_buy_notional : total_sell_notional;
+            const double smaller = scale_buy ? total_sell_notional : total_buy_notional;
+            if (larger <= 0.0 || smaller <= 0.0) {
+                return;
+            }
+            const double scale = Clamp01(smaller / larger);
+            if (scale >= 0.999999) {
+                return;
+            }
+
+            std::vector<bool> remove(out_orders.size(), false);
+            for (const auto& m : meta) {
+                if (m.order_index >= out_orders.size()) {
+                    continue;
+                }
+                const bool is_buy_side = m.signed_notional > 0.0;
+                if ((scale_buy && !is_buy_side) || (!scale_buy && is_buy_side)) {
+                    continue;
+                }
+                const double adjusted_notional = std::fabs(m.signed_notional) * scale;
+                if (adjusted_notional < min_notional || m.reference_price <= 0.0) {
+                    remove[m.order_index] = true;
+                    continue;
+                }
+                out_orders[m.order_index].qty = adjusted_notional / m.reference_price;
+            }
+
+            std::vector<ExecutionOrder> filtered;
+            filtered.reserve(out_orders.size());
+            for (std::size_t i = 0; i < out_orders.size(); ++i) {
+                if (!remove[i]) {
+                    filtered.push_back(std::move(out_orders[i]));
+                }
+            }
+            out_orders = std::move(filtered);
+        };
+
     const uint64_t day_key = market->Timestamp / 86'400'000ull;
 
     auto can_emit_carry_rebalance = [&](const std::string& symbol) -> bool {
@@ -157,11 +322,76 @@ std::vector<ExecutionOrder> MarketExecutionEngine::plan(
         carry_rebalance_count_by_symbol_[symbol] += 1;
     };
 
+    auto advance_carry_window_budget = [&](const std::string& symbol, double quote_volume) {
+        if (!cfg_.carry_window_budget_enabled || cfg_.carry_window_budget_ms == 0) {
+            return;
+        }
+        auto [start_it, inserted] =
+            carry_window_start_ts_by_symbol_.emplace(symbol, market->Timestamp);
+        if (!inserted) {
+            const uint64_t start_ts = start_it->second;
+            if (market->Timestamp >= start_ts + cfg_.carry_window_budget_ms) {
+                start_it->second = market->Timestamp;
+                carry_window_cum_quote_volume_by_symbol_[symbol] = 0.0;
+                carry_window_used_notional_by_symbol_[symbol] = 0.0;
+            }
+        }
+        if (quote_volume > 0.0) {
+            carry_window_cum_quote_volume_by_symbol_[symbol] += quote_volume;
+        }
+    };
+
+    auto remaining_carry_window_budget = [&](const std::string& symbol) {
+        if (!cfg_.carry_window_budget_enabled || cfg_.carry_window_budget_ms == 0) {
+            return std::numeric_limits<double>::infinity();
+        }
+        const double cum_quote_volume = carry_window_cum_quote_volume_by_symbol_[symbol];
+        const double used_notional = carry_window_used_notional_by_symbol_[symbol];
+        const double budget_notional = cum_quote_volume * cfg_.carry_window_budget_participation_rate;
+        return std::max(0.0, budget_notional - used_notional);
+    };
+
+    auto mark_carry_window_budget_use = [&](const std::string& symbol, double abs_notional) {
+        if (!cfg_.carry_window_budget_enabled || cfg_.carry_window_budget_ms == 0) {
+            return;
+        }
+        if (abs_notional > 0.0) {
+            carry_window_used_notional_by_symbol_[symbol] += abs_notional;
+        }
+    };
+
     double effective_min_notional = cfg_.min_notional;
     if (signal.strategy == "funding_carry" && signal.urgency == QTrading::Signal::SignalUrgency::Low) {
         // Funding carry is slow by nature; ignore micro re-hedges to reduce churn/fees.
         effective_min_notional = std::max(effective_min_notional, carry_min_rebalance_notional_);
     }
+    const double carry_confidence = Clamp01(signal.confidence);
+    auto apply_carry_target_anchor = [&](const std::string& symbol,
+        double raw_target_notional,
+        double min_rebalance_notional) {
+            if (!cfg_.carry_target_anchor_enabled) {
+                return raw_target_notional;
+            }
+
+            auto [it, inserted] =
+                carry_target_anchor_notional_by_symbol_.emplace(symbol, raw_target_notional);
+            if (inserted) {
+                return raw_target_notional;
+            }
+
+            const double anchored = it->second;
+            const double update_threshold = std::max(
+                min_rebalance_notional,
+                std::fabs(raw_target_notional) * cfg_.carry_target_anchor_update_ratio);
+            const bool cross_zero =
+                ((anchored > 0.0 && raw_target_notional < 0.0) ||
+                    (anchored < 0.0 && raw_target_notional > 0.0));
+            if (cross_zero || std::fabs(raw_target_notional - anchored) >= update_threshold) {
+                it->second = raw_target_notional;
+                return raw_target_notional;
+            }
+            return anchored;
+        };
 
     if (!has_symbol_index_ && market->symbols) {
         const auto& symbols = *market->symbols;
@@ -235,23 +465,58 @@ std::vector<ExecutionOrder> MarketExecutionEngine::plan(
 
             const double target_notional = kv.second;
             const double cur_notional = current_notional[id] + pending_notional[id];
-            double delta_notional = target_notional - cur_notional;
-            bool reduce_only = (cur_notional != 0.0) && (cur_notional * delta_notional < 0.0);
+            const double raw_delta_notional = target_notional - cur_notional;
+            bool reduce_only =
+                (cur_notional != 0.0) && (cur_notional * raw_delta_notional < 0.0);
             const bool is_carry_rebalance = (signal.strategy == "funding_carry") &&
                 (signal.urgency == QTrading::Signal::SignalUrgency::Low) &&
                 !reduce_only;
+            double planned_target_notional = target_notional;
+            double delta_notional = raw_delta_notional;
             double symbol_min_notional = effective_min_notional;
             double symbol_step_ratio = cfg_.carry_max_rebalance_step_ratio;
             double symbol_participation_rate = cfg_.carry_max_participation_rate;
+            double quote_volume = 0.0;
+            double gap_ratio = 0.0;
             if (is_carry_rebalance) {
                 const double target_abs_notional = std::fabs(target_notional);
                 uint64_t symbol_cooldown_ms = cfg_.carry_rebalance_cooldown_ms;
                 symbol_min_notional = std::max(
                     symbol_min_notional,
                     target_abs_notional * cfg_.carry_min_rebalance_notional_ratio);
+                planned_target_notional = apply_carry_target_anchor(
+                    symbol,
+                    target_notional,
+                    symbol_min_notional);
+                delta_notional = planned_target_notional - cur_notional;
+                if (cfg_.carry_confidence_adaptive_enabled) {
+                    const double step_scale = Lerp(
+                        cfg_.carry_confidence_step_scale_min,
+                        cfg_.carry_confidence_step_scale_max,
+                        carry_confidence);
+                    const double part_scale = Lerp(
+                        cfg_.carry_confidence_participation_scale_min,
+                        cfg_.carry_confidence_participation_scale_max,
+                        carry_confidence);
+                    const double cooldown_scale = Lerp(
+                        cfg_.carry_confidence_cooldown_scale_max,
+                        cfg_.carry_confidence_cooldown_scale_min,
+                        carry_confidence);
 
-                if (target_abs_notional > 0.0) {
-                    const double gap_ratio = std::fabs(delta_notional) / target_abs_notional;
+                    symbol_step_ratio = Clamp01(symbol_step_ratio * step_scale);
+                    symbol_participation_rate = Clamp01(symbol_participation_rate * part_scale);
+                    if (symbol_cooldown_ms > 0) {
+                        const double scaled = static_cast<double>(symbol_cooldown_ms) * cooldown_scale;
+                        symbol_cooldown_ms = static_cast<uint64_t>(std::llround(std::max(0.0, scaled)));
+                        if (symbol_cooldown_ms == 0) {
+                            symbol_cooldown_ms = 1;
+                        }
+                    }
+                }
+
+                const double planned_target_abs_notional = std::fabs(planned_target_notional);
+                if (planned_target_abs_notional > 0.0) {
+                    gap_ratio = std::fabs(delta_notional) / planned_target_abs_notional;
                     if (gap_ratio >= cfg_.carry_bootstrap_gap_ratio) {
                         symbol_step_ratio = std::max(symbol_step_ratio, cfg_.carry_bootstrap_step_ratio);
                         symbol_participation_rate = std::max(
@@ -261,7 +526,7 @@ std::vector<ExecutionOrder> MarketExecutionEngine::plan(
                     }
                 }
 
-                if (target_abs_notional >= cfg_.carry_large_notional_threshold) {
+                if (planned_target_abs_notional >= cfg_.carry_large_notional_threshold) {
                     symbol_step_ratio = std::min(symbol_step_ratio, cfg_.carry_large_notional_step_ratio);
                     symbol_cooldown_ms = std::max(
                         symbol_cooldown_ms,
@@ -279,11 +544,16 @@ std::vector<ExecutionOrder> MarketExecutionEngine::plan(
                 if (symbol_step_ratio < 1.0) {
                     const double max_step = std::max(
                         symbol_min_notional,
-                        std::fabs(target_notional) * symbol_step_ratio);
+                        std::fabs(planned_target_notional) * symbol_step_ratio);
                     delta_notional = std::clamp(delta_notional, -max_step, max_step);
                 }
+                quote_volume = QuoteVolumeFromId(market, id);
+                if (cfg_.carry_window_budget_enabled) {
+                    advance_carry_window_budget(symbol, quote_volume);
+                    const double remaining_budget = remaining_carry_window_budget(symbol);
+                    delta_notional = std::clamp(delta_notional, -remaining_budget, remaining_budget);
+                }
                 if (symbol_participation_rate > 0.0) {
-                    const double quote_volume = QuoteVolumeFromId(market, id);
                     if (quote_volume > 0.0) {
                         const double volume_cap = quote_volume * symbol_participation_rate;
                         delta_notional = std::clamp(delta_notional, -volume_cap, volume_cap);
@@ -301,8 +571,21 @@ std::vector<ExecutionOrder> MarketExecutionEngine::plan(
             ord.symbol = symbol;
             ord.action = delta_notional > 0.0 ? OrderAction::Buy : OrderAction::Sell;
             ord.qty = abs_notional / price_by_id[id];
-            ord.type = OrderType::Market;
-            ord.price = 0.0;
+            bool use_maker_limit =
+                cfg_.carry_maker_first_enabled &&
+                is_carry_rebalance &&
+                (cfg_.carry_maker_limit_offset_bps > 0.0) &&
+                (gap_ratio < cfg_.carry_maker_catchup_gap_ratio);
+            ord.type = use_maker_limit ? OrderType::Limit : OrderType::Market;
+            if (use_maker_limit) {
+                const double bps = cfg_.carry_maker_limit_offset_bps * 1e-4;
+                const double price_scale =
+                    (ord.action == OrderAction::Buy) ? (1.0 - bps) : (1.0 + bps);
+                ord.price = std::max(0.0, price_by_id[id] * price_scale);
+            }
+            else {
+                ord.price = 0.0;
+            }
             ord.reduce_only = reduce_only;
             ord.urgency = (signal.urgency == QTrading::Signal::SignalUrgency::High)
                 ? OrderUrgency::High
@@ -311,10 +594,14 @@ std::vector<ExecutionOrder> MarketExecutionEngine::plan(
                 : OrderUrgency::Low;
             orders.push_back(std::move(ord));
             if (is_carry_rebalance) {
+                carry_rebalance_order_meta.push_back(
+                    { orders.size() - 1, delta_notional, price_by_id[id] });
                 last_carry_order_ts_by_symbol_[symbol] = market->Timestamp;
                 mark_carry_rebalance(symbol);
+                mark_carry_window_budget_use(symbol, abs_notional);
             }
         }
+        apply_two_sided_carry_controls(orders, carry_rebalance_order_meta, effective_min_notional);
         return orders;
     }
 
@@ -353,23 +640,57 @@ std::vector<ExecutionOrder> MarketExecutionEngine::plan(
         }
         const double target_notional = kv.second;
         const double cur_notional = current_notional[symbol] + pending_notional[symbol];
-        double delta_notional = target_notional - cur_notional;
-        bool reduce_only = (cur_notional != 0.0) && (cur_notional * delta_notional < 0.0);
+        const double raw_delta_notional = target_notional - cur_notional;
+        bool reduce_only = (cur_notional != 0.0) && (cur_notional * raw_delta_notional < 0.0);
         const bool is_carry_rebalance = (signal.strategy == "funding_carry") &&
             (signal.urgency == QTrading::Signal::SignalUrgency::Low) &&
             !reduce_only;
+        double planned_target_notional = target_notional;
+        double delta_notional = raw_delta_notional;
         double symbol_min_notional = effective_min_notional;
         double symbol_step_ratio = cfg_.carry_max_rebalance_step_ratio;
         double symbol_participation_rate = cfg_.carry_max_participation_rate;
+        double quote_volume = 0.0;
+        double gap_ratio = 0.0;
         if (is_carry_rebalance) {
             const double target_abs_notional = std::fabs(target_notional);
             uint64_t symbol_cooldown_ms = cfg_.carry_rebalance_cooldown_ms;
             symbol_min_notional = std::max(
                 symbol_min_notional,
                 target_abs_notional * cfg_.carry_min_rebalance_notional_ratio);
+            planned_target_notional = apply_carry_target_anchor(
+                symbol,
+                target_notional,
+                symbol_min_notional);
+            delta_notional = planned_target_notional - cur_notional;
+            if (cfg_.carry_confidence_adaptive_enabled) {
+                const double step_scale = Lerp(
+                    cfg_.carry_confidence_step_scale_min,
+                    cfg_.carry_confidence_step_scale_max,
+                    carry_confidence);
+                const double part_scale = Lerp(
+                    cfg_.carry_confidence_participation_scale_min,
+                    cfg_.carry_confidence_participation_scale_max,
+                    carry_confidence);
+                const double cooldown_scale = Lerp(
+                    cfg_.carry_confidence_cooldown_scale_max,
+                    cfg_.carry_confidence_cooldown_scale_min,
+                    carry_confidence);
 
-            if (target_abs_notional > 0.0) {
-                const double gap_ratio = std::fabs(delta_notional) / target_abs_notional;
+                symbol_step_ratio = Clamp01(symbol_step_ratio * step_scale);
+                symbol_participation_rate = Clamp01(symbol_participation_rate * part_scale);
+                if (symbol_cooldown_ms > 0) {
+                    const double scaled = static_cast<double>(symbol_cooldown_ms) * cooldown_scale;
+                    symbol_cooldown_ms = static_cast<uint64_t>(std::llround(std::max(0.0, scaled)));
+                    if (symbol_cooldown_ms == 0) {
+                        symbol_cooldown_ms = 1;
+                    }
+                }
+            }
+
+            const double planned_target_abs_notional = std::fabs(planned_target_notional);
+            if (planned_target_abs_notional > 0.0) {
+                gap_ratio = std::fabs(delta_notional) / planned_target_abs_notional;
                 if (gap_ratio >= cfg_.carry_bootstrap_gap_ratio) {
                     symbol_step_ratio = std::max(symbol_step_ratio, cfg_.carry_bootstrap_step_ratio);
                     symbol_participation_rate = std::max(
@@ -379,7 +700,7 @@ std::vector<ExecutionOrder> MarketExecutionEngine::plan(
                 }
             }
 
-            if (target_abs_notional >= cfg_.carry_large_notional_threshold) {
+            if (planned_target_abs_notional >= cfg_.carry_large_notional_threshold) {
                 symbol_step_ratio = std::min(symbol_step_ratio, cfg_.carry_large_notional_step_ratio);
                 symbol_cooldown_ms = std::max(
                     symbol_cooldown_ms,
@@ -397,8 +718,17 @@ std::vector<ExecutionOrder> MarketExecutionEngine::plan(
             if (symbol_step_ratio < 1.0) {
                 const double max_step = std::max(
                     symbol_min_notional,
-                    std::fabs(target_notional) * symbol_step_ratio);
+                    std::fabs(planned_target_notional) * symbol_step_ratio);
                 delta_notional = std::clamp(delta_notional, -max_step, max_step);
+            }
+            auto kit = market->klines.find(symbol);
+            if (kit != market->klines.end() && kit->second.has_value()) {
+                quote_volume = std::max(0.0, kit->second->QuoteVolume);
+            }
+            if (cfg_.carry_window_budget_enabled) {
+                advance_carry_window_budget(symbol, quote_volume);
+                const double remaining_budget = remaining_carry_window_budget(symbol);
+                delta_notional = std::clamp(delta_notional, -remaining_budget, remaining_budget);
             }
         }
 
@@ -406,15 +736,9 @@ std::vector<ExecutionOrder> MarketExecutionEngine::plan(
         if (pit == price_by_symbol.end() || pit->second <= 0.0) {
             continue;
         }
-        if (is_carry_rebalance && symbol_participation_rate > 0.0) {
-            auto kit = market->klines.find(symbol);
-            if (kit != market->klines.end() && kit->second.has_value()) {
-                const double quote_volume = std::max(0.0, kit->second->QuoteVolume);
-                if (quote_volume > 0.0) {
-                    const double volume_cap = quote_volume * symbol_participation_rate;
-                    delta_notional = std::clamp(delta_notional, -volume_cap, volume_cap);
-                }
-            }
+        if (is_carry_rebalance && symbol_participation_rate > 0.0 && quote_volume > 0.0) {
+            const double volume_cap = quote_volume * symbol_participation_rate;
+            delta_notional = std::clamp(delta_notional, -volume_cap, volume_cap);
         }
         const double price = pit->second;
         const double abs_notional = std::fabs(delta_notional);
@@ -427,8 +751,21 @@ std::vector<ExecutionOrder> MarketExecutionEngine::plan(
         ord.symbol = symbol;
         ord.action = delta_notional > 0.0 ? OrderAction::Buy : OrderAction::Sell;
         ord.qty = abs_notional / price;
-        ord.type = OrderType::Market;
-        ord.price = 0.0;
+        bool use_maker_limit =
+            cfg_.carry_maker_first_enabled &&
+            is_carry_rebalance &&
+            (cfg_.carry_maker_limit_offset_bps > 0.0) &&
+            (gap_ratio < cfg_.carry_maker_catchup_gap_ratio);
+        ord.type = use_maker_limit ? OrderType::Limit : OrderType::Market;
+        if (use_maker_limit) {
+            const double bps = cfg_.carry_maker_limit_offset_bps * 1e-4;
+            const double price_scale =
+                (ord.action == OrderAction::Buy) ? (1.0 - bps) : (1.0 + bps);
+            ord.price = std::max(0.0, price * price_scale);
+        }
+        else {
+            ord.price = 0.0;
+        }
         ord.reduce_only = reduce_only;
         ord.urgency = (signal.urgency == QTrading::Signal::SignalUrgency::High)
             ? OrderUrgency::High
@@ -437,11 +774,15 @@ std::vector<ExecutionOrder> MarketExecutionEngine::plan(
             : OrderUrgency::Low;
         orders.push_back(std::move(ord));
         if (is_carry_rebalance) {
+            carry_rebalance_order_meta.push_back(
+                { orders.size() - 1, delta_notional, price });
             last_carry_order_ts_by_symbol_[symbol] = market->Timestamp;
             mark_carry_rebalance(symbol);
+            mark_carry_window_budget_use(symbol, abs_notional);
         }
     }
 
+    apply_two_sided_carry_controls(orders, carry_rebalance_order_meta, effective_min_notional);
     return orders;
 }
 

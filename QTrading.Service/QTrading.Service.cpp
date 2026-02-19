@@ -1,5 +1,6 @@
-﻿#include "QTrading.Service.h"
 #include "Exchanges/BinanceSimulator/BinanceExchange.hpp"
+#include "ServiceHelpers.hpp"
+#include "Execution/FundingCarryStrategy.hpp"
 #include "Execution/MarketExecutionEngine.hpp"
 #include "Intent/FundingCarryIntentBuilder.hpp"
 #include "Monitoring/SimpleMonitoring.hpp"
@@ -19,12 +20,9 @@
 #include "FileLogger/FeatherV2/FundingEvent.hpp"
 #include "FileLogger/FeatherV2/RunMetadata.hpp"
 #include "Diagnostics/Trace.hpp"
-#include "Dto/Trading/Side.hpp"
-#include "Dto/Trading/InstrumentSpec.hpp"
 
-#include <atomic>
 #include <chrono>
-#include <csignal>
+#include <cstdlib>
 #include <ctime>
 #include <exception>
 #include <filesystem>
@@ -34,92 +32,16 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
 using namespace std;
 using namespace QTrading::Log;
 using BinanceExchange = QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
-using MarketPtr = QTrading::Infra::Exchanges::BinanceSim::MultiKlinePtr;
 using SimAccount = ::Account;
 
 namespace {
-
-std::string JsonEscape(const std::string& input)
-{
-    std::string out;
-    out.reserve(input.size() + 8);
-    for (const char c : input) {
-        if (c == '\\') {
-            out += "\\\\";
-        }
-        else if (c == '"') {
-            out += "\\\"";
-        }
-        else {
-            out.push_back(c);
-        }
-    }
-    return out;
-}
-
-std::string Utf8Path(const char8_t* path)
-{
-    return std::string(reinterpret_cast<const char*>(path));
-}
-
-std::atomic<bool> g_stop_requested{ false };
-
-void HandleSignal(int)
-{
-    g_stop_requested.store(true, std::memory_order_relaxed);
-}
-
-bool StopRequested()
-{
-    return g_stop_requested.load(std::memory_order_relaxed);
-}
-
-QTrading::Dto::Trading::OrderSide ToOrderSide(QTrading::Execution::OrderAction action)
-{
-    return (action == QTrading::Execution::OrderAction::Buy)
-        ? QTrading::Dto::Trading::OrderSide::Buy
-        : QTrading::Dto::Trading::OrderSide::Sell;
-}
-
-std::string InstrumentTypeToString(std::optional<QTrading::Dto::Trading::InstrumentType> type)
-{
-    if (!type.has_value()) {
-        return "auto";
-    }
-    switch (*type) {
-    case QTrading::Dto::Trading::InstrumentType::Spot:
-        return "spot";
-    case QTrading::Dto::Trading::InstrumentType::Perp:
-        return "perp";
-    default:
-        break;
-    }
-    return "unknown";
-}
-
-std::optional<QTrading::Dto::Trading::InstrumentType> ResolveInstrumentType(
-    const std::unordered_map<std::string, QTrading::Dto::Trading::InstrumentType>& explicit_types,
-    const std::string& symbol)
-{
-    const auto it = explicit_types.find(symbol);
-    if (it != explicit_types.end()) {
-        return it->second;
-    }
-
-    if (symbol.size() >= 5 && symbol.rfind("_SPOT") == symbol.size() - 5) {
-        return QTrading::Dto::Trading::InstrumentType::Spot;
-    }
-    if (symbol.size() >= 5 && symbol.rfind("_PERP") == symbol.size() - 5) {
-        return QTrading::Dto::Trading::InstrumentType::Perp;
-    }
-    return std::nullopt;
-}
 
 #if defined(QTRADING_TRACE) && !defined(QTRADING_TRACE_VERBOSE)
 void PrintStatusLine(const BinanceExchange::StatusSnapshot& snap)
@@ -171,8 +93,7 @@ void PrintStatusLine(const BinanceExchange::StatusSnapshot& snap)
 /// @return Returns 0 on successful completion.
 int main()
 {
-    std::signal(SIGINT, HandleSignal);
-    std::signal(SIGTERM, HandleSignal);
+    QTrading::Service::Helpers::InstallSignalHandlers();
 
 #ifdef QTRADING_TRACE
     std::cerr << "[Service] QTRADING_TRACE enabled" << std::endl;
@@ -183,8 +104,30 @@ int main()
     QTR_TRACE("service", "main begin");
 
     try {
-        constexpr double kInitialSpotCash = 500'000.0;
-        constexpr double kInitialPerpWallet = 500'000.0;
+        // Optional local debug range for IDE runs.
+        // If environment variables are already set, they take priority.
+        constexpr std::string_view kLocalSimStartDate = "";
+        constexpr std::string_view kLocalSimEndDate = "";
+        if (const char* env_start_date = std::getenv("QTR_SIM_START_DATE");
+            (env_start_date == nullptr || env_start_date[0] == '\0') &&
+            !kLocalSimStartDate.empty()) {
+            QTrading::Service::Helpers::SetEnvVar("QTR_SIM_START_DATE", std::string(kLocalSimStartDate));
+        }
+        if (const char* env_end_date = std::getenv("QTR_SIM_END_DATE");
+            (env_end_date == nullptr || env_end_date[0] == '\0') &&
+            !kLocalSimEndDate.empty()) {
+            QTrading::Service::Helpers::SetEnvVar("QTR_SIM_END_DATE", std::string(kLocalSimEndDate));
+        }
+
+        const std::string sim_start_date = (std::getenv("QTR_SIM_START_DATE") != nullptr)
+            ? std::string(std::getenv("QTR_SIM_START_DATE"))
+            : std::string();
+        const std::string sim_end_date = (std::getenv("QTR_SIM_END_DATE") != nullptr)
+            ? std::string(std::getenv("QTR_SIM_END_DATE"))
+            : std::string();
+
+        constexpr double kInitialSpotCash = 50'000'000.0;
+        constexpr double kInitialPerpWallet = 50'000'000.0;
         constexpr int kVipLevel = 0;
 
         SimAccount::AccountInitConfig account_init{};
@@ -193,22 +136,35 @@ int main()
         account_init.vip_level = kVipLevel;
 
         std::ostringstream strategy_params_builder;
-        strategy_params_builder << "notional=1000;leverage=2;receive_funding=true"
+        strategy_params_builder << "strategy_profile=funding_carry_default"
                                 << ";initial_spot_cash=" << kInitialSpotCash
                                 << ";initial_perp_wallet=" << kInitialPerpWallet;
+        if (!sim_start_date.empty()) {
+            strategy_params_builder << ";sim_start_date=" << sim_start_date;
+        }
+        if (!sim_end_date.empty()) {
+            strategy_params_builder << ";sim_end_date=" << sim_end_date;
+        }
         const std::string strategy_params = strategy_params_builder.str();
 
         /// @brief Mapping from symbol string to CSV file path.
         std::vector<BinanceExchange::SymbolDataset> symbolCsv = {
             {"BTCUSDT_SPOT",
-                Utf8Path(u8R"(\\synology\MarketData\General\MarketData\Kline\Spot\BTCUSDT.csv)"),
+                QTrading::Service::Helpers::Utf8Path(u8R"(\\synology\MarketData\General\MarketData\Kline\Spot\BTCUSDT.csv)"),
                 std::nullopt,
                 QTrading::Dto::Trading::InstrumentType::Spot},
             {"BTCUSDT_PERP",
-                Utf8Path(u8R"(\\synology\MarketData\General\MarketData\Kline\UsdFutures\BTCUSDT.csv)"),
-                Utf8Path(u8R"(\\synology\MarketData\General\MarketData\FundingRate\UsdFutures\BTCUSDT.csv)"),
+                QTrading::Service::Helpers::Utf8Path(u8R"(\\synology\MarketData\General\MarketData\Kline\UsdFutures\BTCUSDT.csv)"),
+                QTrading::Service::Helpers::Utf8Path(u8R"(\\synology\MarketData\General\MarketData\FundingRate\UsdFutures\BTCUSDT.csv)"),
                 QTrading::Dto::Trading::InstrumentType::Perp}
         };
+        std::unordered_map<std::string, QTrading::Dto::Trading::InstrumentType> instrument_types;
+        instrument_types.reserve(symbolCsv.size());
+        for (const auto& ds : symbolCsv) {
+            if (ds.instrument_type.has_value()) {
+                instrument_types.emplace(ds.symbol, *ds.instrument_type);
+            }
+        }
         const uint64_t run_id = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count());
         std::string dataset;
@@ -220,7 +176,7 @@ int main()
             dataset += "=";
             dataset += ds.kline_csv;
             dataset += "@";
-            dataset += InstrumentTypeToString(ds.instrument_type);
+            dataset += QTrading::Service::Helpers::InstrumentTypeToString(ds.instrument_type);
             if (ds.funding_csv.has_value() && !ds.funding_csv->empty()) {
                 dataset += "|";
                 dataset += *ds.funding_csv;
@@ -245,10 +201,10 @@ int main()
                 if (meta) {
                     meta << "{\n"
                          << "  \"run_id\": " << run_id << ",\n"
-                         << "  \"strategy_name\": \"" << JsonEscape("FundingCarryMVP") << "\",\n"
-                         << "  \"strategy_version\": \"" << JsonEscape("0.1") << "\",\n"
-                         << "  \"strategy_params\": \"" << JsonEscape(strategy_params) << "\",\n"
-                         << "  \"dataset\": \"" << JsonEscape(dataset) << "\"\n"
+                         << "  \"strategy_name\": \"" << QTrading::Service::Helpers::JsonEscape("FundingCarryMVP") << "\",\n"
+                         << "  \"strategy_version\": \"" << QTrading::Service::Helpers::JsonEscape("0.1") << "\",\n"
+                         << "  \"strategy_params\": \"" << QTrading::Service::Helpers::JsonEscape(strategy_params) << "\",\n"
+                         << "  \"dataset\": \"" << QTrading::Service::Helpers::JsonEscape(dataset) << "\"\n"
                          << "}\n";
                 }
             }
@@ -256,7 +212,7 @@ int main()
                 std::ofstream dataset_file((run_dir / "dataset_paths.json").string(), std::ios::out | std::ios::trunc);
                 if (dataset_file) {
                     dataset_file << "{\n"
-                                 << "  \"dataset\": \"" << JsonEscape(dataset) << "\"\n"
+                                 << "  \"dataset\": \"" << QTrading::Service::Helpers::JsonEscape(dataset) << "\"\n"
                                  << "}\n";
                 }
             }
@@ -290,21 +246,23 @@ int main()
         std::cerr.flush();
 
         // @brief Assemble arbitrage pipeline (currently null implementations).
-        QTrading::Universe::FixedUniverseSelector universe_selector({ "BTCUSDT_SPOT", "BTCUSDT_PERP" });
-        QTrading::Signal::FundingCarrySignalEngine signal_engine({
-            "BTCUSDT_SPOT",
-            "BTCUSDT_PERP"
-        });
-        QTrading::Intent::FundingCarryIntentBuilder intent_builder({ "BTCUSDT_SPOT", "BTCUSDT_PERP", true });
+        QTrading::Universe::FixedUniverseSelector universe_selector;
+        QTrading::Signal::FundingCarrySignalEngine signal_engine({});
+        QTrading::Intent::FundingCarryIntentBuilder intent_builder({});
         QTrading::Risk::SimpleRiskEngine::Config risk_cfg;
-        risk_cfg.notional_usdt = 1000.0;
-        risk_cfg.leverage = 2.0;
-        risk_cfg.max_leverage = 3.0;
-        risk_cfg.instrument_types["BTCUSDT_SPOT"] = QTrading::Dto::Trading::InstrumentType::Spot;
-        risk_cfg.instrument_types["BTCUSDT_PERP"] = QTrading::Dto::Trading::InstrumentType::Perp;
+        risk_cfg.instrument_types = instrument_types;
         QTrading::Risk::SimpleRiskEngine risk_engine(risk_cfg);
-        QTrading::Execution::MarketExecutionEngine execution_engine(exchange, { 10.0 });
-        QTrading::Monitoring::SimpleMonitoring monitoring({ 5 });
+        QTrading::Execution::MarketExecutionEngine execution_engine(exchange, {});
+        QTrading::Monitoring::SimpleMonitoring monitoring({});
+        auto strategy = std::make_shared<QTrading::Execution::FundingCarryStrategy>(
+            exchange,
+            universe_selector,
+            signal_engine,
+            intent_builder,
+            risk_engine,
+            execution_engine,
+            monitoring,
+            instrument_types);
 
         std::cerr << "[Service] entering main loop..." << std::endl;
         std::cerr.flush();
@@ -328,90 +286,23 @@ int main()
         };
 
         // @brief Main simulation loop: advance exchange until no more data.
-        while (true) {
-            if (StopRequested()) {
+        while (exchange->step()) {
+            if (QTrading::Service::Helpers::StopRequested()) {
                 if (!stop_logged) {
                     stop_logged = true;
                 }
                 Shutdown("stop requested, shutting down modules...");
                 break;
             }
-            QTR_TRACE("service", "exchange->step begin");
-            const bool ok = exchange->step();
-            QTR_TRACE("service", ok ? "exchange->step end ok" : "exchange->step end false");
-            if (!ok) {
-#if defined(QTRADING_TRACE) && !defined(QTRADING_TRACE_VERBOSE)
-                exchange->FillStatusSnapshot(status);
-                PrintStatusLine(status);
-#else
-                std::cerr << "[Service] exchange->step returned false; exiting loop." << std::endl;
-#endif
-                break;
-            }
-            if (StopRequested()) {
+            QTR_TRACE("service", "exchange->step end ok");
+            if (QTrading::Service::Helpers::StopRequested()) {
                 if (!stop_logged) {
                     stop_logged = true;
                 }
                 Shutdown("stop requested, shutting down modules...");
                 break;
             }
-
-            auto marketOpt = exchange->get_market_channel()->Receive();
-            if (!marketOpt) {
-                    std::cerr << "[Service] market channel closed; exiting loop." << std::endl;
-                break;
-            }
-            const auto& market = marketOpt.value();
-
-            (void)universe_selector.select();
-            auto signal = signal_engine.on_market(market);
-            auto intent = intent_builder.build(signal, market);
-
-            QTrading::Risk::AccountState account{};
-            account.positions = exchange->get_all_positions();
-            account.open_orders = exchange->get_all_open_orders();
-            account.spot_balance = exchange->account.get_spot_balance();
-            account.perp_balance = exchange->account.get_perp_balance();
-            account.total_cash_balance = exchange->account.get_total_cash_balance();
-
-            auto risk = risk_engine.position(intent, account, market);
-            auto orders = execution_engine.plan(risk, signal, market);
-
-            for (const auto& order : orders) {
-                double price = (order.type == QTrading::Execution::OrderType::Limit)
-                    ? order.price
-                    : 0.0;
-                const auto type = ResolveInstrumentType(risk_cfg.instrument_types, order.symbol);
-                if (type.has_value() && *type == QTrading::Dto::Trading::InstrumentType::Spot) {
-                    (void)exchange->spot.place_order(
-                        order.symbol,
-                        order.qty,
-                        price,
-                        ToOrderSide(order.action),
-                        order.reduce_only);
-                }
-                else {
-                    (void)exchange->perp.place_order(
-                        order.symbol,
-                        order.qty,
-                        price,
-                        ToOrderSide(order.action),
-                        QTrading::Dto::Trading::PositionSide::Both,
-                        order.reduce_only);
-                }
-            }
-
-            for (const auto& alert : monitoring.check(account)) {
-                if (alert.action == "CANCEL_OPEN_ORDERS") {
-                    const auto type = ResolveInstrumentType(risk_cfg.instrument_types, alert.symbol);
-                    if (type.has_value() && *type == QTrading::Dto::Trading::InstrumentType::Spot) {
-                        exchange->spot.cancel_open_orders(alert.symbol);
-                    }
-                    else {
-                        exchange->perp.cancel_open_orders(alert.symbol);
-                    }
-                }
-            }
+            strategy->wait_for_done();
 
             ++steps;
 
@@ -423,11 +314,18 @@ int main()
                 PrintStatusLine(status);
 #else
                 std::cout << "[Service] steps=" << steps
-                          << " ex_market_closed=" << exchange->get_market_channel()->IsClosed()
                           << std::endl;
 #endif
                 last_progress = now;
             }
+        }
+        if (!QTrading::Service::Helpers::StopRequested()) {
+#if defined(QTRADING_TRACE) && !defined(QTRADING_TRACE_VERBOSE)
+            exchange->FillStatusSnapshot(status);
+            PrintStatusLine(status);
+#else
+            std::cerr << "[Service] exchange->step returned false; exiting loop." << std::endl;
+#endif
         }
 
         // @brief Clean shutdown: close channels, stop logger.

@@ -2,6 +2,7 @@
 #include "Enum/LogModule.hpp"
 #include "Dto/AccountLog.hpp"
 #include "Diagnostics/Trace.hpp"
+#include "Time/ReplayTimeRange.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -11,6 +12,7 @@
 #include <limits>
 #include <memory>
 #include <memory_resource>
+#include <stdexcept>
 #include <unordered_set>
 #include <utility>
 
@@ -135,6 +137,54 @@ std::vector<BinanceExchange::SymbolDataset> to_datasets(
     return out;
 }
 
+size_t lower_bound_kline_ts(const MarketData& data, uint64_t ts)
+{
+    size_t lo = 0;
+    size_t hi = data.get_klines_count();
+    while (lo < hi) {
+        const size_t mid = lo + (hi - lo) / 2;
+        if (data.get_kline(mid).Timestamp < ts) {
+            lo = mid + 1;
+        }
+        else {
+            hi = mid;
+        }
+    }
+    return lo;
+}
+
+size_t upper_bound_kline_ts(const MarketData& data, uint64_t ts)
+{
+    size_t lo = 0;
+    size_t hi = data.get_klines_count();
+    while (lo < hi) {
+        const size_t mid = lo + (hi - lo) / 2;
+        if (data.get_kline(mid).Timestamp <= ts) {
+            lo = mid + 1;
+        }
+        else {
+            hi = mid;
+        }
+    }
+    return lo;
+}
+
+size_t lower_bound_funding_ts(const FundingRateData& data, uint64_t ts)
+{
+    size_t lo = 0;
+    size_t hi = data.get_count();
+    while (lo < hi) {
+        const size_t mid = lo + (hi - lo) / 2;
+        if (data.get_funding(mid).FundingTime < ts) {
+            lo = mid + 1;
+        }
+        else {
+            hi = mid;
+        }
+    }
+    return lo;
+}
+
 } // namespace
 
 /// @brief Simulator for Binance futures exchange.
@@ -223,6 +273,8 @@ BinanceExchange::BinanceExchange(
     symbols_.reserve(datasets.size());
     md_.reserve(datasets.size());
     cursor_.assign(datasets.size(), 0);
+    kline_window_begin_idx_.assign(datasets.size(), 0);
+    kline_window_end_idx_.assign(datasets.size(), 0);
     next_ts_by_symbol_.assign(datasets.size(), 0);
     has_next_ts_.assign(datasets.size(), 0);
     kline_counts_.reserve(datasets.size());
@@ -244,20 +296,51 @@ BinanceExchange::BinanceExchange(
         md_.push_back(jobs[i].get());
 
         const auto& data = md_[i];
-        kline_counts_.push_back(data.get_klines_count());
-        if (cursor_[i] < data.get_klines_count()) {
+        const size_t total = data.get_klines_count();
+        kline_counts_.push_back(total);
+        kline_window_begin_idx_[i] = 0;
+        kline_window_end_idx_[i] = total;
+    }
+
+    const auto replay_range = QTrading::Utils::Time::ParseReplayTimeRangeFromEnv();
+    if (!replay_range.ok()) {
+        throw std::runtime_error(replay_range.error);
+    }
+    replay_start_ts_ms_ = replay_range.start_ms;
+    replay_end_ts_ms_ = replay_range.end_ms;
+
+    for (size_t i = 0; i < md_.size(); ++i) {
+        const auto& data = md_[i];
+        size_t begin_idx = 0;
+        size_t end_idx = data.get_klines_count();
+        if (replay_start_ts_ms_.has_value()) {
+            begin_idx = lower_bound_kline_ts(data, *replay_start_ts_ms_);
+        }
+        if (replay_end_ts_ms_.has_value()) {
+            end_idx = upper_bound_kline_ts(data, *replay_end_ts_ms_);
+        }
+        if (begin_idx > end_idx) {
+            begin_idx = end_idx;
+        }
+        kline_window_begin_idx_[i] = begin_idx;
+        kline_window_end_idx_[i] = end_idx;
+        cursor_[i] = begin_idx;
+
+        if (cursor_[i] < kline_window_end_idx_[i]) {
             const uint64_t ts = data.get_kline(cursor_[i]).Timestamp;
             next_ts_by_symbol_[i] = ts;
             has_next_ts_[i] = 1;
             next_ts_heap_.push(HeapItem{ ts, i });
         }
     }
+
     last_close_by_symbol_.assign(symbols_.size(), 0.0);
     last_close_ts_by_symbol_.assign(symbols_.size(), 0);
     has_last_close_.assign(symbols_.size(), 0);
 
     funding_md_.resize(datasets.size());
     funding_cursor_.assign(datasets.size(), 0);
+    funding_window_end_idx_.assign(datasets.size(), 0);
     has_funding_.assign(datasets.size(), 0);
     last_funding_rate_by_symbol_.assign(datasets.size(), 0.0);
     last_funding_time_by_symbol_.assign(datasets.size(), 0);
@@ -267,7 +350,28 @@ BinanceExchange::BinanceExchange(
         if (ds.funding_csv.has_value() && !ds.funding_csv->empty()) {
             funding_md_[i] = std::make_unique<FundingRateData>(ds.symbol, *ds.funding_csv);
             has_funding_[i] = 1;
+            funding_window_end_idx_[i] = funding_md_[i]->get_count();
         }
+    }
+
+    for (size_t i = 0; i < funding_md_.size(); ++i) {
+        if (!has_funding_[i] || !funding_md_[i]) {
+            continue;
+        }
+        const auto& data = *funding_md_[i];
+        size_t begin_idx = 0;
+        size_t end_idx = data.get_count();
+        if (replay_start_ts_ms_.has_value()) {
+            begin_idx = lower_bound_funding_ts(data, *replay_start_ts_ms_);
+        }
+        if (replay_end_ts_ms_.has_value()) {
+            end_idx = data.upper_bound_ts(*replay_end_ts_ms_);
+        }
+        if (begin_idx > end_idx) {
+            begin_idx = end_idx;
+        }
+        funding_cursor_[i] = begin_idx;
+        funding_window_end_idx_[i] = end_idx;
     }
 
     /// @details Create bounded channels:
@@ -757,7 +861,7 @@ void BinanceExchange::close()
     {
         std::lock_guard<std::mutex> state_lk(state_mtx_);
         for (size_t i = 0; i < md_.size(); ++i) {
-            cursor_[i] = md_[i].get_klines_count();
+            cursor_[i] = (i < kline_window_end_idx_.size()) ? kline_window_end_idx_[i] : md_[i].get_klines_count();
             has_next_ts_[i] = 0;
         }
     }
@@ -795,7 +899,8 @@ bool BinanceExchange::next_timestamp(uint64_t& ts)
         }
         const auto& data = *funding_md_[i];
         const size_t cur = funding_cursor_[i];
-        if (cur >= data.get_count()) {
+        const size_t end_idx = (i < funding_window_end_idx_.size()) ? funding_window_end_idx_[i] : data.get_count();
+        if (cur >= end_idx) {
             continue;
         }
         const uint64_t fts = data.get_funding(cur).FundingTime;
@@ -839,7 +944,8 @@ void BinanceExchange::build_multikline(uint64_t ts,
         const auto& sym = symbols_[i];
         auto& data = md_[i];
         size_t idx = cursor_[i];
-        if (idx < data.get_klines_count() &&
+        const size_t end_idx = (i < kline_window_end_idx_.size()) ? kline_window_end_idx_[i] : data.get_klines_count();
+        if (idx < end_idx &&
             data.get_kline(idx).Timestamp == ts)
         {
             const auto& k = data.get_kline(idx);
@@ -854,7 +960,7 @@ void BinanceExchange::build_multikline(uint64_t ts,
             ++cursor_[i];
 
             // Advance this symbol in the multiway merge heap.
-            if (cursor_[i] < data.get_klines_count()) {
+            if (cursor_[i] < end_idx) {
                 const uint64_t next_ts = data.get_kline(cursor_[i]).Timestamp;
                 next_ts_by_symbol_[i] = next_ts;
                 has_next_ts_[i] = 1;
@@ -1291,7 +1397,10 @@ void BinanceExchange::collect_funding_events_unlocked_(uint64_t ts, std::vector<
         auto& data = *funding_md_[i];
         size_t& cur = funding_cursor_[i];
 
-        const size_t end = data.upper_bound_ts(ts);
+        size_t end = data.upper_bound_ts(ts);
+        if (i < funding_window_end_idx_.size()) {
+            end = std::min(end, funding_window_end_idx_[i]);
+        }
         while (cur < end) {
             const auto& fr = data.get_funding(cur);
             if (i < has_last_funding_.size()) {
@@ -1500,19 +1609,28 @@ double BinanceExchange::progress_pct_() const
 
 double BinanceExchange::progress_pct_unlocked_() const
 {
-    if (kline_counts_.empty()) {
+    if (kline_window_end_idx_.empty()) {
         return 0.0;
     }
     double min_ratio = 1.0;
     bool has_count = false;
-    const size_t count = std::min(kline_counts_.size(), cursor_.size());
+    const size_t count = std::min(
+        std::min(kline_window_begin_idx_.size(), kline_window_end_idx_.size()),
+        cursor_.size());
     for (size_t i = 0; i < count; ++i) {
-        const auto total = kline_counts_[i];
+        const auto begin_idx = kline_window_begin_idx_[i];
+        const auto end_idx = kline_window_end_idx_[i];
+        if (end_idx <= begin_idx) {
+            continue;
+        }
+        const auto total = end_idx - begin_idx;
         if (total == 0) {
             continue;
         }
         has_count = true;
-        double ratio = static_cast<double>(cursor_[i]) / static_cast<double>(total);
+        const size_t cur_idx = std::min(cursor_[i], end_idx);
+        const size_t progressed = (cur_idx > begin_idx) ? (cur_idx - begin_idx) : 0;
+        double ratio = static_cast<double>(progressed) / static_cast<double>(total);
         if (ratio < min_ratio) {
             min_ratio = ratio;
         }

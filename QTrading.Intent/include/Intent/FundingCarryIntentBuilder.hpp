@@ -17,8 +17,8 @@ class FundingCarryIntentBuilder final : public IIntentBuilder<
 public:
     /// @brief Configuration for funding carry intent.
     struct Config {
-        std::string spot_symbol;
-        std::string perp_symbol;
+        std::string spot_symbol = "BTCUSDT_SPOT";
+        std::string perp_symbol = "BTCUSDT_PERP";
         bool receive_funding = true;
     };
 

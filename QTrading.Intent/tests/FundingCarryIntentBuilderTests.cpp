@@ -56,3 +56,15 @@ TEST(FundingCarryIntentBuilderTests, UsesConfiguredCustomSymbols)
     EXPECT_EQ(intent.legs[0].instrument, "BTCUSDT_CASH");
     EXPECT_EQ(intent.legs[1].instrument, "BTCUSDT_SWAP");
 }
+
+TEST(FundingCarryIntentBuilderTests, UsesDefaultSymbolsWhenConfigOmitted)
+{
+    QTrading::Intent::FundingCarryIntentBuilder builder({});
+    QTrading::Signal::SignalDecision signal;
+    signal.status = QTrading::Signal::SignalStatus::Active;
+
+    auto intent = builder.build(signal, nullptr);
+    ASSERT_EQ(intent.legs.size(), 2u);
+    EXPECT_EQ(intent.legs[0].instrument, "BTCUSDT_SPOT");
+    EXPECT_EQ(intent.legs[1].instrument, "BTCUSDT_PERP");
+}

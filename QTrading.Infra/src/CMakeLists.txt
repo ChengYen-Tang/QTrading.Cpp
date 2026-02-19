@@ -41,8 +41,9 @@ if(QTRADING_ENABLE_TRACE)
 endif()
 
 target_link_libraries(QTrading.Infra.Library
-  PRIVATE
+  PUBLIC
     QTrading.Logging.Library
+  PRIVATE
     Boost::filesystem
     Boost::system
 )
