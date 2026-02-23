@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstdlib>
 #include <limits>
 #include <optional>
 #include <string>
@@ -95,64 +94,6 @@ double SignedNotionalFromPosition(const QTrading::dto::Position& pos, double pri
     return pos.quantity * price * sign;
 }
 
-void OverrideDoubleFromEnv(const char* name, double& value)
-{
-    const char* raw = std::getenv(name);
-    if (!raw || !*raw) {
-        return;
-    }
-    try {
-        value = std::stod(raw);
-    }
-    catch (...) {
-        // Ignore malformed env values and keep code-level defaults.
-    }
-}
-
-void OverrideBoolFromEnv(const char* name, bool& value)
-{
-    const char* raw = std::getenv(name);
-    if (!raw || !*raw) {
-        return;
-    }
-    const std::string s(raw);
-    if (s == "1" || s == "true" || s == "TRUE" || s == "on" || s == "ON") {
-        value = true;
-    }
-    else if (s == "0" || s == "false" || s == "FALSE" || s == "off" || s == "OFF") {
-        value = false;
-    }
-}
-
-void OverrideSizeTFromEnv(const char* name, std::size_t& value)
-{
-    const char* raw = std::getenv(name);
-    if (!raw || !*raw) {
-        return;
-    }
-    try {
-        const auto parsed = std::stoull(raw);
-        value = static_cast<std::size_t>(parsed);
-    }
-    catch (...) {
-        // Ignore malformed env values and keep code-level defaults.
-    }
-}
-
-void OverrideUint64FromEnv(const char* name, uint64_t& value)
-{
-    const char* raw = std::getenv(name);
-    if (!raw || !*raw) {
-        return;
-    }
-    try {
-        value = static_cast<uint64_t>(std::stoull(raw));
-    }
-    catch (...) {
-        // Ignore malformed env values and keep code-level defaults.
-    }
-}
-
 double Clamp01(double value)
 {
     if (value < 0.0) {
@@ -209,35 +150,11 @@ namespace QTrading::Risk {
 SimpleRiskEngine::SimpleRiskEngine(Config cfg)
     : cfg_(cfg)
 {
-    // Optional env overrides for research sweeps.
-    OverrideDoubleFromEnv("QTR_FC_NOTIONAL_USDT", cfg_.notional_usdt);
-    // Static leg cap is deprecated as a primary sizing control.
-    // Keep only an explicit emergency breaker override.
-    OverrideDoubleFromEnv("QTR_FC_EMERGENCY_MAX_LEG_NOTIONAL_USDT", cfg_.max_leg_notional_usdt);
-    OverrideDoubleFromEnv("QTR_FC_LEVERAGE", cfg_.leverage);
-    OverrideDoubleFromEnv("QTR_FC_MAX_LEVERAGE", cfg_.max_leverage);
-    OverrideDoubleFromEnv("QTR_FC_REBALANCE_THRESHOLD_RATIO", cfg_.rebalance_threshold_ratio);
-    OverrideDoubleFromEnv("QTR_FC_BASIS_SOFT_CAP_PCT", cfg_.basis_soft_cap_pct);
-    OverrideDoubleFromEnv("QTR_FC_MIN_NOTIONAL_SCALE", cfg_.min_notional_scale);
     cfg_.min_notional_scale = Clamp01(cfg_.min_notional_scale);
-    OverrideDoubleFromEnv("QTR_FC_BASIS_TREND_MAX_ABS", cfg_.basis_trend_max_abs);
-    OverrideDoubleFromEnv("QTR_FC_BASIS_TREND_MIN_SCALE", cfg_.basis_trend_min_scale);
-    OverrideDoubleFromEnv("QTR_FC_BASIS_TREND_EMA_ALPHA", cfg_.basis_trend_ema_alpha);
     cfg_.basis_trend_min_scale = Clamp01(cfg_.basis_trend_min_scale);
     cfg_.basis_trend_ema_alpha = ClampAlpha(cfg_.basis_trend_ema_alpha);
-    OverrideDoubleFromEnv("QTR_FC_NEG_BASIS_THRESHOLD", cfg_.neg_basis_threshold);
-    OverrideDoubleFromEnv("QTR_FC_NEG_BASIS_SCALE", cfg_.neg_basis_scale);
-    OverrideDoubleFromEnv("QTR_FC_NEG_BASIS_HYSTERESIS_PCT", cfg_.neg_basis_hysteresis_pct);
     cfg_.neg_basis_scale = Clamp01(cfg_.neg_basis_scale);
     cfg_.neg_basis_hysteresis_pct = ClampNonNegative(cfg_.neg_basis_hysteresis_pct);
-    OverrideDoubleFromEnv("QTR_FC_BASIS_OVERLAY_CAP", cfg_.basis_overlay_cap);
-    OverrideDoubleFromEnv("QTR_FC_BASIS_OVERLAY_STRENGTH", cfg_.basis_overlay_strength);
-    OverrideBoolFromEnv("QTR_FC_BASIS_OVERLAY_ALLOW_UPSCALE", cfg_.basis_overlay_allow_upscale);
-    OverrideDoubleFromEnv("QTR_FC_BASIS_OVERLAY_UPSCALE_CAP", cfg_.basis_overlay_upscale_cap);
-    OverrideDoubleFromEnv("QTR_FC_BASIS_OVERLAY_DOWNSCALE_FLOOR", cfg_.basis_overlay_downscale_floor);
-    OverrideDoubleFromEnv("QTR_FC_BASIS_OVERLAY_ACTIVATION_RATIO", cfg_.basis_overlay_activation_ratio);
-    OverrideUint64FromEnv("QTR_FC_BASIS_OVERLAY_REFRESH_MS", cfg_.basis_overlay_refresh_ms);
-    OverrideDoubleFromEnv("QTR_FC_BASIS_LEVEL_EMA_ALPHA", cfg_.basis_level_ema_alpha);
     cfg_.basis_overlay_strength = Clamp01(cfg_.basis_overlay_strength);
     cfg_.basis_overlay_upscale_cap = ClampPositive(cfg_.basis_overlay_upscale_cap, 1.0);
     cfg_.basis_overlay_downscale_floor = Clamp01(cfg_.basis_overlay_downscale_floor);
@@ -249,40 +166,6 @@ SimpleRiskEngine::SimpleRiskEngine(Config cfg)
         cfg_.basis_overlay_downscale_floor = cfg_.basis_overlay_upscale_cap;
     }
     cfg_.basis_level_ema_alpha = ClampAlpha(cfg_.basis_level_ema_alpha);
-    OverrideDoubleFromEnv("QTR_FC_GROSS_DEVIATION_TRIGGER_RATIO", cfg_.gross_deviation_trigger_ratio);
-    OverrideDoubleFromEnv("QTR_FC_GROSS_DEVIATION_TRIGGER_NOTIONAL_THRESHOLD", cfg_.gross_deviation_trigger_notional_threshold);
-    OverrideDoubleFromEnv("QTR_FC_CARRY_CONFIDENCE_MIN_SCALE", cfg_.carry_confidence_min_scale);
-    OverrideDoubleFromEnv("QTR_FC_CARRY_CONFIDENCE_MAX_SCALE", cfg_.carry_confidence_max_scale);
-    OverrideDoubleFromEnv("QTR_FC_CARRY_CONFIDENCE_POWER", cfg_.carry_confidence_power);
-    OverrideBoolFromEnv("QTR_FC_CARRY_CORE_OVERLAY_ENABLE", cfg_.carry_core_overlay_enabled);
-    OverrideDoubleFromEnv("QTR_FC_CARRY_CORE_NOTIONAL_RATIO", cfg_.carry_core_notional_ratio);
-    OverrideDoubleFromEnv("QTR_FC_CARRY_OVERLAY_NOTIONAL_RATIO", cfg_.carry_overlay_notional_ratio);
-    OverrideDoubleFromEnv("QTR_FC_CARRY_OVERLAY_CONFIDENCE_POWER", cfg_.carry_overlay_confidence_power);
-    OverrideDoubleFromEnv("QTR_FC_CARRY_CONFIDENCE_MIN_LEVERAGE_SCALE", cfg_.carry_confidence_min_leverage_scale);
-    OverrideDoubleFromEnv("QTR_FC_CARRY_CONFIDENCE_MAX_LEVERAGE_SCALE", cfg_.carry_confidence_max_leverage_scale);
-    OverrideDoubleFromEnv("QTR_FC_CARRY_CONFIDENCE_LEVERAGE_POWER", cfg_.carry_confidence_leverage_power);
-    OverrideBoolFromEnv("QTR_FC_CARRY_CONFIDENCE_BOOST_ENABLE", cfg_.carry_confidence_boost_enabled);
-    OverrideDoubleFromEnv("QTR_FC_CARRY_CONFIDENCE_BOOST_REFERENCE", cfg_.carry_confidence_boost_reference);
-    OverrideDoubleFromEnv("QTR_FC_CARRY_CONFIDENCE_BOOST_MAX_SCALE", cfg_.carry_confidence_boost_max_scale);
-    OverrideDoubleFromEnv("QTR_FC_CARRY_CONFIDENCE_BOOST_POWER", cfg_.carry_confidence_boost_power);
-    OverrideBoolFromEnv(
-        "QTR_FC_CARRY_CONFIDENCE_BOOST_REGIME_AWARE_ENABLE",
-        cfg_.carry_confidence_boost_regime_aware_enabled);
-    OverrideSizeTFromEnv(
-        "QTR_FC_CARRY_CONFIDENCE_BOOST_REGIME_WINDOW_SETTLEMENTS",
-        cfg_.carry_confidence_boost_regime_window_settlements);
-    OverrideSizeTFromEnv(
-        "QTR_FC_CARRY_CONFIDENCE_BOOST_REGIME_MIN_SAMPLES",
-        cfg_.carry_confidence_boost_regime_min_samples);
-    OverrideDoubleFromEnv(
-        "QTR_FC_CARRY_CONFIDENCE_BOOST_REGIME_NEG_SHARE_WEIGHT",
-        cfg_.carry_confidence_boost_regime_negative_share_weight);
-    OverrideDoubleFromEnv(
-        "QTR_FC_CARRY_CONFIDENCE_BOOST_REGIME_FLOOR_SCALE",
-        cfg_.carry_confidence_boost_regime_floor_scale);
-    OverrideDoubleFromEnv("QTR_FC_CARRY_SIZE_COST_RATE_PER_LEG", cfg_.carry_size_cost_rate_per_leg);
-    OverrideDoubleFromEnv("QTR_FC_CARRY_SIZE_EXPECTED_HOLD_SETTLEMENTS", cfg_.carry_size_expected_hold_settlements);
-    OverrideDoubleFromEnv("QTR_FC_CARRY_SIZE_MIN_GAIN_TO_COST", cfg_.carry_size_min_gain_to_cost);
     // Backward compatibility bridge:
     // If caller still uses the legacy fixed threshold only, map it to low/high anchors.
     if (cfg_.carry_size_min_gain_to_cost_low_confidence == 1.0 &&
@@ -292,26 +175,6 @@ SimpleRiskEngine::SimpleRiskEngine(Config cfg)
         cfg_.carry_size_min_gain_to_cost_low_confidence = cfg_.carry_size_min_gain_to_cost;
         cfg_.carry_size_min_gain_to_cost_high_confidence = cfg_.carry_size_min_gain_to_cost;
     }
-    OverrideDoubleFromEnv(
-        "QTR_FC_CARRY_SIZE_MIN_GAIN_TO_COST_LOW_CONF",
-        cfg_.carry_size_min_gain_to_cost_low_confidence);
-    OverrideDoubleFromEnv(
-        "QTR_FC_CARRY_SIZE_MIN_GAIN_TO_COST_HIGH_CONF",
-        cfg_.carry_size_min_gain_to_cost_high_confidence);
-    OverrideDoubleFromEnv(
-        "QTR_FC_CARRY_SIZE_GAIN_TO_COST_CONF_POWER",
-        cfg_.carry_size_gain_to_cost_confidence_power);
-    OverrideDoubleFromEnv("QTR_FC_DUAL_LEDGER_AUTO_NOTIONAL_RATIO", cfg_.dual_ledger_auto_notional_ratio);
-    OverrideBoolFromEnv("QTR_FC_CARRY_ALLOCATOR_LEVERAGE_MODEL_ENABLE", cfg_.carry_allocator_leverage_model_enabled);
-    OverrideDoubleFromEnv("QTR_FC_CARRY_ALLOCATOR_SPOT_CASH_PER_NOTIONAL", cfg_.carry_allocator_spot_cash_per_notional);
-    OverrideDoubleFromEnv("QTR_FC_CARRY_ALLOCATOR_PERP_MARGIN_BUFFER_RATIO", cfg_.carry_allocator_perp_margin_buffer_ratio);
-    OverrideDoubleFromEnv("QTR_FC_CARRY_ALLOCATOR_PERP_LEVERAGE", cfg_.carry_allocator_perp_leverage);
-    OverrideDoubleFromEnv("QTR_FC_DUAL_LEDGER_AUTO_NOTIONAL_EMA_ALPHA", cfg_.dual_ledger_auto_notional_ema_alpha);
-    OverrideDoubleFromEnv("QTR_FC_DUAL_LEDGER_SPOT_AVAILABLE_USAGE", cfg_.dual_ledger_spot_available_usage);
-    OverrideDoubleFromEnv("QTR_FC_DUAL_LEDGER_PERP_AVAILABLE_USAGE", cfg_.dual_ledger_perp_available_usage);
-    OverrideDoubleFromEnv("QTR_FC_PERP_LIQ_BUFFER_FLOOR_RATIO", cfg_.perp_liq_buffer_floor_ratio);
-    OverrideDoubleFromEnv("QTR_FC_PERP_LIQ_BUFFER_CEILING_RATIO", cfg_.perp_liq_buffer_ceiling_ratio);
-    OverrideDoubleFromEnv("QTR_FC_PERP_LIQ_MIN_NOTIONAL_SCALE", cfg_.perp_liq_min_notional_scale);
     cfg_.carry_confidence_min_scale = Clamp01(cfg_.carry_confidence_min_scale);
     cfg_.carry_confidence_max_scale = ClampPositive(cfg_.carry_confidence_max_scale, 1.0);
     if (cfg_.carry_confidence_max_scale < cfg_.carry_confidence_min_scale) {

@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstdlib>
 #include <cstdint>
 #include <string>
 #include <unordered_map>
@@ -10,57 +9,6 @@
 
 namespace QTrading::Execution {
 namespace {
-
-void OverrideDoubleFromEnv(const char* name, double& value)
-{
-    const char* raw = std::getenv(name);
-    if (!raw || !*raw) {
-        return;
-    }
-    try {
-        value = std::stod(raw);
-    }
-    catch (...) {
-        // Ignore malformed env values and keep code-level defaults.
-    }
-}
-
-void OverrideUint64FromEnv(const char* name, uint64_t& value)
-{
-    const char* raw = std::getenv(name);
-    if (!raw || !*raw) {
-        return;
-    }
-    try {
-        value = static_cast<uint64_t>(std::stoull(raw));
-    }
-    catch (...) {
-        // Ignore malformed env values and keep code-level defaults.
-    }
-}
-
-void OverrideBoolFromEnv(const char* name, bool& value)
-{
-    const char* raw = std::getenv(name);
-    if (!raw || !*raw) {
-        return;
-    }
-    const std::string token(raw);
-    if (token == "1" || token == "true" || token == "TRUE" || token == "True") {
-        value = true;
-        return;
-    }
-    if (token == "0" || token == "false" || token == "FALSE" || token == "False") {
-        value = false;
-        return;
-    }
-    try {
-        value = (std::stoll(token) != 0);
-    }
-    catch (...) {
-        // Ignore malformed env values and keep code-level defaults.
-    }
-}
 
 double ClampPositive(double value, double fallback)
 {
@@ -116,44 +64,6 @@ MarketExecutionEngine::MarketExecutionEngine(
     Config cfg)
     : exchange_(std::move(exchange)), cfg_(cfg)
 {
-    // Optional env overrides for carry sweeps.
-    OverrideDoubleFromEnv("QTR_FC_MIN_NOTIONAL", cfg_.min_notional);
-    OverrideDoubleFromEnv("QTR_FC_CARRY_MIN_REBALANCE_NOTIONAL", carry_min_rebalance_notional_);
-    OverrideUint64FromEnv("QTR_FC_CARRY_REBALANCE_COOLDOWN_MS", cfg_.carry_rebalance_cooldown_ms);
-    OverrideDoubleFromEnv("QTR_FC_CARRY_MAX_REBALANCE_STEP_RATIO", cfg_.carry_max_rebalance_step_ratio);
-    OverrideDoubleFromEnv("QTR_FC_CARRY_LARGE_NOTIONAL_STEP_RATIO", cfg_.carry_large_notional_step_ratio);
-    OverrideDoubleFromEnv("QTR_FC_CARRY_LARGE_NOTIONAL_THRESHOLD", cfg_.carry_large_notional_threshold);
-    OverrideUint64FromEnv("QTR_FC_CARRY_LARGE_NOTIONAL_COOLDOWN_MS", cfg_.carry_large_notional_cooldown_ms);
-    OverrideDoubleFromEnv("QTR_FC_CARRY_MAX_PARTICIPATION_RATE", cfg_.carry_max_participation_rate);
-    OverrideBoolFromEnv("QTR_FC_CARRY_WINDOW_BUDGET_ENABLE", cfg_.carry_window_budget_enabled);
-    OverrideUint64FromEnv("QTR_FC_CARRY_WINDOW_BUDGET_MS", cfg_.carry_window_budget_ms);
-    OverrideDoubleFromEnv(
-        "QTR_FC_CARRY_WINDOW_BUDGET_PARTICIPATION_RATE",
-        cfg_.carry_window_budget_participation_rate);
-    OverrideDoubleFromEnv("QTR_FC_CARRY_BOOTSTRAP_GAP_RATIO", cfg_.carry_bootstrap_gap_ratio);
-    OverrideDoubleFromEnv("QTR_FC_CARRY_BOOTSTRAP_STEP_RATIO", cfg_.carry_bootstrap_step_ratio);
-    OverrideDoubleFromEnv("QTR_FC_CARRY_BOOTSTRAP_PARTICIPATION_RATE", cfg_.carry_bootstrap_participation_rate);
-    OverrideUint64FromEnv("QTR_FC_CARRY_BOOTSTRAP_COOLDOWN_MS", cfg_.carry_bootstrap_cooldown_ms);
-    OverrideDoubleFromEnv("QTR_FC_CARRY_MIN_REBALANCE_NOTIONAL_RATIO", cfg_.carry_min_rebalance_notional_ratio);
-    OverrideBoolFromEnv("QTR_FC_CARRY_CONFIDENCE_ADAPTIVE_ENABLE", cfg_.carry_confidence_adaptive_enabled);
-    OverrideDoubleFromEnv("QTR_FC_CARRY_CONFIDENCE_STEP_SCALE_MIN", cfg_.carry_confidence_step_scale_min);
-    OverrideDoubleFromEnv("QTR_FC_CARRY_CONFIDENCE_STEP_SCALE_MAX", cfg_.carry_confidence_step_scale_max);
-    OverrideDoubleFromEnv("QTR_FC_CARRY_CONFIDENCE_PART_SCALE_MIN", cfg_.carry_confidence_participation_scale_min);
-    OverrideDoubleFromEnv("QTR_FC_CARRY_CONFIDENCE_PART_SCALE_MAX", cfg_.carry_confidence_participation_scale_max);
-    OverrideDoubleFromEnv("QTR_FC_CARRY_CONFIDENCE_COOLDOWN_SCALE_MIN", cfg_.carry_confidence_cooldown_scale_min);
-    OverrideDoubleFromEnv("QTR_FC_CARRY_CONFIDENCE_COOLDOWN_SCALE_MAX", cfg_.carry_confidence_cooldown_scale_max);
-    OverrideBoolFromEnv("QTR_FC_CARRY_REQUIRE_TWO_SIDED_REBALANCE", cfg_.carry_require_two_sided_rebalance);
-    OverrideBoolFromEnv("QTR_FC_CARRY_BALANCE_TWO_SIDED_REBALANCE", cfg_.carry_balance_two_sided_rebalance);
-    OverrideBoolFromEnv("QTR_FC_CARRY_MAKER_FIRST_ENABLE", cfg_.carry_maker_first_enabled);
-    OverrideDoubleFromEnv("QTR_FC_CARRY_MAKER_LIMIT_OFFSET_BPS", cfg_.carry_maker_limit_offset_bps);
-    OverrideDoubleFromEnv("QTR_FC_CARRY_MAKER_CATCHUP_GAP_RATIO", cfg_.carry_maker_catchup_gap_ratio);
-    OverrideBoolFromEnv("QTR_FC_CARRY_TARGET_ANCHOR_ENABLE", cfg_.carry_target_anchor_enabled);
-    OverrideDoubleFromEnv("QTR_FC_CARRY_TARGET_ANCHOR_UPDATE_RATIO", cfg_.carry_target_anchor_update_ratio);
-    {
-        uint64_t per_day = static_cast<uint64_t>(cfg_.carry_max_rebalances_per_day);
-        OverrideUint64FromEnv("QTR_FC_CARRY_MAX_REBALANCES_PER_DAY", per_day);
-        cfg_.carry_max_rebalances_per_day = static_cast<uint32_t>(per_day);
-    }
     cfg_.min_notional = ClampPositive(cfg_.min_notional, 5.0);
     carry_min_rebalance_notional_ = ClampPositive(carry_min_rebalance_notional_, cfg_.min_notional);
     cfg_.carry_max_rebalance_step_ratio = Clamp01(cfg_.carry_max_rebalance_step_ratio);

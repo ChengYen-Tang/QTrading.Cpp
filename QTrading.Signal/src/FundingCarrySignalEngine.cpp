@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstdlib>
 #include <deque>
 #include <optional>
 #include <string>
@@ -14,85 +13,6 @@ constexpr double kBasisToFundingScale = 0.25;
 constexpr double kFundingProxyEmaAlpha = 0.10;
 constexpr double kGateEpsilon = 1e-12;
 constexpr double kDefaultFundingConfidenceScale = 0.00005;
-
-void OverrideDoubleFromEnv(const char* name, double& value)
-{
-    const char* raw = std::getenv(name);
-    if (!raw || !*raw) {
-        return;
-    }
-    try {
-        value = std::stod(raw);
-    }
-    catch (...) {
-        // Ignore malformed env values and keep code-level defaults.
-    }
-}
-
-void OverrideUint64FromEnv(const char* name, uint64_t& value)
-{
-    const char* raw = std::getenv(name);
-    if (!raw || !*raw) {
-        return;
-    }
-    try {
-        value = static_cast<uint64_t>(std::stoull(raw));
-    }
-    catch (...) {
-        // Ignore malformed env values and keep code-level defaults.
-    }
-}
-
-void OverrideUint32FromEnv(const char* name, uint32_t& value)
-{
-    const char* raw = std::getenv(name);
-    if (!raw || !*raw) {
-        return;
-    }
-    try {
-        value = static_cast<uint32_t>(std::stoul(raw));
-    }
-    catch (...) {
-        // Ignore malformed env values and keep code-level defaults.
-    }
-}
-
-void OverrideSizeTFromEnv(const char* name, std::size_t& value)
-{
-    const char* raw = std::getenv(name);
-    if (!raw || !*raw) {
-        return;
-    }
-    try {
-        value = static_cast<std::size_t>(std::stoull(raw));
-    }
-    catch (...) {
-        // Ignore malformed env values and keep code-level defaults.
-    }
-}
-
-void OverrideBoolFromEnv(const char* name, bool& value)
-{
-    const char* raw = std::getenv(name);
-    if (!raw || !*raw) {
-        return;
-    }
-    const std::string token(raw);
-    if (token == "1" || token == "true" || token == "TRUE" || token == "True") {
-        value = true;
-        return;
-    }
-    if (token == "0" || token == "false" || token == "FALSE" || token == "False") {
-        value = false;
-        return;
-    }
-    try {
-        value = (std::stoll(token) != 0);
-    }
-    catch (...) {
-        // Ignore malformed env values and keep code-level defaults.
-    }
-}
 
 double Clamp01(double value)
 {
@@ -183,19 +103,7 @@ std::optional<double> QuantileFromDeque(const std::deque<double>& values, double
 
 double FundingConfidenceScale()
 {
-    static const double value = [] {
-        double scale = kDefaultFundingConfidenceScale;
-        const char* raw = std::getenv("QTR_FC_CONFIDENCE_FUNDING_SCALE");
-        if (raw && *raw) {
-            try {
-                scale = std::abs(std::stod(raw));
-            }
-            catch (...) {
-                // Ignore malformed env values and keep default.
-            }
-        }
-        return std::max(scale, kGateEpsilon);
-    }();
+    static const double value = std::max(kDefaultFundingConfidenceScale, kGateEpsilon);
     return value;
 }
 
@@ -296,117 +204,6 @@ std::size_t TrailingNegativeRun(const std::deque<int>& signs)
 FundingCarrySignalEngine::FundingCarrySignalEngine(Config cfg)
     : cfg_(std::move(cfg))
 {
-    // Optional env overrides so research sweeps can tune behavior without editing service wiring.
-    OverrideDoubleFromEnv("QTR_FC_ENTRY_MIN_FUNDING_RATE", cfg_.entry_min_funding_rate);
-    OverrideDoubleFromEnv("QTR_FC_EXIT_MIN_FUNDING_RATE", cfg_.exit_min_funding_rate);
-    OverrideDoubleFromEnv("QTR_FC_HARD_NEGATIVE_FUNDING_RATE", cfg_.hard_negative_funding_rate);
-    OverrideUint32FromEnv(
-        "QTR_FC_HARD_NEGATIVE_PERSISTENCE_SETTLEMENTS",
-        cfg_.hard_negative_persistence_settlements);
-    OverrideDoubleFromEnv("QTR_FC_ENTRY_MAX_BASIS_PCT", cfg_.entry_max_basis_pct);
-    OverrideDoubleFromEnv("QTR_FC_EXIT_MAX_BASIS_PCT", cfg_.exit_max_basis_pct);
-    OverrideUint64FromEnv("QTR_FC_COOLDOWN_MS", cfg_.cooldown_ms);
-    OverrideUint64FromEnv("QTR_FC_MIN_HOLD_MS", cfg_.min_hold_ms);
-    OverrideUint32FromEnv("QTR_FC_ENTRY_PERSISTENCE_SETTLEMENTS", cfg_.entry_persistence_settlements);
-    OverrideUint32FromEnv("QTR_FC_EXIT_PERSISTENCE_SETTLEMENTS", cfg_.exit_persistence_settlements);
-    OverrideBoolFromEnv("QTR_FC_LOCK_FUNDING_TO_SETTLEMENT", cfg_.lock_funding_to_settlement);
-    OverrideUint64FromEnv("QTR_FC_OBSERVED_FUNDING_MAX_AGE_MS", cfg_.observed_funding_max_age_ms);
-    OverrideBoolFromEnv("QTR_FC_FUNDING_NOWCAST_ENABLE", cfg_.funding_nowcast_enabled);
-    OverrideUint64FromEnv("QTR_FC_FUNDING_NOWCAST_INTERVAL_MS", cfg_.funding_nowcast_interval_ms);
-    OverrideBoolFromEnv("QTR_FC_FUNDING_NOWCAST_USE_FOR_GATES", cfg_.funding_nowcast_use_for_gates);
-    OverrideBoolFromEnv(
-        "QTR_FC_FUNDING_NOWCAST_USE_FOR_ENTRY_GATE",
-        cfg_.funding_nowcast_use_for_entry_gate);
-    OverrideBoolFromEnv(
-        "QTR_FC_FUNDING_NOWCAST_USE_FOR_EXIT_GATE",
-        cfg_.funding_nowcast_use_for_exit_gate);
-    OverrideBoolFromEnv(
-        "QTR_FC_FUNDING_NOWCAST_USE_FOR_CONFIDENCE",
-        cfg_.funding_nowcast_use_for_confidence);
-    OverrideUint64FromEnv(
-        "QTR_FC_FUNDING_NOWCAST_GATE_SAMPLE_MS",
-        cfg_.funding_nowcast_gate_sample_ms);
-    OverrideBoolFromEnv(
-        "QTR_FC_PRE_SETTLEMENT_NEG_EXIT_ENABLE",
-        cfg_.pre_settlement_negative_exit_enabled);
-    OverrideDoubleFromEnv(
-        "QTR_FC_PRE_SETTLEMENT_NEG_EXIT_THRESHOLD",
-        cfg_.pre_settlement_negative_exit_threshold);
-    OverrideUint64FromEnv(
-        "QTR_FC_PRE_SETTLEMENT_NEG_EXIT_LOOKAHEAD_MS",
-        cfg_.pre_settlement_negative_exit_lookahead_ms);
-    OverrideUint64FromEnv(
-        "QTR_FC_PRE_SETTLEMENT_NEG_EXIT_REENTRY_BUFFER_MS",
-        cfg_.pre_settlement_negative_exit_reentry_buffer_ms);
-    OverrideBoolFromEnv(
-        "QTR_FC_PRE_SETTLEMENT_NEG_EXIT_REQUIRE_FUNDING_GATE",
-        cfg_.pre_settlement_negative_exit_require_funding_gate);
-    OverrideBoolFromEnv("QTR_FC_ADAPTIVE_GATE_ENABLE", cfg_.adaptive_gate_enabled);
-    OverrideSizeTFromEnv("QTR_FC_ADAPTIVE_FUNDING_WINDOW_SETTLEMENTS", cfg_.adaptive_funding_window_settlements);
-    OverrideSizeTFromEnv("QTR_FC_ADAPTIVE_FUNDING_MIN_SAMPLES", cfg_.adaptive_funding_min_samples);
-    OverrideDoubleFromEnv("QTR_FC_ADAPTIVE_FUNDING_ENTRY_QUANTILE", cfg_.adaptive_funding_entry_quantile);
-    OverrideDoubleFromEnv("QTR_FC_ADAPTIVE_FUNDING_EXIT_QUANTILE", cfg_.adaptive_funding_exit_quantile);
-    OverrideSizeTFromEnv("QTR_FC_ADAPTIVE_BASIS_WINDOW_BARS", cfg_.adaptive_basis_window_bars);
-    OverrideSizeTFromEnv("QTR_FC_ADAPTIVE_BASIS_MIN_SAMPLES", cfg_.adaptive_basis_min_samples);
-    OverrideDoubleFromEnv("QTR_FC_ADAPTIVE_BASIS_ENTRY_QUANTILE", cfg_.adaptive_basis_entry_quantile);
-    OverrideDoubleFromEnv("QTR_FC_ADAPTIVE_BASIS_EXIT_QUANTILE", cfg_.adaptive_basis_exit_quantile);
-    OverrideDoubleFromEnv("QTR_FC_ADAPTIVE_BASIS_FLOOR_PCT", cfg_.adaptive_basis_floor_pct);
-    OverrideUint64FromEnv("QTR_FC_ADAPTIVE_BASIS_REFRESH_MS", cfg_.adaptive_basis_refresh_ms);
-    OverrideBoolFromEnv("QTR_FC_ADAPTIVE_FUNDING_SOFT_GATE_ENABLE", cfg_.adaptive_funding_soft_gate_enabled);
-    OverrideDoubleFromEnv("QTR_FC_ADAPTIVE_FUNDING_ENTRY_FLOOR_RATE", cfg_.adaptive_funding_entry_floor_rate);
-    OverrideDoubleFromEnv("QTR_FC_ADAPTIVE_FUNDING_ENTRY_CAP_RATE", cfg_.adaptive_funding_entry_cap_rate);
-    OverrideDoubleFromEnv("QTR_FC_ADAPTIVE_FUNDING_EXIT_RATIO", cfg_.adaptive_funding_exit_ratio);
-    OverrideUint32FromEnv("QTR_FC_INACTIVITY_WATCHDOG_SETTLEMENTS", cfg_.inactivity_watchdog_settlements);
-    OverrideDoubleFromEnv("QTR_FC_INACTIVITY_WATCHDOG_MIN_RATE", cfg_.inactivity_watchdog_min_rate);
-    OverrideDoubleFromEnv(
-        "QTR_FC_INACTIVITY_WATCHDOG_MIN_CONFIDENCE",
-        cfg_.inactivity_watchdog_min_confidence);
-    OverrideBoolFromEnv("QTR_FC_ADAPTIVE_REGIME_ENABLE", cfg_.adaptive_regime_enabled);
-    OverrideSizeTFromEnv("QTR_FC_ADAPTIVE_REGIME_MIN_SAMPLES", cfg_.adaptive_regime_min_samples);
-    OverrideSizeTFromEnv(
-        "QTR_FC_ADAPTIVE_REGIME_SIGN_WINDOW_SETTLEMENTS",
-        cfg_.adaptive_regime_sign_window_settlements);
-    OverrideDoubleFromEnv(
-        "QTR_FC_ADAPTIVE_REGIME_SIGN_PERSIST_HIGH",
-        cfg_.adaptive_regime_sign_persist_high);
-    OverrideDoubleFromEnv(
-        "QTR_FC_ADAPTIVE_REGIME_SIGN_PERSIST_LOW",
-        cfg_.adaptive_regime_sign_persist_low);
-    OverrideUint32FromEnv(
-        "QTR_FC_ADAPTIVE_REGIME_ENTRY_PERSISTENCE_LOW",
-        cfg_.adaptive_regime_entry_persistence_low);
-    OverrideUint32FromEnv(
-        "QTR_FC_ADAPTIVE_REGIME_ENTRY_PERSISTENCE_MID",
-        cfg_.adaptive_regime_entry_persistence_mid);
-    OverrideUint32FromEnv(
-        "QTR_FC_ADAPTIVE_REGIME_ENTRY_PERSISTENCE_HIGH",
-        cfg_.adaptive_regime_entry_persistence_high);
-    OverrideUint32FromEnv(
-        "QTR_FC_ADAPTIVE_REGIME_EXIT_PERSISTENCE_LOW",
-        cfg_.adaptive_regime_exit_persistence_low);
-    OverrideUint32FromEnv(
-        "QTR_FC_ADAPTIVE_REGIME_EXIT_PERSISTENCE_MID",
-        cfg_.adaptive_regime_exit_persistence_mid);
-    OverrideUint32FromEnv(
-        "QTR_FC_ADAPTIVE_REGIME_EXIT_PERSISTENCE_HIGH",
-        cfg_.adaptive_regime_exit_persistence_high);
-    OverrideBoolFromEnv("QTR_FC_ADAPTIVE_CONFIDENCE_ENABLE", cfg_.adaptive_confidence_enabled);
-    OverrideSizeTFromEnv("QTR_FC_ADAPTIVE_CONFIDENCE_MIN_SAMPLES", cfg_.adaptive_confidence_min_samples);
-    OverrideDoubleFromEnv("QTR_FC_ADAPTIVE_CONFIDENCE_LOW_QUANTILE", cfg_.adaptive_confidence_low_quantile);
-    OverrideDoubleFromEnv("QTR_FC_ADAPTIVE_CONFIDENCE_HIGH_QUANTILE", cfg_.adaptive_confidence_high_quantile);
-    OverrideDoubleFromEnv("QTR_FC_ADAPTIVE_CONFIDENCE_FLOOR", cfg_.adaptive_confidence_floor);
-    OverrideDoubleFromEnv("QTR_FC_ADAPTIVE_CONFIDENCE_CEILING", cfg_.adaptive_confidence_ceiling);
-    OverrideDoubleFromEnv("QTR_FC_ADAPTIVE_CONFIDENCE_EMA_ALPHA", cfg_.adaptive_confidence_ema_alpha);
-    OverrideDoubleFromEnv("QTR_FC_ADAPTIVE_CONFIDENCE_BUCKET_STEP", cfg_.adaptive_confidence_bucket_step);
-    OverrideBoolFromEnv("QTR_FC_ADAPTIVE_STRUCTURE_ENABLE", cfg_.adaptive_structure_enabled);
-    OverrideSizeTFromEnv("QTR_FC_ADAPTIVE_STRUCTURE_MIN_SAMPLES", cfg_.adaptive_structure_min_samples);
-    OverrideDoubleFromEnv("QTR_FC_ADAPTIVE_STRUCTURE_NEG_SHARE_WEIGHT", cfg_.adaptive_structure_neg_share_weight);
-    OverrideDoubleFromEnv("QTR_FC_ADAPTIVE_STRUCTURE_NEG_RUN_WEIGHT", cfg_.adaptive_structure_neg_run_weight);
-    OverrideDoubleFromEnv("QTR_FC_ADAPTIVE_STRUCTURE_NEG_RUN_NORM", cfg_.adaptive_structure_neg_run_norm);
-    OverrideDoubleFromEnv("QTR_FC_ADAPTIVE_STRUCTURE_FLOOR", cfg_.adaptive_structure_floor);
-    OverrideDoubleFromEnv("QTR_FC_ADAPTIVE_STRUCTURE_CEILING", cfg_.adaptive_structure_ceiling);
-    OverrideDoubleFromEnv("QTR_FC_ADAPTIVE_STRUCTURE_EMA_ALPHA", cfg_.adaptive_structure_ema_alpha);
-    OverrideDoubleFromEnv("QTR_FC_ADAPTIVE_STRUCTURE_BUCKET_STEP", cfg_.adaptive_structure_bucket_step);
     cfg_.entry_persistence_settlements = std::max(cfg_.entry_persistence_settlements, 1u);
     cfg_.exit_persistence_settlements = std::max(cfg_.exit_persistence_settlements, 1u);
     cfg_.hard_negative_persistence_settlements = std::max(cfg_.hard_negative_persistence_settlements, 1u);

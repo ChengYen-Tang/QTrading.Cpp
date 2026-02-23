@@ -2,64 +2,12 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstdlib>
 #include <limits>
 #include <string>
 #include <unordered_map>
 
 namespace QTrading::Execution {
 namespace {
-
-void OverrideDoubleFromEnv(const char* name, double& value)
-{
-    const char* raw = std::getenv(name);
-    if (!raw || !*raw) {
-        return;
-    }
-    try {
-        value = std::stod(raw);
-    }
-    catch (...) {
-        // Keep code default on malformed env value.
-    }
-}
-
-void OverrideBoolFromEnv(const char* name, bool& value)
-{
-    const char* raw = std::getenv(name);
-    if (!raw || !*raw) {
-        return;
-    }
-    const std::string token(raw);
-    if (token == "1" || token == "true" || token == "TRUE" || token == "True") {
-        value = true;
-        return;
-    }
-    if (token == "0" || token == "false" || token == "FALSE" || token == "False") {
-        value = false;
-        return;
-    }
-    try {
-        value = (std::stoll(token) != 0);
-    }
-    catch (...) {
-        // Keep code default on malformed env value.
-    }
-}
-
-void OverrideUint64FromEnv(const char* name, uint64_t& value)
-{
-    const char* raw = std::getenv(name);
-    if (!raw || !*raw) {
-        return;
-    }
-    try {
-        value = static_cast<uint64_t>(std::stoull(raw));
-    }
-    catch (...) {
-        // Keep code default on malformed env value.
-    }
-}
 
 double ClampNonNegative(double value)
 {
@@ -118,76 +66,6 @@ double QuoteVolumeFromId(
 LiquidityAwareExecutionScheduler::LiquidityAwareExecutionScheduler(Config cfg)
     : cfg_(cfg)
 {
-    OverrideBoolFromEnv(
-        "QTR_FC_EXEC_SCHED_ENABLE_DELTA_PART_CAP",
-        cfg_.carry_delta_participation_cap_enabled);
-    OverrideDoubleFromEnv(
-        "QTR_FC_EXEC_SCHED_DELTA_PART_RATE",
-        cfg_.carry_delta_participation_rate);
-    OverrideDoubleFromEnv(
-        "QTR_FC_EXEC_SCHED_MIN_SLICE_NOTIONAL",
-        cfg_.carry_min_slice_notional_usdt);
-    OverrideBoolFromEnv(
-        "QTR_FC_EXEC_SCHED_ONLY_LOW_URGENCY",
-        cfg_.carry_apply_only_low_urgency);
-    OverrideBoolFromEnv(
-        "QTR_FC_EXEC_SCHED_INCLUDE_OPEN_ORDERS",
-        cfg_.include_open_orders_in_current_notional);
-    OverrideBoolFromEnv(
-        "QTR_FC_EXEC_SCHED_CONF_ADAPT_ENABLE",
-        cfg_.carry_confidence_adaptive_enabled);
-    OverrideDoubleFromEnv(
-        "QTR_FC_EXEC_SCHED_CONF_RATE_SCALE_MIN",
-        cfg_.carry_confidence_rate_scale_min);
-    OverrideDoubleFromEnv(
-        "QTR_FC_EXEC_SCHED_CONF_RATE_SCALE_MAX",
-        cfg_.carry_confidence_rate_scale_max);
-    OverrideBoolFromEnv(
-        "QTR_FC_EXEC_SCHED_GAP_ADAPT_ENABLE",
-        cfg_.carry_gap_adaptive_enabled);
-    OverrideDoubleFromEnv(
-        "QTR_FC_EXEC_SCHED_GAP_REFERENCE_RATIO",
-        cfg_.carry_gap_reference_ratio);
-    OverrideDoubleFromEnv(
-        "QTR_FC_EXEC_SCHED_GAP_RATE_SCALE_MIN",
-        cfg_.carry_gap_rate_scale_min);
-    OverrideDoubleFromEnv(
-        "QTR_FC_EXEC_SCHED_GAP_RATE_SCALE_MAX",
-        cfg_.carry_gap_rate_scale_max);
-    OverrideBoolFromEnv(
-        "QTR_FC_EXEC_SCHED_WINDOW_BUDGET_ENABLE",
-        cfg_.carry_window_budget_enabled);
-    OverrideUint64FromEnv(
-        "QTR_FC_EXEC_SCHED_WINDOW_BUDGET_MS",
-        cfg_.carry_window_budget_ms);
-    OverrideDoubleFromEnv(
-        "QTR_FC_EXEC_SCHED_WINDOW_BUDGET_PART_RATE",
-        cfg_.carry_window_quote_participation_rate);
-    OverrideDoubleFromEnv(
-        "QTR_FC_EXEC_SCHED_WINDOW_BUDGET_MAX_NOTIONAL",
-        cfg_.carry_window_max_notional_usdt);
-    OverrideBoolFromEnv(
-        "QTR_FC_EXEC_SCHED_WINDOW_BUDGET_CONF_ADAPT_ENABLE",
-        cfg_.carry_window_confidence_adaptive_enabled);
-    OverrideDoubleFromEnv(
-        "QTR_FC_EXEC_SCHED_WINDOW_BUDGET_CONF_SCALE_MIN",
-        cfg_.carry_window_confidence_scale_min);
-    OverrideDoubleFromEnv(
-        "QTR_FC_EXEC_SCHED_WINDOW_BUDGET_CONF_SCALE_MAX",
-        cfg_.carry_window_confidence_scale_max);
-    OverrideBoolFromEnv(
-        "QTR_FC_EXEC_SCHED_INCREASE_BATCH_ENABLE",
-        cfg_.carry_increase_batching_enabled);
-    OverrideUint64FromEnv(
-        "QTR_FC_EXEC_SCHED_INCREASE_BATCH_MS",
-        cfg_.carry_increase_batch_ms);
-    OverrideDoubleFromEnv(
-        "QTR_FC_EXEC_SCHED_INCREASE_BATCH_MIN_UPDATE_NOTIONAL",
-        cfg_.carry_increase_batch_min_update_notional);
-    OverrideDoubleFromEnv(
-        "QTR_FC_EXEC_SCHED_INCREASE_BATCH_MIN_UPDATE_RATIO",
-        cfg_.carry_increase_batch_min_update_ratio);
-
     cfg_.carry_delta_participation_rate =
         ClampNonNegative(cfg_.carry_delta_participation_rate);
     cfg_.carry_min_slice_notional_usdt =

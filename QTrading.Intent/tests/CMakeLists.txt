@@ -1,7 +1,6 @@
 find_package(GTest CONFIG REQUIRED)
 
 add_executable(QTrading.Intent.Tests
-  BasisIntentBuilderTests.cpp
   FundingCarryIntentBuilderTests.cpp
 )
 

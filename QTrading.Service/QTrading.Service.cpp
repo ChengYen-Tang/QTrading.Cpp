@@ -86,6 +86,11 @@ int main()
         strategy_params_builder << "strategy_profile=funding_carry_default"
                                 << ";initial_spot_cash=" << kInitialSpotCash
                                 << ";initial_perp_wallet=" << kInitialPerpWallet;
+        const std::filesystem::path strategy_config_path =
+            QTrading::Service::Helpers::ResolveRepoRelativePath(
+                std::filesystem::path(__FILE__),
+                R"(research/funding_carry/config/funding_carry_v1.json)");
+        strategy_params_builder << ";strategy_config=" << strategy_config_path.string();
         if (!sim_start_date.empty()) {
             strategy_params_builder << ";sim_start_date=" << sim_start_date;
         }
@@ -132,15 +137,27 @@ int main()
         std::cerr << "[Service] exchange constructed" << std::endl;
         std::cerr.flush();
 
+        QTrading::Signal::FundingCarrySignalEngine::Config signal_cfg;
+        QTrading::Intent::FundingCarryIntentBuilder::Config intent_cfg;
+        QTrading::Risk::SimpleRiskEngine::Config risk_cfg;
+        QTrading::Execution::MarketExecutionEngine::Config execution_cfg;
+        QTrading::Monitoring::SimpleMonitoring::Config monitoring_cfg;
+        QTrading::Service::Helpers::LoadFundingCarryConfig(
+            strategy_config_path,
+            signal_cfg,
+            intent_cfg,
+            risk_cfg,
+            execution_cfg,
+            monitoring_cfg);
+
         // @brief Assemble arbitrage pipeline (currently null implementations).
         QTrading::Universe::FixedUniverseSelector universe_selector;
-        QTrading::Signal::FundingCarrySignalEngine signal_engine({});
-        QTrading::Intent::FundingCarryIntentBuilder intent_builder({});
-        QTrading::Risk::SimpleRiskEngine::Config risk_cfg;
+        QTrading::Signal::FundingCarrySignalEngine signal_engine(signal_cfg);
+        QTrading::Intent::FundingCarryIntentBuilder intent_builder(intent_cfg);
         risk_cfg.instrument_types = instrument_types;
         QTrading::Risk::SimpleRiskEngine risk_engine(risk_cfg);
-        QTrading::Execution::MarketExecutionEngine execution_engine(exchange, {});
-        QTrading::Monitoring::SimpleMonitoring monitoring({});
+        QTrading::Execution::MarketExecutionEngine execution_engine(exchange, execution_cfg);
+        QTrading::Monitoring::SimpleMonitoring monitoring(monitoring_cfg);
         auto strategy = std::make_shared<QTrading::Execution::FundingCarryStrategy>(
             exchange,
             universe_selector,
