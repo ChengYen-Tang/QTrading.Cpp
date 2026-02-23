@@ -1,13 +1,11 @@
 #pragma once
 
 #include "Dto/Market/Binance/MultiKline.hpp"
-#include "Execution/CarryPairImbalanceCoordinator.hpp"
 #include "Execution/FundingCarryExecutionOrchestrator.hpp"
 #include "Execution/FundingCarryExchangeGateway.hpp"
 #include "Execution/IExecutionEngine.hpp"
 #include "Execution/IExecutionPolicy.hpp"
 #include "Execution/IExecutionScheduler.hpp"
-#include "Execution/IPairCoordinator.hpp"
 #include "Execution/LiquidityAwareExecutionScheduler.hpp"
 #include "Intent/FundingCarryIntentBuilder.hpp"
 #include "Monitoring/SimpleMonitoring.hpp"
@@ -53,7 +51,6 @@ private:
     QTrading::Monitoring::SimpleMonitoring& monitoring_;
     QTrading::Execution::LiquidityAwareExecutionScheduler execution_scheduler_;
     QTrading::Execution::TargetNotionalExecutionPolicy execution_policy_;
-    QTrading::Execution::CarryPairImbalanceCoordinator pair_coordinator_;
     QTrading::Execution::FundingCarryExecutionOrchestrator execution_orchestrator_;
     QTrading::Execution::FundingCarryExchangeGateway exchange_gateway_;
 };

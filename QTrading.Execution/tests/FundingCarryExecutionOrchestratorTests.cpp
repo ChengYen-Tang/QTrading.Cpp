@@ -3,7 +3,6 @@
 #include <gtest/gtest.h>
 
 #include <memory>
-#include <optional>
 #include <vector>
 
 using MarketPtr = std::shared_ptr<QTrading::Dto::Market::Binance::MultiKlineDto>;
@@ -68,24 +67,6 @@ public:
     QTrading::Risk::RiskTarget forced_target{};
 };
 
-class RecordingCoordinator final : public QTrading::Execution::IPairCoordinator {
-public:
-    std::vector<QTrading::Execution::ExecutionOrder> Coordinate(
-        std::vector<QTrading::Execution::ExecutionOrder> orders,
-        const QTrading::Signal::SignalDecision&,
-        const MarketPtr&) override
-    {
-        observed_orders = orders;
-        if (override_orders.has_value()) {
-            return *override_orders;
-        }
-        return orders;
-    }
-
-    std::vector<QTrading::Execution::ExecutionOrder> observed_orders{};
-    std::optional<std::vector<QTrading::Execution::ExecutionOrder>> override_orders{};
-};
-
 } // namespace
 
 TEST(FundingCarryExecutionOrchestratorTests, BuildParentOrdersUsesRiskTargetAndDefaultLeverage)
@@ -119,12 +100,11 @@ TEST(FundingCarryExecutionOrchestratorTests, BuildParentOrdersUsesRiskTargetAndD
     EXPECT_TRUE(seen_perp);
 }
 
-TEST(FundingCarryExecutionOrchestratorTests, ExecuteUsesSchedulerPolicyEngineAndCoordinator)
+TEST(FundingCarryExecutionOrchestratorTests, ExecuteUsesSchedulerPolicyAndEngine)
 {
     RecordingExecutionEngine engine;
     StaticSliceScheduler scheduler;
     RecordingPolicy policy;
-    RecordingCoordinator coordinator;
 
     scheduler.forced_slices = {
         QTrading::Execution::ExecutionSlice{
@@ -147,15 +127,10 @@ TEST(FundingCarryExecutionOrchestratorTests, ExecuteUsesSchedulerPolicyEngineAnd
     raw_order.qty = 0.05;
     engine.emitted_orders = { raw_order };
 
-    QTrading::Execution::ExecutionOrder coordinated_order = raw_order;
-    coordinated_order.qty = 0.04;
-    coordinator.override_orders = std::vector<QTrading::Execution::ExecutionOrder>{ coordinated_order };
-
     QTrading::Execution::FundingCarryExecutionOrchestrator orchestrator(
         engine,
         scheduler,
-        policy,
-        coordinator);
+        policy);
 
     QTrading::Risk::RiskTarget strategy_target;
     strategy_target.ts_ms = 10;
@@ -174,8 +149,7 @@ TEST(FundingCarryExecutionOrchestratorTests, ExecuteUsesSchedulerPolicyEngineAnd
     ASSERT_EQ(engine.plan_calls, 1);
     ASSERT_EQ(policy.observed_slices.size(), 1u);
     ASSERT_EQ(scheduler.observed_parent_orders.size(), 2u);
-    ASSERT_EQ(coordinator.observed_orders.size(), 1u);
     ASSERT_EQ(result.size(), 1u);
-    EXPECT_NEAR(result[0].qty, 0.04, 1e-12);
+    EXPECT_NEAR(result[0].qty, 0.05, 1e-12);
     EXPECT_DOUBLE_EQ(engine.last_target.target_positions["BTCUSDT_PERP"], -500.0);
 }

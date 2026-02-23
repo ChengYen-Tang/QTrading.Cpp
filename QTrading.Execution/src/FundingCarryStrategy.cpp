@@ -22,12 +22,10 @@ FundingCarryStrategy::FundingCarryStrategy(
     , monitoring_(monitoring)
     , execution_scheduler_()
     , execution_policy_()
-    , pair_coordinator_()
     , execution_orchestrator_(
         execution_engine_,
         execution_scheduler_,
-        execution_policy_,
-        pair_coordinator_)
+        execution_policy_)
     , exchange_gateway_(exchange_, std::move(instrument_types))
 {
 }

@@ -1,7 +1,6 @@
 project(QTrading.Execution LANGUAGES CXX)
 
 add_library(QTrading.Execution.Library
-  src/CarryPairImbalanceCoordinator.cpp
   src/ExecutionModule.cpp
   src/FundingCarryExecutionOrchestrator.cpp
   src/FundingCarryExchangeGateway.cpp

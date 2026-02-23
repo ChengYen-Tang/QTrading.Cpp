@@ -1,18 +1,14 @@
 #include "Execution/FundingCarryExecutionOrchestrator.hpp"
 
-#include <utility>
-
 namespace QTrading::Execution {
 
 FundingCarryExecutionOrchestrator::FundingCarryExecutionOrchestrator(
     IExecutionEngine<MarketPtr>& execution_engine,
     IExecutionScheduler& scheduler,
-    IExecutionPolicy& policy,
-    IPairCoordinator& pair_coordinator)
+    IExecutionPolicy& policy)
     : execution_engine_(execution_engine)
     , scheduler_(scheduler)
     , policy_(policy)
-    , pair_coordinator_(pair_coordinator)
 {
 }
 
@@ -29,8 +25,7 @@ std::vector<ExecutionOrder> FundingCarryExecutionOrchestrator::Execute(
     const auto parent_orders = BuildParentOrders(strategy_target);
     const auto slices = scheduler_.BuildSlices(parent_orders, account, signal, market);
     const auto execution_target = policy_.BuildExecutionTarget(slices, strategy_target);
-    auto planned_orders = execution_engine_.plan(execution_target, signal, market);
-    return pair_coordinator_.Coordinate(std::move(planned_orders), signal, market);
+    return execution_engine_.plan(execution_target, signal, market);
 }
 
 std::vector<ExecutionParentOrder> FundingCarryExecutionOrchestrator::BuildParentOrders(
