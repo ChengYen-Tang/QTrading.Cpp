@@ -14,7 +14,7 @@
 namespace QTrading::Execution {
 
 /// @brief Orchestrates parent-order workflow: parent -> scheduler -> policy -> engine.
-class FundingCarryExecutionOrchestrator final {
+class FundingCarryExecutionOrchestrator {
 public:
     using MarketPtr = std::shared_ptr<QTrading::Dto::Market::Binance::MultiKlineDto>;
 
@@ -23,7 +23,7 @@ public:
         IExecutionScheduler& scheduler,
         IExecutionPolicy& policy);
 
-    std::vector<ExecutionOrder> Execute(
+    virtual std::vector<ExecutionOrder> Execute(
         const QTrading::Risk::RiskTarget& strategy_target,
         const QTrading::Risk::AccountState& account,
         const QTrading::Signal::SignalDecision& signal,

@@ -25,7 +25,7 @@ namespace QTrading::Execution {
 
 /// @brief Funding-carry strategy entrypoint used by Service loop.
 /// Service drives exchange->step(), then waits strategy to consume that tick.
-class FundingCarryStrategy final {
+class FundingCarryStrategy {
 public:
     using MarketPtr = std::shared_ptr<QTrading::Dto::Market::Binance::MultiKlineDto>;
 
@@ -39,7 +39,7 @@ public:
         QTrading::Monitoring::SimpleMonitoring& monitoring,
         std::unordered_map<std::string, QTrading::Dto::Trading::InstrumentType> instrument_types);
 
-    void wait_for_done();
+    virtual void wait_for_done();
 
 private:
     std::shared_ptr<QTrading::Infra::Exchanges::BinanceSim::BinanceExchange> exchange_;

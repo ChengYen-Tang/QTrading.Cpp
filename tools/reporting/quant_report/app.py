@@ -796,6 +796,371 @@ def render_funding_event(data: ArrowData, position_data: ArrowData):
     st.dataframe(df.tail(100), use_container_width=True)
 
 
+def render_basis_event(market_data: ArrowData, funding_data: ArrowData):
+    market_df = market_data.df
+    if market_df is None or market_df.empty:
+        st.info("No MarketEvent data.")
+        return
+
+    market_df = _add_time_index(market_df, "ts")
+    if "datetime" not in market_df.columns:
+        st.info("MarketEvent has no usable timestamp column.")
+        return
+    if "symbol" not in market_df.columns or "close" not in market_df.columns:
+        st.info("MarketEvent must contain symbol and close columns.")
+        return
+
+    symbols = sorted(market_df["symbol"].dropna().unique())
+    perp_symbols = [s for s in symbols if isinstance(s, str) and s.endswith("_PERP")]
+    if not perp_symbols:
+        st.info("No *_PERP symbols found in MarketEvent.")
+        return
+
+    perp_symbol = st.selectbox("Perp Symbol", perp_symbols, key="basis_perp_symbol")
+    spot_symbol = perp_symbol.replace("_PERP", "_SPOT")
+
+    spot_df = market_df[market_df["symbol"] == spot_symbol][["datetime", "close"]].rename(
+        columns={"close": "spot_close"})
+    perp_df = market_df[market_df["symbol"] == perp_symbol][["datetime", "close"]].rename(
+        columns={"close": "perp_close"})
+    merged = pd.merge(spot_df, perp_df, on="datetime", how="inner").sort_values("datetime")
+    if merged.empty:
+        st.info(f"No overlapping spot/perp rows for {spot_symbol} and {perp_symbol}.")
+        return
+
+    merged = merged[(merged["spot_close"] > 0) & (merged["perp_close"] > 0)]
+    if merged.empty:
+        st.info("No valid spot/perp close rows after filtering non-positive prices.")
+        return
+
+    merged["basis_pct"] = (merged["perp_close"] - merged["spot_close"]) / merged["spot_close"]
+    merged["basis_bps"] = merged["basis_pct"] * 10000.0
+    merged["basis_abs_bps"] = merged["basis_bps"].abs()
+
+    cols = st.columns(5)
+    cols[0].metric("Basis Mean (bps)", f"{merged['basis_bps'].mean():,.2f}")
+    cols[1].metric("Basis Std (bps)", f"{merged['basis_bps'].std():,.2f}")
+    cols[2].metric("Basis p95 |bps|", f"{merged['basis_abs_bps'].quantile(0.95):,.2f}")
+    cols[3].metric("Basis p99 |bps|", f"{merged['basis_abs_bps'].quantile(0.99):,.2f}")
+    cols[4].metric("Observations", f"{len(merged):,}")
+
+    fig_line = px.line(merged, x="datetime", y="basis_bps", title=f"Basis Spread (bps): {perp_symbol} - {spot_symbol}")
+    st.plotly_chart(fig_line, use_container_width=True)
+
+    daily = merged.set_index("datetime")["basis_bps"].resample("1D").mean().dropna().reset_index()
+    if not daily.empty:
+        daily_fig = px.line(daily, x="datetime", y="basis_bps", title="Daily Mean Basis (bps)")
+        st.plotly_chart(daily_fig, use_container_width=True)
+
+    hist_fig = px.histogram(merged, x="basis_bps", nbins=120, title="Basis Distribution (bps)")
+    st.plotly_chart(hist_fig, use_container_width=True)
+
+    funding_df = funding_data.df
+    if funding_df is not None and not funding_df.empty and "funding" in funding_df.columns:
+        funding_df = _add_time_index(funding_df, "ts")
+        if "datetime" in funding_df.columns:
+            if "symbol" in funding_df.columns:
+                funding_df = funding_df[funding_df["symbol"] == perp_symbol]
+            funding_df = funding_df[["datetime", "funding"]].dropna()
+            if not funding_df.empty:
+                pair = pd.merge(
+                    merged[["datetime", "basis_bps"]],
+                    funding_df,
+                    on="datetime",
+                    how="inner",
+                )
+                if not pair.empty:
+                    corr = pair["basis_bps"].corr(pair["funding"])
+                    st.metric("Corr(Basis bps, Funding)", f"{corr:.4f}" if corr is not None else "n/a")
+                    sf = px.scatter(pair, x="basis_bps", y="funding", title="Basis vs Funding")
+                    st.plotly_chart(sf, use_container_width=True)
+
+    st.dataframe(merged.tail(100), use_container_width=True)
+
+
+def render_hedge_alignment(position_data: ArrowData):
+    pos_df = position_data.df
+    if pos_df is None or pos_df.empty:
+        st.info("No PositionEvent data.")
+        return
+
+    required = {"symbol", "notional", "is_long"}
+    if not required.issubset(pos_df.columns):
+        st.info("PositionEvent requires symbol/notional/is_long columns.")
+        return
+
+    pos_df = _add_time_index(pos_df, "ts")
+    if "datetime" not in pos_df.columns:
+        st.info("PositionEvent has no usable timestamp column.")
+        return
+
+    symbols = sorted(pos_df["symbol"].dropna().unique())
+    perp_symbols = [s for s in symbols if isinstance(s, str) and s.endswith("_PERP")]
+    if not perp_symbols:
+        st.info("No *_PERP symbols found in PositionEvent.")
+        return
+
+    perp_symbol = st.selectbox("Hedge Pair Perp Symbol", perp_symbols, key="hedge_perp_symbol")
+    spot_symbol = perp_symbol.replace("_PERP", "_SPOT")
+
+    pair_df = pos_df[pos_df["symbol"].isin([spot_symbol, perp_symbol])].copy()
+    if pair_df.empty:
+        st.info("No matching spot/perp positions for selected pair.")
+        return
+
+    pair_df["signed_notional"] = pair_df["notional"].astype(float) * pair_df["is_long"].map({True: 1.0, False: -1.0})
+    daily = pair_df.pivot_table(
+        index="datetime",
+        columns="symbol",
+        values="signed_notional",
+        aggfunc="last",
+    ).sort_index()
+    if spot_symbol not in daily.columns or perp_symbol not in daily.columns:
+        st.info("Cannot build hedge alignment series (missing one leg).")
+        return
+
+    daily = daily[[spot_symbol, perp_symbol]].dropna()
+    if daily.empty:
+        st.info("No overlapping hedge snapshots.")
+        return
+
+    daily = daily.rename(columns={spot_symbol: "spot_exposure", perp_symbol: "perp_exposure"})
+    daily["net_exposure"] = daily["spot_exposure"] + daily["perp_exposure"]
+    daily["gross_exposure"] = daily["spot_exposure"].abs() + daily["perp_exposure"].abs()
+    daily["alignment_ratio"] = daily.apply(
+        lambda r: (abs(r["net_exposure"]) / r["gross_exposure"]) if r["gross_exposure"] > 0 else None,
+        axis=1,
+    )
+
+    cols = st.columns(4)
+    cols[0].metric("Avg |Net Exposure|", f"{daily['net_exposure'].abs().mean():,.2f}")
+    cols[1].metric("Avg Gross Exposure", f"{daily['gross_exposure'].mean():,.2f}")
+    cols[2].metric("Avg Alignment Ratio", f"{daily['alignment_ratio'].mean():.2%}")
+    cols[3].metric("p95 Alignment Ratio", f"{daily['alignment_ratio'].quantile(0.95):.2%}")
+
+    align_fig = px.line(
+        daily.reset_index(),
+        x="datetime",
+        y=["spot_exposure", "perp_exposure", "net_exposure"],
+        title="Hedge Exposure Alignment",
+    )
+    st.plotly_chart(align_fig, use_container_width=True)
+
+    ratio_fig = px.line(
+        daily.reset_index(),
+        x="datetime",
+        y="alignment_ratio",
+        title="Alignment Ratio (|Net| / Gross)",
+    )
+    st.plotly_chart(ratio_fig, use_container_width=True)
+
+    st.dataframe(daily.tail(100).reset_index(), use_container_width=True)
+
+
+def render_basis_trade_quality(order_data: ArrowData, market_data: ArrowData):
+    orders = order_data.df
+    market_df = market_data.df
+    if orders is None or orders.empty:
+        st.info("No OrderEvent data.")
+        return
+    if market_df is None or market_df.empty:
+        st.info("No MarketEvent data.")
+        return
+
+    orders = _add_time_index(orders, "ts")
+    market_df = _add_time_index(market_df, "ts")
+    if "datetime" not in orders.columns or "datetime" not in market_df.columns:
+        st.info("OrderEvent/MarketEvent has no usable timestamp column.")
+        return
+    if "symbol" not in orders.columns or "symbol" not in market_df.columns or "close" not in market_df.columns:
+        st.info("OrderEvent/MarketEvent missing required columns.")
+        return
+
+    fills = orders.copy()
+    if "event_type" in fills.columns:
+        fills = fills[fills["event_type"] == 3]
+    if fills.empty:
+        st.info("No filled orders in OrderEvent.")
+        return
+
+    perp_symbols = sorted([s for s in fills["symbol"].dropna().unique() if isinstance(s, str) and s.endswith("_PERP")])
+    if not perp_symbols:
+        st.info("No *_PERP filled symbols in OrderEvent.")
+        return
+
+    perp_symbol = st.selectbox("Trade Quality Perp Symbol", perp_symbols, key="basis_tq_perp_symbol")
+    spot_symbol = perp_symbol.replace("_PERP", "_SPOT")
+    pair_fills = fills[fills["symbol"].isin([spot_symbol, perp_symbol])].copy()
+    if pair_fills.empty:
+        st.info("No filled spot/perp orders for selected pair.")
+        return
+
+    qty_col = _first_existing_col(pair_fills, ["exec_qty", "qty"])
+    px_col = _first_existing_col(pair_fills, ["exec_price", "price"])
+    if qty_col is None or px_col is None:
+        st.info("OrderEvent requires exec_qty/exec_price (or qty/price) for trade quality.")
+        return
+
+    pair_fills["fill_notional"] = pair_fills[qty_col].astype(float).abs() * pair_fills[px_col].astype(float).abs()
+    pair_fills = pair_fills.dropna(subset=["datetime", "fill_notional"])
+    if pair_fills.empty:
+        st.info("No valid fill rows after notional conversion.")
+        return
+
+    leg_stats = pair_fills.groupby("symbol")["fill_notional"].agg(["sum", "count"]).reset_index()
+    spot_sum = float(leg_stats.loc[leg_stats["symbol"] == spot_symbol, "sum"].sum()) if not leg_stats.empty else 0.0
+    perp_sum = float(leg_stats.loc[leg_stats["symbol"] == perp_symbol, "sum"].sum()) if not leg_stats.empty else 0.0
+    spot_cnt = int(leg_stats.loc[leg_stats["symbol"] == spot_symbol, "count"].sum()) if not leg_stats.empty else 0
+    perp_cnt = int(leg_stats.loc[leg_stats["symbol"] == perp_symbol, "count"].sum()) if not leg_stats.empty else 0
+    denom = max((spot_sum + perp_sum) * 0.5, 1e-9)
+    leg_gap_ratio = abs(spot_sum - perp_sum) / denom
+    cnt_balance = (min(spot_cnt, perp_cnt) / max(spot_cnt, perp_cnt)) if max(spot_cnt, perp_cnt) > 0 else 0.0
+
+    spot_px = market_df[market_df["symbol"] == spot_symbol][["datetime", "close"]].rename(columns={"close": "spot_close"})
+    perp_px = market_df[market_df["symbol"] == perp_symbol][["datetime", "close"]].rename(columns={"close": "perp_close"})
+    basis = pd.merge(spot_px, perp_px, on="datetime", how="inner").sort_values("datetime")
+    if not basis.empty:
+        basis = basis[(basis["spot_close"] > 0) & (basis["perp_close"] > 0)]
+        basis["basis_bps"] = (basis["perp_close"] - basis["spot_close"]) / basis["spot_close"] * 10000.0
+
+    cols = st.columns(6)
+    cols[0].metric("Spot Fill Notional", f"{spot_sum:,.2f}")
+    cols[1].metric("Perp Fill Notional", f"{perp_sum:,.2f}")
+    cols[2].metric("Leg Notional Gap", f"{leg_gap_ratio:.2%}")
+    cols[3].metric("Spot/Perp Fill Cnt", f"{spot_cnt:,}/{perp_cnt:,}")
+    cols[4].metric("Fill Count Balance", f"{cnt_balance:.2%}")
+    cols[5].metric("Total Pair Fill Notional", f"{pair_fills['fill_notional'].sum():,.2f}")
+
+    daily_notional = pair_fills.set_index("datetime").groupby("symbol")["fill_notional"].resample("1D").sum().reset_index()
+    if not daily_notional.empty:
+        fig_notional = px.line(
+            daily_notional,
+            x="datetime",
+            y="fill_notional",
+            color="symbol",
+            title="Daily Fill Notional by Leg",
+        )
+        st.plotly_chart(fig_notional, use_container_width=True)
+
+    if basis is not None and not basis.empty:
+        fill_ts = pair_fills[["datetime", "symbol", "fill_notional"]].sort_values("datetime")
+        basis_ref = basis[["datetime", "basis_bps"]].sort_values("datetime")
+        fill_with_basis = pd.merge_asof(
+            fill_ts,
+            basis_ref,
+            on="datetime",
+            direction="nearest",
+        ).dropna(subset=["basis_bps"])
+        if not fill_with_basis.empty:
+            cols2 = st.columns(3)
+            cols2[0].metric("Mean |Basis| @ Fill (bps)", f"{fill_with_basis['basis_bps'].abs().mean():,.2f}")
+            cols2[1].metric("p90 |Basis| @ Fill (bps)", f"{fill_with_basis['basis_bps'].abs().quantile(0.90):,.2f}")
+            cols2[2].metric("p95 |Basis| @ Fill (bps)", f"{fill_with_basis['basis_bps'].abs().quantile(0.95):,.2f}")
+
+            fill_basis_fig = px.scatter(
+                fill_with_basis,
+                x="datetime",
+                y="basis_bps",
+                color="symbol",
+                size="fill_notional",
+                title="Basis at Fill Time",
+            )
+            st.plotly_chart(fill_basis_fig, use_container_width=True)
+
+    # Execution friction proxy: compare fill price vs nearest market close at fill time.
+    market_ref = market_df[market_df["symbol"].isin([spot_symbol, perp_symbol])][
+        ["datetime", "symbol", "close"]
+    ].dropna(subset=["datetime", "close"]).sort_values(["symbol", "datetime"])
+    if not market_ref.empty:
+        fills_for_slip = pair_fills.copy()
+        fills_for_slip = fills_for_slip.dropna(subset=["datetime", px_col, "symbol"])
+        fills_for_slip = fills_for_slip.sort_values(["symbol", "datetime"])
+        merged_slip_parts = []
+        for sym in [spot_symbol, perp_symbol]:
+            m = market_ref[market_ref["symbol"] == sym][["datetime", "close"]].sort_values("datetime")
+            f = fills_for_slip[fills_for_slip["symbol"] == sym].copy()
+            if m.empty or f.empty:
+                continue
+            merged = pd.merge_asof(
+                f,
+                m,
+                on="datetime",
+                direction="nearest",
+            )
+            merged_slip_parts.append(merged)
+
+        if merged_slip_parts:
+            slip_df = pd.concat(merged_slip_parts, ignore_index=True)
+            slip_df = slip_df[(slip_df["close"] > 0) & slip_df[px_col].notna()]
+            if not slip_df.empty:
+                slip_df["slippage_bps"] = (
+                    (slip_df[px_col].astype(float) - slip_df["close"].astype(float))
+                    / slip_df["close"].astype(float)
+                    * 10000.0
+                )
+                slip_df["abs_slippage_bps"] = slip_df["slippage_bps"].abs()
+
+                st.subheader("Execution Friction (Proxy)")
+                c3 = st.columns(4)
+                c3[0].metric("Mean |Slippage| (bps)", f"{slip_df['abs_slippage_bps'].mean():,.2f}")
+                c3[1].metric("p90 |Slippage| (bps)", f"{slip_df['abs_slippage_bps'].quantile(0.90):,.2f}")
+                c3[2].metric("p95 |Slippage| (bps)", f"{slip_df['abs_slippage_bps'].quantile(0.95):,.2f}")
+                c3[3].metric("Median |Slippage| (bps)", f"{slip_df['abs_slippage_bps'].median():,.2f}")
+
+                slip_hist = px.histogram(
+                    slip_df,
+                    x="abs_slippage_bps",
+                    color="symbol",
+                    nbins=120,
+                    title="Absolute Slippage Distribution (bps)",
+                )
+                st.plotly_chart(slip_hist, use_container_width=True)
+
+                slip_ts = px.scatter(
+                    slip_df,
+                    x="datetime",
+                    y="slippage_bps",
+                    color="symbol",
+                    size="fill_notional",
+                    title="Signed Slippage Over Time (bps)",
+                )
+                st.plotly_chart(slip_ts, use_container_width=True)
+
+                hour_df = slip_df.copy()
+                hour_df["hour"] = hour_df["datetime"].dt.hour
+                hour_stats = (
+                    hour_df.groupby(["symbol", "hour"], dropna=False)["abs_slippage_bps"]
+                    .agg(["mean", "median", "count"])
+                    .reset_index()
+                )
+                if not hour_stats.empty:
+                    st.subheader("Slippage by Hour-of-Day")
+                    st.caption("Hour derived from fill timestamp (`datetime`).")
+
+                    heat = px.density_heatmap(
+                        hour_stats,
+                        x="hour",
+                        y="symbol",
+                        z="mean",
+                        histfunc="avg",
+                        color_continuous_scale="Viridis",
+                        title="Mean |Slippage| by Hour (bps)",
+                    )
+                    st.plotly_chart(heat, use_container_width=True)
+
+                    hour_line = px.line(
+                        hour_stats,
+                        x="hour",
+                        y="mean",
+                        color="symbol",
+                        markers=True,
+                        title="Mean |Slippage| by Hour (bps)",
+                    )
+                    st.plotly_chart(hour_line, use_container_width=True)
+
+    st.dataframe(pair_fills.tail(100), use_container_width=True)
+
+
 def render_performance(account_evt: ArrowData):
     df = account_evt.df
     if df is None or df.empty:
@@ -1272,14 +1637,12 @@ def main():
         "Overview",
         "Performance",
         "Trades",
-        "Funding",
-        "Rolling",
-        "Benchmark",
-        "Capacity",
+        "Basis",
+        "Hedge",
+        "Trade Quality",
         "AccountEvent",
         "OrderEvent",
         "PositionEvent",
-        "MarketEvent",
         "Files"
     ])
 
@@ -1301,40 +1664,32 @@ def main():
         )
 
     with tabs[3]:
-        render_funding_event(
+        render_basis_event(
+            arrow_data.get("MarketEvent.arrow", ArrowData("", "", 0, None)),
             arrow_data.get("FundingEvent.arrow", ArrowData("", "", 0, None)),
-            arrow_data.get("PositionEvent.arrow", ArrowData("", "", 0, None)),
         )
 
     with tabs[4]:
-        render_rolling_stats(arrow_data.get("AccountEvent.arrow", ArrowData("", "", 0, None)))
-
-    with tabs[5]:
-        render_benchmark_stats(
-            arrow_data.get("AccountEvent.arrow", ArrowData("", "", 0, None)),
-            arrow_data.get("MarketEvent.arrow", ArrowData("", "", 0, None)),
+        render_hedge_alignment(
+            arrow_data.get("PositionEvent.arrow", ArrowData("", "", 0, None)),
         )
 
-    with tabs[6]:
-        render_capacity_turnover(
-            arrow_data.get("AccountEvent.arrow", ArrowData("", "", 0, None)),
+    with tabs[5]:
+        render_basis_trade_quality(
             arrow_data.get("OrderEvent.arrow", ArrowData("", "", 0, None)),
             arrow_data.get("MarketEvent.arrow", ArrowData("", "", 0, None)),
         )
 
-    with tabs[7]:
+    with tabs[6]:
         render_account_event(arrow_data.get("AccountEvent.arrow", ArrowData("", "", 0, None)))
 
-    with tabs[8]:
+    with tabs[7]:
         render_order_event(arrow_data.get("OrderEvent.arrow", ArrowData("", "", 0, None)))
 
-    with tabs[9]:
+    with tabs[8]:
         render_position_event(arrow_data.get("PositionEvent.arrow", ArrowData("", "", 0, None)))
 
-    with tabs[10]:
-        render_market_event(arrow_data.get("MarketEvent.arrow", ArrowData("", "", 0, None)))
-
-    with tabs[11]:
+    with tabs[9]:
         rows = []
         for item in arrow_data.values():
             rows.append({
@@ -1344,6 +1699,29 @@ def main():
                 "path": item.path,
             })
         st.dataframe(pd.DataFrame(rows).sort_values("file"), use_container_width=True)
+
+    # Deprecated tabs kept in code for fallback / compatibility.
+    # with tabs[9]:
+    #     render_funding_event(
+    #         arrow_data.get("FundingEvent.arrow", ArrowData("", "", 0, None)),
+    #         arrow_data.get("PositionEvent.arrow", ArrowData("", "", 0, None)),
+    #     )
+    #
+    # with tabs[10]:
+    #     render_rolling_stats(arrow_data.get("AccountEvent.arrow", ArrowData("", "", 0, None)))
+    #
+    # with tabs[11]:
+    #     render_benchmark_stats(
+    #         arrow_data.get("AccountEvent.arrow", ArrowData("", "", 0, None)),
+    #         arrow_data.get("MarketEvent.arrow", ArrowData("", "", 0, None)),
+    #     )
+    #
+    # with tabs[12]:
+    #     render_capacity_turnover(
+    #         arrow_data.get("AccountEvent.arrow", ArrowData("", "", 0, None)),
+    #         arrow_data.get("OrderEvent.arrow", ArrowData("", "", 0, None)),
+    #         arrow_data.get("MarketEvent.arrow", ArrowData("", "", 0, None)),
+    #     )
 
 
 if __name__ == "__main__":

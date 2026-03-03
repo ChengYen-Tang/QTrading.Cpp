@@ -2,6 +2,7 @@ project(QTrading.Signal LANGUAGES CXX)
 
 add_library(QTrading.Signal.Library
   src/SignalModule.cpp
+  src/BasisArbitrageSignalEngine.cpp
   src/FundingCarrySignalEngine.cpp
 )
 

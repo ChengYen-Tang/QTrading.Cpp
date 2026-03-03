@@ -12,7 +12,7 @@
 namespace QTrading::Risk {
 
 /// @brief Basic risk engine using fixed notional and leverage caps.
-class SimpleRiskEngine final : public IRiskEngine<
+class SimpleRiskEngine : public IRiskEngine<
     std::shared_ptr<QTrading::Dto::Market::Binance::MultiKlineDto>> {
 public:
     struct Config {
@@ -160,7 +160,7 @@ public:
 
     explicit SimpleRiskEngine(Config cfg);
 
-    RiskTarget position(const QTrading::Intent::TradeIntent& intent,
+    virtual RiskTarget position(const QTrading::Intent::TradeIntent& intent,
         const AccountState& account,
         const std::shared_ptr<QTrading::Dto::Market::Binance::MultiKlineDto>& market) override;
 

@@ -17,7 +17,7 @@ namespace QTrading::Signal {
 /// 2) The signal validates market readiness (spot + perp data available).
 /// 3) Guardrails (funding/basis thresholds) prevent holding during unfavorable regimes.
 /// 4) Execution urgency stays low; funding is earned over time, not a single tick.
-class FundingCarrySignalEngine final : public ISignalEngine<
+class FundingCarrySignalEngine : public ISignalEngine<
     std::shared_ptr<QTrading::Dto::Market::Binance::MultiKlineDto>> {
 public:
     /// @brief Configuration for funding carry signal.
@@ -178,7 +178,7 @@ public:
     explicit FundingCarrySignalEngine(Config cfg);
 
     /// @brief Update signal based on latest market snapshot.
-    SignalDecision on_market(
+    virtual SignalDecision on_market(
         const std::shared_ptr<QTrading::Dto::Market::Binance::MultiKlineDto>& market) override;
 
 private:

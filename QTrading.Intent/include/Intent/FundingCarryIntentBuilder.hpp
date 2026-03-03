@@ -12,7 +12,7 @@ namespace QTrading::Intent {
 /// 1) Create a two-leg structure that is delta-neutral (spot + perp).
 /// 2) When receive_funding is true, favor the side that collects funding.
 /// 3) The intent describes structure only; sizing is handled by the risk engine.
-class FundingCarryIntentBuilder final : public IIntentBuilder<
+class FundingCarryIntentBuilder : public IIntentBuilder<
     std::shared_ptr<QTrading::Dto::Market::Binance::MultiKlineDto>> {
 public:
     /// @brief Configuration for funding carry intent.
@@ -24,7 +24,7 @@ public:
 
     explicit FundingCarryIntentBuilder(Config cfg);
 
-    TradeIntent build(const QTrading::Signal::SignalDecision& signal,
+    virtual TradeIntent build(const QTrading::Signal::SignalDecision& signal,
         const std::shared_ptr<QTrading::Dto::Market::Binance::MultiKlineDto>& market) override;
 
 private:
