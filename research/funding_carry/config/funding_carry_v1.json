@@ -1,0 +1,16 @@
+{
+  "signal": {},
+  "intent": {},
+  "risk": {
+    "carry_confidence_boost_enabled": true,
+    "carry_confidence_boost_reference": 0.56,
+    "carry_confidence_boost_max_scale": 0.18,
+    "carry_confidence_boost_power": 1.6
+  },
+  "execution": {
+    "carry_maker_first_enabled": true,
+    "carry_maker_limit_offset_bps": 1.0,
+    "carry_maker_catchup_gap_ratio": 0.55
+  },
+  "monitoring": {}
+}
