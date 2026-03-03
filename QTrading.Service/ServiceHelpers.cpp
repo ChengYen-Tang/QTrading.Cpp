@@ -1,0 +1,306 @@
+#include "ServiceHelpers.hpp"
+
+#include <rapidjson/document.h>
+
+#include <atomic>
+#include <csignal>
+#include <cstdlib>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <iterator>
+#include <stdexcept>
+#include <sstream>
+#include <type_traits>
+
+namespace QTrading::Service::Helpers {
+
+namespace {
+
+std::atomic<bool> g_stop_requested{ false };
+
+void HandleSignal(int)
+{
+    g_stop_requested.store(true, std::memory_order_relaxed);
+}
+
+const rapidjson::Value* FindObject(const rapidjson::Value& root, const char* key)
+{
+    if (!root.IsObject()) {
+        return nullptr;
+    }
+    const auto member = root.FindMember(key);
+    if (member == root.MemberEnd() || !member->value.IsObject()) {
+        return nullptr;
+    }
+    return &member->value;
+}
+
+void ApplyString(const rapidjson::Value* obj, const char* key, std::string& out)
+{
+    if (obj == nullptr) {
+        return;
+    }
+    const auto member = obj->FindMember(key);
+    if (member == obj->MemberEnd() || !member->value.IsString()) {
+        return;
+    }
+    out = member->value.GetString();
+}
+
+void ApplyBool(const rapidjson::Value* obj, const char* key, bool& out)
+{
+    if (obj == nullptr) {
+        return;
+    }
+    const auto member = obj->FindMember(key);
+    if (member == obj->MemberEnd() || !member->value.IsBool()) {
+        return;
+    }
+    out = member->value.GetBool();
+}
+
+template <typename T>
+void ApplyNumber(const rapidjson::Value* obj, const char* key, T& out)
+{
+    if (obj == nullptr) {
+        return;
+    }
+    const auto member = obj->FindMember(key);
+    if (member == obj->MemberEnd() || !member->value.IsNumber()) {
+        return;
+    }
+    if constexpr (std::is_same_v<T, double>) {
+        out = member->value.GetDouble();
+    }
+    else if constexpr (std::is_same_v<T, uint64_t>) {
+        out = static_cast<uint64_t>(member->value.GetUint64());
+    }
+    else if constexpr (std::is_same_v<T, uint32_t>) {
+        out = static_cast<uint32_t>(member->value.GetUint());
+    }
+    else if constexpr (std::is_same_v<T, std::size_t>) {
+        out = static_cast<std::size_t>(member->value.GetUint64());
+    }
+}
+
+} // namespace
+
+std::string JsonEscape(const std::string& input)
+{
+    std::string out;
+    out.reserve(input.size() + 8);
+    for (const char c : input) {
+        if (c == '\\') {
+            out += "\\\\";
+        }
+        else if (c == '"') {
+            out += "\\\"";
+        }
+        else {
+            out.push_back(c);
+        }
+    }
+    return out;
+}
+
+std::string Utf8Path(const char8_t* path)
+{
+    return std::string(reinterpret_cast<const char*>(path));
+}
+
+void SetEnvVar(const char* key, const std::string& value)
+{
+#ifdef _WIN32
+    _putenv_s(key, value.c_str());
+#else
+    setenv(key, value.c_str(), 1);
+#endif
+}
+
+void InstallSignalHandlers()
+{
+    std::signal(SIGINT, HandleSignal);
+    std::signal(SIGTERM, HandleSignal);
+}
+
+bool StopRequested()
+{
+    return g_stop_requested.load(std::memory_order_relaxed);
+}
+
+std::filesystem::path ResolveRepoRelativePath(
+    const std::filesystem::path& source_file_path,
+    const std::filesystem::path& repo_relative_path)
+{
+    return source_file_path.parent_path().parent_path() / repo_relative_path;
+}
+
+std::string InstrumentTypeToString(std::optional<QTrading::Dto::Trading::InstrumentType> type)
+{
+    if (!type.has_value()) {
+        return "auto";
+    }
+    switch (*type) {
+    case QTrading::Dto::Trading::InstrumentType::Spot:
+        return "spot";
+    case QTrading::Dto::Trading::InstrumentType::Perp:
+        return "perp";
+    default:
+        break;
+    }
+    return "unknown";
+}
+
+QTrading::Log::LoggerBootstrapConfig BuildLoggerBootstrapConfig(
+    const std::filesystem::path& logs_root,
+    const std::vector<QTrading::Infra::Exchanges::BinanceSim::BinanceExchange::SymbolDataset>& symbol_csv,
+    const std::string& strategy_name,
+    const std::string& strategy_version,
+    const std::string& strategy_params)
+{
+    std::vector<QTrading::Log::DatasetEntry> dataset_entries;
+    dataset_entries.reserve(symbol_csv.size());
+    for (const auto& ds : symbol_csv) {
+        dataset_entries.push_back(QTrading::Log::DatasetEntry{
+            .symbol = ds.symbol,
+            .kline_csv = ds.kline_csv,
+            .instrument_type = InstrumentTypeToString(ds.instrument_type),
+            .funding_csv = ds.funding_csv
+        });
+    }
+
+    return QTrading::Log::LoggerBootstrapConfig{
+        .logs_root = logs_root,
+        .strategy_name = strategy_name,
+        .strategy_version = strategy_version,
+        .strategy_params = strategy_params,
+        .dataset_entries = std::move(dataset_entries)
+    };
+}
+
+void LoadFundingCarryConfig(
+    const std::filesystem::path& config_path,
+    QTrading::Signal::FundingCarrySignalEngine::Config& signal_cfg,
+    QTrading::Intent::FundingCarryIntentBuilder::Config& intent_cfg,
+    QTrading::Risk::SimpleRiskEngine::Config& risk_cfg,
+    QTrading::Execution::MarketExecutionEngine::Config& execution_cfg,
+    QTrading::Monitoring::SimpleMonitoring::Config& monitoring_cfg)
+{
+    std::ifstream in(config_path, std::ios::in | std::ios::binary);
+    if (!in) {
+        throw std::runtime_error("Failed to open funding-carry config: " + config_path.string());
+    }
+    const std::string json((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+
+    rapidjson::Document doc;
+    doc.Parse(json.c_str());
+    if (doc.HasParseError() || !doc.IsObject()) {
+        throw std::runtime_error("Invalid funding-carry config json: " + config_path.string());
+    }
+
+    const rapidjson::Value* signal = FindObject(doc, "signal");
+    ApplyString(signal, "spot_symbol", signal_cfg.spot_symbol);
+    ApplyString(signal, "perp_symbol", signal_cfg.perp_symbol);
+    ApplyNumber(signal, "entry_min_funding_rate", signal_cfg.entry_min_funding_rate);
+    ApplyNumber(signal, "exit_min_funding_rate", signal_cfg.exit_min_funding_rate);
+    ApplyNumber(signal, "hard_negative_funding_rate", signal_cfg.hard_negative_funding_rate);
+    ApplyNumber(signal, "entry_max_basis_pct", signal_cfg.entry_max_basis_pct);
+    ApplyNumber(signal, "exit_max_basis_pct", signal_cfg.exit_max_basis_pct);
+    ApplyNumber(signal, "cooldown_ms", signal_cfg.cooldown_ms);
+    ApplyNumber(signal, "min_hold_ms", signal_cfg.min_hold_ms);
+    ApplyNumber(signal, "entry_persistence_settlements", signal_cfg.entry_persistence_settlements);
+    ApplyNumber(signal, "exit_persistence_settlements", signal_cfg.exit_persistence_settlements);
+    ApplyBool(signal, "adaptive_confidence_enabled", signal_cfg.adaptive_confidence_enabled);
+    ApplyBool(signal, "adaptive_structure_enabled", signal_cfg.adaptive_structure_enabled);
+    ApplyBool(signal, "funding_nowcast_enabled", signal_cfg.funding_nowcast_enabled);
+    ApplyBool(signal, "funding_nowcast_use_for_entry_gate", signal_cfg.funding_nowcast_use_for_entry_gate);
+    ApplyBool(signal, "funding_nowcast_use_for_exit_gate", signal_cfg.funding_nowcast_use_for_exit_gate);
+    ApplyBool(signal, "pre_settlement_negative_exit_enabled", signal_cfg.pre_settlement_negative_exit_enabled);
+    ApplyNumber(signal, "pre_settlement_negative_exit_threshold", signal_cfg.pre_settlement_negative_exit_threshold);
+
+    const rapidjson::Value* intent = FindObject(doc, "intent");
+    ApplyString(intent, "spot_symbol", intent_cfg.spot_symbol);
+    ApplyString(intent, "perp_symbol", intent_cfg.perp_symbol);
+    ApplyBool(intent, "receive_funding", intent_cfg.receive_funding);
+
+    const rapidjson::Value* risk = FindObject(doc, "risk");
+    ApplyNumber(risk, "notional_usdt", risk_cfg.notional_usdt);
+    ApplyNumber(risk, "leverage", risk_cfg.leverage);
+    ApplyNumber(risk, "max_leverage", risk_cfg.max_leverage);
+    ApplyNumber(risk, "rebalance_threshold_ratio", risk_cfg.rebalance_threshold_ratio);
+    ApplyNumber(risk, "dual_ledger_auto_notional_ratio", risk_cfg.dual_ledger_auto_notional_ratio);
+    ApplyBool(risk, "carry_allocator_leverage_model_enabled", risk_cfg.carry_allocator_leverage_model_enabled);
+    ApplyNumber(risk, "carry_allocator_spot_cash_per_notional", risk_cfg.carry_allocator_spot_cash_per_notional);
+    ApplyNumber(risk, "carry_allocator_perp_margin_buffer_ratio", risk_cfg.carry_allocator_perp_margin_buffer_ratio);
+    ApplyNumber(risk, "carry_allocator_perp_leverage", risk_cfg.carry_allocator_perp_leverage);
+    ApplyNumber(risk, "perp_liq_buffer_floor_ratio", risk_cfg.perp_liq_buffer_floor_ratio);
+    ApplyNumber(risk, "perp_liq_buffer_ceiling_ratio", risk_cfg.perp_liq_buffer_ceiling_ratio);
+    ApplyNumber(risk, "perp_liq_min_notional_scale", risk_cfg.perp_liq_min_notional_scale);
+    ApplyBool(risk, "carry_core_overlay_enabled", risk_cfg.carry_core_overlay_enabled);
+    ApplyNumber(risk, "carry_core_notional_ratio", risk_cfg.carry_core_notional_ratio);
+    ApplyNumber(risk, "carry_overlay_notional_ratio", risk_cfg.carry_overlay_notional_ratio);
+    ApplyNumber(risk, "carry_overlay_confidence_power", risk_cfg.carry_overlay_confidence_power);
+    ApplyBool(risk, "carry_confidence_boost_enabled", risk_cfg.carry_confidence_boost_enabled);
+    ApplyNumber(risk, "carry_confidence_boost_reference", risk_cfg.carry_confidence_boost_reference);
+    ApplyNumber(risk, "carry_confidence_boost_max_scale", risk_cfg.carry_confidence_boost_max_scale);
+    ApplyNumber(risk, "carry_confidence_boost_power", risk_cfg.carry_confidence_boost_power);
+
+    const rapidjson::Value* execution = FindObject(doc, "execution");
+    ApplyNumber(execution, "min_notional", execution_cfg.min_notional);
+    ApplyNumber(execution, "carry_rebalance_cooldown_ms", execution_cfg.carry_rebalance_cooldown_ms);
+    ApplyNumber(execution, "carry_max_rebalance_step_ratio", execution_cfg.carry_max_rebalance_step_ratio);
+    ApplyNumber(execution, "carry_max_participation_rate", execution_cfg.carry_max_participation_rate);
+    ApplyBool(execution, "carry_maker_first_enabled", execution_cfg.carry_maker_first_enabled);
+    ApplyNumber(execution, "carry_maker_limit_offset_bps", execution_cfg.carry_maker_limit_offset_bps);
+    ApplyNumber(execution, "carry_maker_catchup_gap_ratio", execution_cfg.carry_maker_catchup_gap_ratio);
+    ApplyBool(execution, "carry_target_anchor_enabled", execution_cfg.carry_target_anchor_enabled);
+    ApplyNumber(execution, "carry_target_anchor_update_ratio", execution_cfg.carry_target_anchor_update_ratio);
+    ApplyBool(execution, "carry_confidence_adaptive_enabled", execution_cfg.carry_confidence_adaptive_enabled);
+
+    const rapidjson::Value* monitoring = FindObject(doc, "monitoring");
+    ApplyNumber(monitoring, "max_open_orders_per_symbol", monitoring_cfg.max_open_orders_per_symbol);
+}
+
+void EmitExchangeStatusLine(
+    const std::shared_ptr<QTrading::Infra::Exchanges::BinanceSim::BinanceExchange>& exchange)
+{
+    if (!exchange) {
+        return;
+    }
+
+    QTrading::Infra::Exchanges::BinanceSim::BinanceExchange::StatusSnapshot snap{};
+    exchange->FillStatusSnapshot(snap);
+
+    std::ostringstream oss;
+    oss.setf(std::ios::fixed);
+    oss << std::setprecision(2);
+    oss << "[Service][Status] ts=" << snap.ts_exchange
+        << " wallet=" << snap.wallet_balance
+        << " margin=" << snap.margin_balance
+        << " avail=" << snap.available_balance
+        << " u_pnl=" << snap.total_unrealized_pnl
+        << " spot_cash=" << snap.spot_cash_balance
+        << " spot_inv=" << snap.spot_inventory_value
+        << " spot_ledger=" << snap.spot_ledger_value
+        << " perp_ledger=" << snap.perp_margin_balance
+        << " total_ledger=" << snap.total_ledger_value
+        << " progress=" << snap.progress_pct << "%";
+    oss << " prices=";
+    for (size_t i = 0; i < snap.prices.size(); ++i) {
+        const auto& p = snap.prices[i];
+        if (i > 0) {
+            oss << ",";
+        }
+        oss << p.symbol << "=";
+        if (p.has_price) {
+            oss << p.price;
+        }
+        else {
+            oss << "n/a";
+        }
+    }
+    std::cout << oss.str() << std::endl;
+}
+
+} // namespace QTrading::Service::Helpers

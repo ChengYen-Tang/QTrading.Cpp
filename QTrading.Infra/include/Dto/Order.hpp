@@ -1,15 +1,47 @@
-#pragma once
+﻿#pragma once
 
 #include <string>
+#include "Dto/Trading/Side.hpp"
+#include "Dto/Trading/InstrumentSpec.hpp"
 
 namespace QTrading::dto {
+
+    /// @brief Data Transfer Object describing an order on the exchange.
+    /// @details Contains order identity, symbol, quantity, price, action side, and related flags.
     struct Order {
-        int         id;               // Unique order ID
+        /// @brief Unique order identifier.
+        int id;
+
+        /// @brief Trading pair symbol (e.g., "BTCUSDT").
         std::string symbol;
-        double      quantity;         // Remaining quantity to be matched
-        double      price;            // <= 0 => market order, > 0 => limit order
-        bool        is_long;
-        bool        reduce_only;      // true means the order is for reducing positions only
-        int         closing_position_id; // >=0: specifies which position to close; -1: normal opening order
+
+        /// @brief Remaining quantity to be matched.
+        double quantity;
+
+        /// @brief Price: ≤ 0 ⇒ market order; > 0 ⇒ limit order.
+        double price;
+
+        /// @brief Order side (action): Buy or Sell.
+        QTrading::Dto::Trading::OrderSide side{ QTrading::Dto::Trading::OrderSide::Buy };
+
+        /// @brief In hedge mode, indicates which position side this order targets.
+        /// In one-way mode this should be PositionSide::Both.
+        QTrading::Dto::Trading::PositionSide position_side{ QTrading::Dto::Trading::PositionSide::Both };
+
+        /// @brief If true, this order only reduces existing positions.
+        bool reduce_only{ false };
+
+        /// @brief For internal closing orders: ID of the position being closed; –1 if opening order.
+        int closing_position_id{ -1 };
+
+        /// @brief Instrument type captured at order creation for routing/logging.
+        QTrading::Dto::Trading::InstrumentType instrument_type{ QTrading::Dto::Trading::InstrumentType::Perp };
+
+        /// @brief Optional client-provided order id. Must be unique among open orders when provided.
+        std::string client_order_id;
+
+        /// @brief STP mode associated with this order (0=None, 1=ExpireTaker, 2=ExpireMaker, 3=ExpireBoth).
+        int stp_mode{ 0 };
     };
-}
+
+}  // namespace QTrading::dto

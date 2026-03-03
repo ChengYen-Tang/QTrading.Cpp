@@ -1,13 +1,47 @@
-﻿# CMakeList.txt: QTrading.Service 的 CMake 專案，在此包含來源及定義
-# 專案專屬邏輯。
-#
+﻿project(QTrading.Service LANGUAGES CXX)
 
-# 將來源新增到此專案的可執行檔。
-project ("QTrading.Service")
-add_executable (QTrading.Service "QTrading.Service.cpp" "QTrading.Service.h")
+find_package(Boost CONFIG REQUIRED COMPONENTS thread)
 
-if (CMAKE_VERSION VERSION_GREATER 3.12)
-  set_property(TARGET QTrading.Service PROPERTY CXX_STANDARD 20)
+add_executable(QTrading.Service
+  QTrading.Service.cpp
+  ServiceHelpers.cpp
+  QTrading.Service.h
+  ServiceHelpers.hpp
+)
+
+target_include_directories(QTrading.Service PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../QTrading.Logging/include
+  ${CMAKE_CURRENT_SOURCE_DIR}/../QTrading.Infra/include
+  ${CMAKE_CURRENT_SOURCE_DIR}/../QTrading.Universe/include
+  ${CMAKE_CURRENT_SOURCE_DIR}/../QTrading.Signal/include
+  ${CMAKE_CURRENT_SOURCE_DIR}/../QTrading.Intent/include
+  ${CMAKE_CURRENT_SOURCE_DIR}/../QTrading.Risk/include
+  ${CMAKE_CURRENT_SOURCE_DIR}/../QTrading.Execution/include
+  ${CMAKE_CURRENT_SOURCE_DIR}/../QTrading.Monitoring/include
+  ${CMAKE_CURRENT_SOURCE_DIR}/../QTrading.Utils/include
+)
+
+if(QTRADING_ENABLE_TRACE)
+  target_compile_definitions(QTrading.Service PRIVATE QTRADING_TRACE)
+  if(QTRADING_TRACE_VERBOSE)
+    target_compile_definitions(QTrading.Service PRIVATE QTRADING_TRACE_VERBOSE)
+  endif()
 endif()
 
-# TODO: 新增測試，並視需要安裝目標。
+target_link_libraries(QTrading.Service
+  PRIVATE
+    QTrading.Logging.Library
+    QTrading.Infra.Library
+    QTrading.Universe.Library
+    QTrading.Signal.Library
+    QTrading.Intent.Library
+    QTrading.Risk.Library
+    QTrading.Execution.Library
+    QTrading.Monitoring.Library
+    Boost::thread
+)
+
+set_target_properties(QTrading.Service PROPERTIES
+  CXX_STANDARD 20
+  CXX_STANDARD_REQUIRED ON
+)

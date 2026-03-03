@@ -1,0 +1,29 @@
+{
+  "dependencies": [
+    {
+      "name": "arrow",
+      "version>=": "19.0.1"
+    },
+    {
+      "name": "boost-algorithm",
+      "version>=": "1.86.0"
+    },
+    {
+      "name": "boost-iostreams",
+      "version>=": "1.86.0"
+    },
+    {
+      "name": "boost-filesystem",
+      "version>=": "1.86.0"
+    },
+    {
+      "name": "boost-asio",
+      "version>=": "1.86.0"
+    },
+    {
+      "name": "boost-thread",
+      "version>=": "1.86.0"
+    },
+    "gtest"
+  ]
+}

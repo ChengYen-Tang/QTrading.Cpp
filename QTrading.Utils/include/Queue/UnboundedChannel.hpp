@@ -1,58 +1,69 @@
-#include <queue>
+#pragma once
+
 #include <mutex>
-#include <condition_variable>
-#include <iostream>
-#include <thread>
+#include <optional>
+#include <vector>
+
+#include "BlockingChannelBase.hpp"
 #include "Channel.hpp"
+#include "ChannelCore.hpp"
+#include "ChunkedQueue.hpp"
+#include "QueueOps.hpp"
 
-namespace QTrading::Utils::Queue
-{
+namespace QTrading::Utils::Queue {
+
+    /// \brief A thread-safe channel with unbounded capacity.
+    /// \tparam T Message type.
+    /// \remarks Messages accumulate without limit until Close() is called.
     template <typename T>
-    class UnboundedChannel : public Channel<T> {
-    private:
-        std::queue<T> queue;
-        std::mutex mtx;
-        std::condition_variable cv;
-
+    class UnboundedChannel : public BlockingChannelBase<T, UnboundedChannel<T>> {
     public:
-        // Send a value to the channel
-        bool Send(T value) override {
-            {
-                std::unique_lock<std::mutex> lock(mtx);
-                if (this->closed_) return false;
-                queue.push(std::move(value));
-            }
+        using Base = BlockingChannelBase<T, UnboundedChannel<T>>;
+        using SendMode = typename Base::SendMode;
 
-            cv.notify_one();
+        explicit UnboundedChannel(size_t block_capacity = 1024)
+            : queue_(block_capacity) {
+        }
+
+        /// \copydoc Channel::Send
+        bool Send(T value) override {
+            return this->SendWithMode(std::move(value), SendMode::Block);
+        }
+
+        /// \copydoc Channel::TrySend
+        bool TrySend(T value) override {
+            return Send(std::move(value));
+        }
+
+    private:
+        friend class BlockingChannelBase<T, UnboundedChannel<T>>;
+
+        bool SendLocked(T value, std::unique_lock<std::mutex>& lock, SendMode /*mode*/) {
+            QueueOps<ChunkedQueue<T>>::Push(queue_, std::move(value));
+            lock.unlock();
+            this->core_.cv_not_empty.notify_one();
             return true;
         }
 
-        // Receive a value from the channel
-        std::optional<T> Receive() override {
-            std::unique_lock<std::mutex> lock(mtx);
-            cv.wait(lock, [this] { return !queue.empty() || this->closed_; });
-            if (queue.empty()) return std::nullopt;
-
-            T value = std::move(queue.front());
-            queue.pop();
-            return value;
+        bool HasDataLocked() const {
+            return !QueueOps<ChunkedQueue<T>>::Empty(queue_);
         }
 
-        // Try to receive a value without blocking
-        std::optional<T> TryReceive() override {
-            std::unique_lock<std::mutex> lock(mtx);
-            if (queue.empty()) return std::nullopt;
-
-            T value = std::move(queue.front());
-            queue.pop();
-            return value;
+        std::optional<T> PopLocked() {
+            return QueueOps<ChunkedQueue<T>>::Pop(queue_);
         }
 
-        // Close the channel
-        void Close() override {
-            std::unique_lock<std::mutex> lock(mtx);
-            this->closed_ = true;
-            cv.notify_all();
+        size_t PopManyLocked(size_t max_items, std::vector<T>& out) {
+            return QueueOps<ChunkedQueue<T>>::PopMany(queue_, max_items, out);
         }
+
+        size_t SizeLocked() const {
+            return QueueOps<ChunkedQueue<T>>::Size(queue_);
+        }
+
+        void OnPopped(size_t /*count*/, bool /*from_receive_many*/) {}
+
+        ChunkedQueue<T> queue_;
     };
-}
+
+} // namespace QTrading::Utils::Queue

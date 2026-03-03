@@ -1,22 +1,25 @@
-﻿find_package(Boost 1.86.0 COMPONENTS filesystem)
-
 add_executable(QTrading.Infra.Tests
-  "Exanges/BinanceSimulator/DataProvider/MarketDataTests.cpp"
-  "Exanges/BinanceSimulator/Futures/AccountTests.cpp"
- )
+  Exchanges/BinanceSimulator/DataProvider/MarketDataTests.cpp
+  Exchanges/BinanceSimulator/DataProvider/FundingRateDataTests.cpp
+  Exchanges/BinanceSimulator/Account/AccountTests.cpp
+  Exchanges/BinanceSimulator/Account/AccountPolicyInjectionTests.cpp
+  Exchanges/BinanceSimulator/Calibration/CalibrationMetricsTests.cpp
+  Exchanges/BinanceSimulator/BinanceExchangeTests.cpp
+)
 
 target_include_directories(QTrading.Infra.Tests
-    PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/../include
+  PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../QTrading.Logging/include
 )
 
 target_link_libraries(QTrading.Infra.Tests
-    PRIVATE
-        QTrading.Infra.Library         # 連結到剛剛建立的函式庫
-        ${Boost_LIBRARIES}
-        Boost::filesystem
-        GTest::gtest
-        GTest::gtest_main  # 或 GTest::gtest + GTest::gtest_main
+  PRIVATE
+    QTrading.Infra.Library
+    QTrading.Logging.Library
+    Boost::filesystem
+    GTest::gtest
+    GTest::gtest_main
 )
 
 include(GoogleTest)

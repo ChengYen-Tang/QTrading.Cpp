@@ -1,42 +1,58 @@
-﻿# CMakeList.txt: 最上層的 CMake 專案檔，執行全域設定
-# 並在這裡包含子專案。
-#
-cmake_minimum_required (VERSION 3.14)
+﻿cmake_minimum_required(VERSION 3.21)
+project(QTrading.Cpp LANGUAGES CXX)
+
+# C++20
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-set(CMAKE_CXX_FLAGS_DEBUG "/MTd")   # 使用 MTd（靜態調試庫）
-set(CMAKE_CXX_FLAGS_RELEASE "/MT")  # 使用 MT（靜態釋放庫）
+# Trace instrumentation:
+# - Zero overhead unless QTRADING_ENABLE_TRACE is ON.
+# - Default: ON for Debug/RelWithDebInfo, OFF for Release/MinSizeRel.
+set(_qtrading_trace_default OFF)
+if(DEFINED CMAKE_BUILD_TYPE)
+  string(TOUPPER "${CMAKE_BUILD_TYPE}" _bt)
+  if(_bt STREQUAL "DEBUG" OR _bt STREQUAL "RELWITHDEBINFO")
+    set(_qtrading_trace_default ON)
+  endif()
+endif()
+option(QTRADING_ENABLE_TRACE "Enable QTRADING_TRACE instrumentation" ${_qtrading_trace_default})
+unset(_qtrading_trace_default)
+unset(_bt)
 
-# 啟用自動導出符號（適用於 MSVC）
-if (MSVC)
+# Trace verbosity:
+# - When OFF, QTR_TRACE compiles to no-op even if QTRADING_TRACE is enabled.
+option(QTRADING_TRACE_VERBOSE "Enable verbose QTR_TRACE output" ON)
+
+# MSVC 静态 CRT & 全符号导出
+if(MSVC)
+#  set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
   set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS ON)
 endif()
 
-# 若使用 MinGW（GCC），則加入 `-Wl,--export-all-symbols`
+# MinGW 全符号导出
 if(MINGW)
-    add_link_options("-Wl,--export-all-symbols")
+  add_link_options("-Wl,--export-all-symbols")
 endif()
 
-
-# 如果支援，則為 MSVC 編譯器啟用熱重新載入。
-if (POLICY CMP0141)
+# MSVC 热重载支持
+if(POLICY CMP0141)
   cmake_policy(SET CMP0141 NEW)
-  set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT "$<IF:$<AND:$<C_COMPILER_ID:MSVC>,$<CXX_COMPILER_ID:MSVC>>,$<$<CONFIG:Debug,RelWithDebInfo>:EditAndContinue>,$<$<CONFIG:Debug,RelWithDebInfo>:ProgramDatabase>>")
+  set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT
+    "$<IF:$<AND:$<C_COMPILER_ID:MSVC>,$<CXX_COMPILER_ID:MSVC>>,"
+    "$<$<CONFIG:Debug,RelWithDebInfo>:EditAndContinue>,$"
+    "<$<CONFIG:Debug,RelWithDebInfo>:ProgramDatabase>>")
 endif()
 
-include(FetchContent)
-FetchContent_Declare(
-  googletest
-  URL https://github.com/google/googletest/archive/refs/tags/v1.13.0.tar.gz
-  DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-)
-FetchContent_MakeAvailable(googletest)
+include(CTest)
 
-project ("QTrading.Cpp")
-
-# 包含子專案。
-#add_subdirectory ("QTrading.Service")
-add_subdirectory ("QTrading.Infra")
-add_subdirectory ("QTrading.Utils")
-add_subdirectory ("QTrading.DataPreprocess")
+# 所有子项目
+add_subdirectory(QTrading.Logging)
+add_subdirectory(QTrading.Infra)
+add_subdirectory(QTrading.Utils)
+add_subdirectory(QTrading.Universe)
+add_subdirectory(QTrading.Signal)
+add_subdirectory(QTrading.Intent)
+add_subdirectory(QTrading.Risk)
+add_subdirectory(QTrading.Execution)
+add_subdirectory(QTrading.Monitoring)
+add_subdirectory(QTrading.Service)
