@@ -3,9 +3,11 @@
 #include "LoggerBootstrap.hpp"
 #include "Execution/FundingCarryStrategy.hpp"
 #include "Execution/MarketExecutionEngine.hpp"
+#include "Intent/BasisArbitrageIntentBuilder.hpp"
 #include "Intent/FundingCarryIntentBuilder.hpp"
 #include "Monitoring/SimpleMonitoring.hpp"
 #include "Risk/SimpleRiskEngine.hpp"
+#include "Signal/BasisArbitrageSignalEngine.hpp"
 #include "Signal/FundingCarrySignalEngine.hpp"
 #include "Universe/FixedUniverseSelector.hpp"
 #include "Diagnostics/Trace.hpp"
@@ -82,14 +84,25 @@ int main()
         account_init.perp_initial_wallet = kInitialPerpWallet;
         account_init.vip_level = kVipLevel;
 
-        std::ostringstream strategy_params_builder;
-        strategy_params_builder << "strategy_profile=funding_carry_default"
-                                << ";initial_spot_cash=" << kInitialSpotCash
-                                << ";initial_perp_wallet=" << kInitialPerpWallet;
+        const std::string strategy_profile =
+            (std::getenv("QTR_STRATEGY_PROFILE") != nullptr &&
+                std::string(std::getenv("QTR_STRATEGY_PROFILE")) == "basis_arbitrage")
+            ? "basis_arbitrage"
+            : "funding_carry";
+
         const std::filesystem::path strategy_config_path =
-            QTrading::Service::Helpers::ResolveRepoRelativePath(
+            (strategy_profile == "basis_arbitrage")
+            ? QTrading::Service::Helpers::ResolveRepoRelativePath(
+                std::filesystem::path(__FILE__),
+                R"(research/basis_arbitrage/config/basis_arbitrage_v1.json)")
+            : QTrading::Service::Helpers::ResolveRepoRelativePath(
                 std::filesystem::path(__FILE__),
                 R"(research/funding_carry/config/funding_carry_v1.json)");
+
+        std::ostringstream strategy_params_builder;
+        strategy_params_builder << "strategy_profile=" << strategy_profile
+                                << ";initial_spot_cash=" << kInitialSpotCash
+                                << ";initial_perp_wallet=" << kInitialPerpWallet;
         strategy_params_builder << ";strategy_config=" << strategy_config_path.string();
         if (!sim_start_date.empty()) {
             strategy_params_builder << ";sim_start_date=" << sim_start_date;
@@ -122,7 +135,7 @@ int main()
         const auto logger_cfg = QTrading::Service::Helpers::BuildLoggerBootstrapConfig(
             logs_root,
             symbolCsv,
-            "FundingCarryMVP",
+            (strategy_profile == "basis_arbitrage") ? "BasisArbitrageMVP" : "FundingCarryMVP",
             "0.1",
             strategy_params);
         const auto logger_init = QTrading::Log::InitializeFeatherLogger(logger_cfg);
@@ -149,11 +162,23 @@ int main()
             risk_cfg,
             execution_cfg,
             monitoring_cfg);
+        if (strategy_profile == "basis_arbitrage") {
+            execution_cfg.carry_require_two_sided_rebalance = true;
+            execution_cfg.carry_balance_two_sided_rebalance = true;
+        }
 
         // @brief Assemble arbitrage pipeline (currently null implementations).
         QTrading::Universe::FixedUniverseSelector universe_selector;
-        QTrading::Signal::FundingCarrySignalEngine signal_engine(signal_cfg);
-        QTrading::Intent::FundingCarryIntentBuilder intent_builder(intent_cfg);
+        std::shared_ptr<QTrading::Signal::FundingCarrySignalEngine> signal_engine;
+        std::shared_ptr<QTrading::Intent::FundingCarryIntentBuilder> intent_builder;
+        if (strategy_profile == "basis_arbitrage") {
+            signal_engine = std::make_shared<QTrading::Signal::BasisArbitrageSignalEngine>(signal_cfg);
+            intent_builder = std::make_shared<QTrading::Intent::BasisArbitrageIntentBuilder>(intent_cfg);
+        }
+        else {
+            signal_engine = std::make_shared<QTrading::Signal::FundingCarrySignalEngine>(signal_cfg);
+            intent_builder = std::make_shared<QTrading::Intent::FundingCarryIntentBuilder>(intent_cfg);
+        }
         risk_cfg.instrument_types = instrument_types;
         QTrading::Risk::SimpleRiskEngine risk_engine(risk_cfg);
         QTrading::Execution::MarketExecutionEngine execution_engine(exchange, execution_cfg);
@@ -161,8 +186,8 @@ int main()
         auto strategy = std::make_shared<QTrading::Execution::FundingCarryStrategy>(
             exchange,
             universe_selector,
-            signal_engine,
-            intent_builder,
+            *signal_engine,
+            *intent_builder,
             risk_engine,
             execution_engine,
             monitoring,

@@ -214,10 +214,17 @@ void LoadFundingCarryConfig(
     ApplyBool(signal, "adaptive_confidence_enabled", signal_cfg.adaptive_confidence_enabled);
     ApplyBool(signal, "adaptive_structure_enabled", signal_cfg.adaptive_structure_enabled);
     ApplyBool(signal, "funding_nowcast_enabled", signal_cfg.funding_nowcast_enabled);
+    ApplyNumber(signal, "funding_nowcast_interval_ms", signal_cfg.funding_nowcast_interval_ms);
+    ApplyBool(signal, "funding_nowcast_use_for_gates", signal_cfg.funding_nowcast_use_for_gates);
     ApplyBool(signal, "funding_nowcast_use_for_entry_gate", signal_cfg.funding_nowcast_use_for_entry_gate);
     ApplyBool(signal, "funding_nowcast_use_for_exit_gate", signal_cfg.funding_nowcast_use_for_exit_gate);
+    ApplyBool(signal, "funding_nowcast_use_for_confidence", signal_cfg.funding_nowcast_use_for_confidence);
+    ApplyNumber(signal, "funding_nowcast_gate_sample_ms", signal_cfg.funding_nowcast_gate_sample_ms);
     ApplyBool(signal, "pre_settlement_negative_exit_enabled", signal_cfg.pre_settlement_negative_exit_enabled);
     ApplyNumber(signal, "pre_settlement_negative_exit_threshold", signal_cfg.pre_settlement_negative_exit_threshold);
+    ApplyNumber(signal, "pre_settlement_negative_exit_lookahead_ms", signal_cfg.pre_settlement_negative_exit_lookahead_ms);
+    ApplyNumber(signal, "pre_settlement_negative_exit_reentry_buffer_ms", signal_cfg.pre_settlement_negative_exit_reentry_buffer_ms);
+    ApplyBool(signal, "pre_settlement_negative_exit_require_funding_gate", signal_cfg.pre_settlement_negative_exit_require_funding_gate);
 
     const rapidjson::Value* intent = FindObject(doc, "intent");
     ApplyString(intent, "spot_symbol", intent_cfg.spot_symbol);
@@ -245,6 +252,11 @@ void LoadFundingCarryConfig(
     ApplyNumber(risk, "carry_confidence_boost_reference", risk_cfg.carry_confidence_boost_reference);
     ApplyNumber(risk, "carry_confidence_boost_max_scale", risk_cfg.carry_confidence_boost_max_scale);
     ApplyNumber(risk, "carry_confidence_boost_power", risk_cfg.carry_confidence_boost_power);
+    ApplyBool(risk, "basis_alpha_overlay_enabled", risk_cfg.basis_alpha_overlay_enabled);
+    ApplyNumber(risk, "basis_alpha_overlay_center_pct", risk_cfg.basis_alpha_overlay_center_pct);
+    ApplyNumber(risk, "basis_alpha_overlay_band_pct", risk_cfg.basis_alpha_overlay_band_pct);
+    ApplyNumber(risk, "basis_alpha_overlay_upscale_cap", risk_cfg.basis_alpha_overlay_upscale_cap);
+    ApplyNumber(risk, "basis_alpha_overlay_downscale_floor", risk_cfg.basis_alpha_overlay_downscale_floor);
 
     const rapidjson::Value* execution = FindObject(doc, "execution");
     ApplyNumber(execution, "min_notional", execution_cfg.min_notional);

@@ -56,6 +56,24 @@ double QuoteVolumeFromId(
     return std::max(0.0, opt->QuoteVolume);
 }
 
+bool IsCarryLikeStrategy(const std::string& strategy)
+{
+    return strategy == "funding_carry" || strategy == "basis_arbitrage";
+}
+
+bool ShouldSkipDueToExistingOpenOrder(
+    const std::unordered_map<std::string, bool>& has_open_order_by_symbol,
+    const std::string& symbol,
+    const std::string& strategy)
+{
+    // Basis arbitrage should keep converging even if one stale leg order exists.
+    // Funding carry keeps the old conservative behavior (one active order per symbol).
+    if (strategy == "basis_arbitrage") {
+        return false;
+    }
+    return has_open_order_by_symbol.find(symbol) != has_open_order_by_symbol.end();
+}
+
 }
 
 MarketExecutionEngine::MarketExecutionEngine(
@@ -271,7 +289,8 @@ std::vector<ExecutionOrder> MarketExecutionEngine::plan(
     };
 
     double effective_min_notional = cfg_.min_notional;
-    if (signal.strategy == "funding_carry" && signal.urgency == QTrading::Signal::SignalUrgency::Low) {
+    if (IsCarryLikeStrategy(signal.strategy) &&
+        signal.urgency == QTrading::Signal::SignalUrgency::Low) {
         // Funding carry is slow by nature; ignore micro re-hedges to reduce churn/fees.
         effective_min_notional = std::max(effective_min_notional, carry_min_rebalance_notional_);
     }
@@ -361,7 +380,7 @@ std::vector<ExecutionOrder> MarketExecutionEngine::plan(
 
         for (const auto& kv : target.target_positions) {
             const auto& symbol = kv.first;
-            if (has_open_order_by_symbol.find(symbol) != has_open_order_by_symbol.end()) {
+            if (ShouldSkipDueToExistingOpenOrder(has_open_order_by_symbol, symbol, signal.strategy)) {
                 continue;
             }
             auto it = symbol_to_id_.find(symbol);
@@ -378,7 +397,7 @@ std::vector<ExecutionOrder> MarketExecutionEngine::plan(
             const double raw_delta_notional = target_notional - cur_notional;
             bool reduce_only =
                 (cur_notional != 0.0) && (cur_notional * raw_delta_notional < 0.0);
-            const bool is_carry_rebalance = (signal.strategy == "funding_carry") &&
+            const bool is_carry_rebalance = IsCarryLikeStrategy(signal.strategy) &&
                 (signal.urgency == QTrading::Signal::SignalUrgency::Low) &&
                 !reduce_only;
             double planned_target_notional = target_notional;
@@ -545,14 +564,14 @@ std::vector<ExecutionOrder> MarketExecutionEngine::plan(
 
     for (const auto& kv : target.target_positions) {
         const auto& symbol = kv.first;
-        if (has_open_order_by_symbol.find(symbol) != has_open_order_by_symbol.end()) {
+        if (ShouldSkipDueToExistingOpenOrder(has_open_order_by_symbol, symbol, signal.strategy)) {
             continue;
         }
         const double target_notional = kv.second;
         const double cur_notional = current_notional[symbol] + pending_notional[symbol];
         const double raw_delta_notional = target_notional - cur_notional;
         bool reduce_only = (cur_notional != 0.0) && (cur_notional * raw_delta_notional < 0.0);
-        const bool is_carry_rebalance = (signal.strategy == "funding_carry") &&
+        const bool is_carry_rebalance = IsCarryLikeStrategy(signal.strategy) &&
             (signal.urgency == QTrading::Signal::SignalUrgency::Low) &&
             !reduce_only;
         double planned_target_notional = target_notional;

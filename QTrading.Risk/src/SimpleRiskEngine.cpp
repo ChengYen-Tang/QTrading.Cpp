@@ -166,6 +166,15 @@ SimpleRiskEngine::SimpleRiskEngine(Config cfg)
         cfg_.basis_overlay_downscale_floor = cfg_.basis_overlay_upscale_cap;
     }
     cfg_.basis_level_ema_alpha = ClampAlpha(cfg_.basis_level_ema_alpha);
+    cfg_.basis_alpha_overlay_band_pct = ClampPositive(cfg_.basis_alpha_overlay_band_pct, 0.01);
+    cfg_.basis_alpha_overlay_upscale_cap = ClampPositive(cfg_.basis_alpha_overlay_upscale_cap, 1.0);
+    if (cfg_.basis_alpha_overlay_upscale_cap < 1.0) {
+        cfg_.basis_alpha_overlay_upscale_cap = 1.0;
+    }
+    cfg_.basis_alpha_overlay_downscale_floor = Clamp01(cfg_.basis_alpha_overlay_downscale_floor);
+    if (cfg_.basis_alpha_overlay_downscale_floor <= 0.0) {
+        cfg_.basis_alpha_overlay_downscale_floor = 0.01;
+    }
     // Backward compatibility bridge:
     // If caller still uses the legacy fixed threshold only, map it to low/high anchors.
     if (cfg_.carry_size_min_gain_to_cost_low_confidence == 1.0 &&
@@ -677,13 +686,47 @@ RiskTarget SimpleRiskEngine::position(const QTrading::Intent::TradeIntent& inten
                         }
                     }
                 }
+
+                if (intent.strategy == "basis_arbitrage" && cfg_.basis_alpha_overlay_enabled) {
+                    const double centered_basis = basis_pct - cfg_.basis_alpha_overlay_center_pct;
+                    const double normalized = std::clamp(
+                        centered_basis / cfg_.basis_alpha_overlay_band_pct,
+                        -1.0,
+                        1.0);
+                    // For default receive-funding carry structure:
+                    // long spot + short perp prefers positive basis (perp rich to spot).
+                    const double directional = perp_is_short ? normalized : -normalized;
+                    double directional_scale = 1.0;
+                    if (directional >= 0.0) {
+                        directional_scale =
+                            1.0 + directional * (cfg_.basis_alpha_overlay_upscale_cap - 1.0);
+                    }
+                    else {
+                        directional_scale =
+                            1.0 + directional * (1.0 - cfg_.basis_alpha_overlay_downscale_floor);
+                    }
+                    directional_scale = std::clamp(
+                        directional_scale,
+                        cfg_.basis_alpha_overlay_downscale_floor,
+                        cfg_.basis_alpha_overlay_upscale_cap);
+                    scale *= directional_scale;
+                }
             }
 
-            const double base_qty = (target_leg_notional * scale) / *spot_price;
+            const double base_leg_notional = target_leg_notional * scale;
+            const bool enforce_notional_parity = (intent.strategy == "basis_arbitrage");
+            const double base_qty = base_leg_notional / *spot_price;
             for (const auto& leg : intent.legs) {
                 const double price = price_by_symbol[leg.instrument];
                 const double sign = (leg.side == QTrading::Intent::TradeSide::Long) ? 1.0 : -1.0;
-                out.target_positions[leg.instrument] = base_qty * price * sign;
+                if (enforce_notional_parity) {
+                    // Basis-arbitrage mode enforces same absolute notional on both legs.
+                    // This avoids systematic gross/net drift when spot/perp prices diverge.
+                    out.target_positions[leg.instrument] = base_leg_notional * sign;
+                }
+                else {
+                    out.target_positions[leg.instrument] = base_qty * price * sign;
+                }
                 if (is_perp_instrument_(leg.instrument)) {
                     out.leverage[leg.instrument] =
                         leverage_for_instrument_scaled_(leg.instrument, confidence_leverage_scale);

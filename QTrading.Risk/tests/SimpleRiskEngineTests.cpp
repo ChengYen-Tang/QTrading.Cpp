@@ -186,6 +186,69 @@ TEST(SimpleRiskEngineTests, UsesExplicitInstrumentTypesWithoutSuffixNames)
     EXPECT_EQ(out.leverage["BTCUSDT_SWAP"], 2.0);
 }
 
+TEST(SimpleRiskEngineTests, BasisArbitrageEnforcesTwoLegNotionalParity)
+{
+    QTrading::Risk::SimpleRiskEngine::Config cfg;
+    cfg.notional_usdt = 1000.0;
+    cfg.leverage = 2.0;
+    cfg.max_leverage = 3.0;
+    ApplyDefaultSpotPerpTypes(cfg);
+    QTrading::Risk::SimpleRiskEngine engine(cfg);
+
+    QTrading::Intent::TradeIntent intent;
+    intent.strategy = "basis_arbitrage";
+    intent.structure = "delta_neutral_carry";
+    intent.ts_ms = 1;
+    intent.legs.push_back({ "BTCUSDT_SPOT", QTrading::Intent::TradeSide::Long });
+    intent.legs.push_back({ "BTCUSDT_PERP", QTrading::Intent::TradeSide::Short });
+
+    QTrading::Risk::AccountState account;
+    auto market = MakeTwoLegMarket(1, 100.0, 101.0);
+    auto out = engine.position(intent, account, market);
+
+    EXPECT_NEAR(out.target_positions["BTCUSDT_SPOT"], 1000.0, 1e-9);
+    EXPECT_NEAR(out.target_positions["BTCUSDT_PERP"], -1000.0, 1e-9);
+    EXPECT_EQ(out.leverage["BTCUSDT_SPOT"], 1.0);
+    EXPECT_EQ(out.leverage["BTCUSDT_PERP"], 2.0);
+}
+
+TEST(SimpleRiskEngineTests, BasisAlphaOverlayScalesBasisArbitrageNotionalByDirectionalBasis)
+{
+    QTrading::Risk::SimpleRiskEngine::Config cfg;
+    cfg.notional_usdt = 1000.0;
+    cfg.leverage = 2.0;
+    cfg.max_leverage = 3.0;
+    cfg.basis_alpha_overlay_enabled = true;
+    cfg.basis_alpha_overlay_center_pct = 0.0;
+    cfg.basis_alpha_overlay_band_pct = 0.01;
+    cfg.basis_alpha_overlay_upscale_cap = 1.20;
+    cfg.basis_alpha_overlay_downscale_floor = 0.80;
+    ApplyDefaultSpotPerpTypes(cfg);
+    QTrading::Risk::SimpleRiskEngine engine(cfg);
+
+    QTrading::Intent::TradeIntent intent;
+    intent.strategy = "basis_arbitrage";
+    intent.structure = "delta_neutral_carry";
+    intent.ts_ms = 1;
+    intent.legs.push_back({ "BTCUSDT_SPOT", QTrading::Intent::TradeSide::Long });
+    intent.legs.push_back({ "BTCUSDT_PERP", QTrading::Intent::TradeSide::Short });
+
+    QTrading::Risk::AccountState account;
+
+    // Positive basis (+1%) => favorable for short-perp/long-spot -> upscale to cap.
+    auto positive_basis = MakeTwoLegMarket(1, 100.0, 101.0);
+    const auto out_pos = engine.position(intent, account, positive_basis);
+    EXPECT_NEAR(out_pos.target_positions.at("BTCUSDT_SPOT"), 1200.0, 1e-9);
+    EXPECT_NEAR(out_pos.target_positions.at("BTCUSDT_PERP"), -1200.0, 1e-9);
+
+    // Negative basis (-1%) => adverse direction -> downscale to floor.
+    intent.ts_ms = 2;
+    auto negative_basis = MakeTwoLegMarket(2, 100.0, 99.0);
+    const auto out_neg = engine.position(intent, account, negative_basis);
+    EXPECT_NEAR(out_neg.target_positions.at("BTCUSDT_SPOT"), 800.0, 1e-9);
+    EXPECT_NEAR(out_neg.target_positions.at("BTCUSDT_PERP"), -800.0, 1e-9);
+}
+
 TEST(SimpleRiskEngineTests, CapsPerLegNotionalByConfig)
 {
     QTrading::Risk::SimpleRiskEngine::Config cfg;

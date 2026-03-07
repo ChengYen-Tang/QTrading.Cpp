@@ -70,6 +70,40 @@ TEST(LiquidityAwareExecutionSchedulerTests, CapsCarryDeltaByQuoteVolumeParticipa
     EXPECT_DOUBLE_EQ(slices[0].target_notional, 50.0);
 }
 
+TEST(LiquidityAwareExecutionSchedulerTests, BasisArbitrageAlsoUsesParticipationCap)
+{
+    QTrading::Execution::LiquidityAwareExecutionScheduler::Config cfg;
+    cfg.carry_delta_participation_cap_enabled = true;
+    cfg.carry_delta_participation_rate = 0.10;
+    cfg.carry_min_slice_notional_usdt = 0.0;
+    cfg.carry_apply_only_low_urgency = true;
+    cfg.include_open_orders_in_current_notional = false;
+
+    QTrading::Execution::LiquidityAwareExecutionScheduler scheduler(cfg);
+
+    std::vector<QTrading::Execution::ExecutionParentOrder> parent_orders = {
+        QTrading::Execution::ExecutionParentOrder{
+            1,
+            "BTCUSDT_PERP",
+            1000.0,
+            2.0,
+        },
+    };
+
+    QTrading::Risk::AccountState account;
+    QTrading::Signal::SignalDecision signal;
+    signal.strategy = "basis_arbitrage";
+    signal.urgency = QTrading::Signal::SignalUrgency::Low;
+
+    const auto slices = scheduler.BuildSlices(
+        parent_orders,
+        account,
+        signal,
+        MakeMarketWithSymbol(1, "BTCUSDT_PERP", 10'000.0, 500.0));
+    ASSERT_EQ(slices.size(), 1u);
+    EXPECT_DOUBLE_EQ(slices[0].target_notional, 50.0);
+}
+
 TEST(LiquidityAwareExecutionSchedulerTests, UsesCurrentNotionalFromPositionWhenClippingDelta)
 {
     QTrading::Execution::LiquidityAwareExecutionScheduler::Config cfg;

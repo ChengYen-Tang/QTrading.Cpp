@@ -61,6 +61,11 @@ double QuoteVolumeFromId(
     return std::max(0.0, opt->QuoteVolume);
 }
 
+bool IsCarryLikeStrategy(const std::string& strategy)
+{
+    return strategy == "funding_carry" || strategy == "basis_arbitrage";
+}
+
 } // namespace
 
 LiquidityAwareExecutionScheduler::LiquidityAwareExecutionScheduler(Config cfg)
@@ -134,17 +139,17 @@ std::vector<ExecutionSlice> LiquidityAwareExecutionScheduler::BuildSlices(
     const bool apply_participation_cap =
         cfg_.carry_delta_participation_cap_enabled &&
         (cfg_.carry_delta_participation_rate > 0.0) &&
-        (signal.strategy == "funding_carry") &&
+        IsCarryLikeStrategy(signal.strategy) &&
         (!cfg_.carry_apply_only_low_urgency ||
          signal.urgency == QTrading::Signal::SignalUrgency::Low);
     const bool apply_window_budget =
         cfg_.carry_window_budget_enabled &&
-        (signal.strategy == "funding_carry") &&
+        IsCarryLikeStrategy(signal.strategy) &&
         (!cfg_.carry_apply_only_low_urgency ||
          signal.urgency == QTrading::Signal::SignalUrgency::Low);
     const bool apply_increase_batching =
         cfg_.carry_increase_batching_enabled &&
-        (signal.strategy == "funding_carry") &&
+        IsCarryLikeStrategy(signal.strategy) &&
         (!cfg_.carry_apply_only_low_urgency ||
          signal.urgency == QTrading::Signal::SignalUrgency::Low);
 

@@ -170,6 +170,61 @@ TEST(MarketExecutionEngineTests, CarryRebalanceRespectsCooldown)
     EXPECT_EQ(third.size(), 1u);
 }
 
+TEST(MarketExecutionEngineTests, BasisArbitrageAlsoUsesCarryCooldownControls)
+{
+    auto ex = std::make_shared<FakeExchange>();
+
+    QTrading::Execution::MarketExecutionEngine::Config cfg;
+    cfg.min_notional = 10.0;
+    cfg.carry_rebalance_cooldown_ms = 1000;
+    cfg.carry_max_rebalance_step_ratio = 1.0;
+    QTrading::Execution::MarketExecutionEngine engine(ex, cfg);
+
+    QTrading::Risk::RiskTarget target;
+    target.target_positions["BTCUSDT_PERP"] = 1000.0;
+    target.leverage["BTCUSDT_PERP"] = 2.0;
+
+    QTrading::Signal::SignalDecision signal;
+    signal.strategy = "basis_arbitrage";
+    signal.urgency = QTrading::Signal::SignalUrgency::Low;
+
+    auto first = engine.plan(target, signal, MakeMarket(1, "BTCUSDT_PERP", 10000.0));
+    ASSERT_EQ(first.size(), 1u);
+
+    auto second = engine.plan(target, signal, MakeMarket(500, "BTCUSDT_PERP", 10000.0));
+    EXPECT_TRUE(second.empty());
+
+    auto third = engine.plan(target, signal, MakeMarket(1500, "BTCUSDT_PERP", 10000.0));
+    EXPECT_EQ(third.size(), 1u);
+}
+
+TEST(MarketExecutionEngineTests, BasisArbitrageDoesNotSkipWhenOpenOrderExists)
+{
+    auto ex = std::make_shared<FakeExchange>();
+    QTrading::dto::Order existing{};
+    existing.symbol = "BTCUSDT_PERP";
+    existing.side = QTrading::Dto::Trading::OrderSide::Buy;
+    existing.quantity = 0.01;
+    ex->orders_.push_back(existing);
+
+    QTrading::Execution::MarketExecutionEngine::Config cfg;
+    cfg.min_notional = 10.0;
+    cfg.carry_rebalance_cooldown_ms = 0;
+    cfg.carry_max_rebalance_step_ratio = 1.0;
+    QTrading::Execution::MarketExecutionEngine engine(ex, cfg);
+
+    QTrading::Risk::RiskTarget target;
+    target.target_positions["BTCUSDT_PERP"] = 1000.0;
+    target.leverage["BTCUSDT_PERP"] = 2.0;
+
+    QTrading::Signal::SignalDecision signal;
+    signal.strategy = "basis_arbitrage";
+    signal.urgency = QTrading::Signal::SignalUrgency::Low;
+
+    auto orders = engine.plan(target, signal, MakeMarket(1, "BTCUSDT_PERP", 10'000.0));
+    ASSERT_EQ(orders.size(), 1u);
+}
+
 TEST(MarketExecutionEngineTests, CarryLargeNotionalUsesLongerCooldown)
 {
     auto ex = std::make_shared<FakeExchange>();
