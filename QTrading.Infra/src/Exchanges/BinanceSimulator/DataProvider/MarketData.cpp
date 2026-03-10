@@ -1,4 +1,4 @@
-﻿#include "Exchanges/BinanceSimulator/DataProvider/MarketData.hpp"
+#include "Exchanges/BinanceSimulator/DataProvider/MarketData.hpp"
 #include <algorithm>
 #include <charconv>
 #include <cstdint>
@@ -84,51 +84,56 @@ static bool parse_double(std::string_view sv, double& out)
     return true;
 }
 
-static bool parse_kline_line(std::string_view line, KlineDto& out)
+static bool parse_kline_line(std::string_view line, TradeKlineDto& out)
 {
-    // Expected columns (at least 11):
-    // 0 openTime,1 open,2 high,3 low,4 close,5 volume,6 closeTime,7 quoteVolume,8 trades,9 takerBuyBaseVol,10 takerBuyQuoteVol
+    // Supported formats:
+    // - 11 columns: openTime,open,high,low,close,volume,closeTime,quoteVolume,trades,takerBuyBaseVol,takerBuyQuoteVol
+    // - 6 columns:  openTime,open,high,low,close,closeTime
     std::string_view s = line;
-
-    long long openTs = 0;
-    double openP = 0.0, highP = 0.0, lowP = 0.0, closeP = 0.0, vol = 0.0;
-    long long closeTs = 0;
-    double quoteVol = 0.0;
-    int trades = 0;
-    double takerBB = 0.0, takerBQ = 0.0;
-
-    if (s.empty()) return false;
-
-    auto f0 = next_field(s);
-    auto f1 = next_field(s);
-    auto f2 = next_field(s);
-    auto f3 = next_field(s);
-    auto f4 = next_field(s);
-    auto f5 = next_field(s);
-    auto f6 = next_field(s);
-    auto f7 = next_field(s);
-    auto f8 = next_field(s);
-    auto f9 = next_field(s);
-    auto f10 = next_field(s);
-
-    // If we couldn't get 11 fields, reject.
-    if (f10.data() == nullptr || f0.empty() || f1.empty() || f2.empty() || f3.empty() || f4.empty()) {
+    if (s.empty()) {
         return false;
     }
 
-    if (!parse_int<long long>(f0, openTs)) return false;
-    if (!parse_double(f1, openP)) return false;
-    if (!parse_double(f2, highP)) return false;
-    if (!parse_double(f3, lowP)) return false;
-    if (!parse_double(f4, closeP)) return false;
-    if (!parse_double(f5, vol)) return false;
-    if (!parse_int<long long>(f6, closeTs)) return false;
-    if (!parse_double(f7, quoteVol)) return false;
-    if (!parse_int<int>(f8, trades)) return false;
-    if (!parse_double(f9, takerBB)) return false;
-    if (!parse_double(f10, takerBQ)) return false;
+    std::string_view fields[11]{};
+    size_t count = 0;
+    while (!s.empty() && count < 11) {
+        fields[count++] = next_field(s);
+    }
+    if (count < 6) {
+        return false;
+    }
 
-    out = KlineDto(openTs, openP, highP, lowP, closeP, vol, closeTs, quoteVol, trades, takerBB, takerBQ);
+    long long openTs = 0;
+    double openP = 0.0;
+    double highP = 0.0;
+    double lowP = 0.0;
+    double closeP = 0.0;
+    double vol = 0.0;
+    long long closeTs = 0;
+    double quoteVol = 0.0;
+    int trades = 0;
+    double takerBB = 0.0;
+    double takerBQ = 0.0;
+
+    if (!parse_int<long long>(fields[0], openTs)) return false;
+    if (!parse_double(fields[1], openP)) return false;
+    if (!parse_double(fields[2], highP)) return false;
+    if (!parse_double(fields[3], lowP)) return false;
+    if (!parse_double(fields[4], closeP)) return false;
+
+    if (count >= 11) {
+        if (!parse_double(fields[5], vol)) return false;
+        if (!parse_int<long long>(fields[6], closeTs)) return false;
+        if (!parse_double(fields[7], quoteVol)) return false;
+        if (!parse_int<int>(fields[8], trades)) return false;
+        if (!parse_double(fields[9], takerBB)) return false;
+        if (!parse_double(fields[10], takerBQ)) return false;
+    }
+    else {
+        if (!parse_int<long long>(fields[5], closeTs)) return false;
+    }
+
+    out = TradeKlineDto(openTs, openP, highP, lowP, closeP, vol, closeTs, quoteVol, trades, takerBB, takerBQ);
     return true;
 }
 
@@ -141,7 +146,7 @@ MarketData::MarketData(const std::string& symbol, const std::string& csv_file) :
     load_csv(csv_file);
 }
 
-/// @brief Load KlineDto entries from a CSV file into `klines`.
+/// @brief Load TradeKlineDto entries from a CSV file into `klines`.
 ///        Lines with insufficient tokens or parse errors are skipped.
 /// @param csv_file Path to CSV file.
 void MarketData::load_csv(const std::string& csv_file) {
@@ -172,7 +177,7 @@ void MarketData::load_csv(const std::string& csv_file) {
     bool has_last = false;
 
     while (std::getline(file, line)) {
-        KlineDto k{};
+        TradeKlineDto k{};
         if (!parse_kline_line(std::string_view(line), k)) {
             continue;
         }
@@ -191,7 +196,7 @@ void MarketData::load_csv(const std::string& csv_file) {
     // Ensure chronological order only when needed.
     if (!monotonic) {
         std::sort(klines.begin(), klines.end(),
-            [](const KlineDto& a, const KlineDto& b) {
+            [](const TradeKlineDto& a, const TradeKlineDto& b) {
                 return a.Timestamp < b.Timestamp;
             });
     }
@@ -199,15 +204,15 @@ void MarketData::load_csv(const std::string& csv_file) {
 
 /// @brief Get the most recent Kline entry.
 /// @return Reference to the last element in `klines`.
-const KlineDto& MarketData::get_latest_kline() const {
+const TradeKlineDto& MarketData::get_latest_kline() const {
     return klines.back();
 }
 
 /// @brief Get the Kline at a specific index.
 /// @param index Zero-based position in `klines`.
-/// @return Reference to the KlineDto at `index`.
+/// @return Reference to the TradeKlineDto at `index`.
 /// @throws std::out_of_range if index is invalid.
-const KlineDto& MarketData::get_kline(size_t index) const {
+const TradeKlineDto& MarketData::get_kline(size_t index) const {
     if (index < klines.size()) {
         return klines[index];
     }

@@ -38,6 +38,30 @@ bool BinanceExchange::PerpApi::place_order(const std::string& symbol,
             stp_mode
         });
         owner_.enqueue_deferred_order_locked_(due, [owner_ptr = &owner_, req_id, submitted_step, due, symbol, quantity, price, side, position_side, reduce_only, client_order_id, stp_mode](Account& acc, uint64_t step_seq) {
+            if (owner_ptr->perp_opening_blocked_by_basis_stress_account_locked_(acc, symbol, side, position_side, reduce_only)) {
+                owner_ptr->basis_stress_blocked_orders_.fetch_add(1, std::memory_order_relaxed);
+                owner_ptr->push_async_order_ack_locked_(BinanceExchange::AsyncOrderAck{
+                    req_id,
+                    BinanceExchange::AsyncOrderAck::Status::Rejected,
+                    QTrading::Dto::Trading::InstrumentType::Perp,
+                    symbol,
+                    quantity,
+                    price,
+                    side,
+                    position_side,
+                    reduce_only,
+                    submitted_step,
+                    due,
+                    step_seq,
+                    Account::OrderRejectInfo::Code::None,
+                    "Blocked by mark-index basis stress risk guard.",
+                    client_order_id,
+                    stp_mode,
+                    -2010,
+                    "NEW_ORDER_REJECTED"
+                });
+                return;
+            }
             const bool ok = acc.perp.place_order(symbol, quantity, price, side, position_side, reduce_only, client_order_id, stp_mode);
             auto rej = acc.consume_last_order_reject_info();
             auto binance_reject = BinanceExchange::map_binance_reject_(rej);
@@ -64,7 +88,12 @@ bool BinanceExchange::PerpApi::place_order(const std::string& symbol,
         });
         return true;
     }
-    return owner_.account_engine_->perp.place_order(symbol, quantity, price, side, position_side, reduce_only, client_order_id, stp_mode);
+    Account& acc = *owner_.account_engine_;
+    if (owner_.perp_opening_blocked_by_basis_stress_account_locked_(acc, symbol, side, position_side, reduce_only)) {
+        owner_.basis_stress_blocked_orders_.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+    return acc.perp.place_order(symbol, quantity, price, side, position_side, reduce_only, client_order_id, stp_mode);
 }
 
 bool BinanceExchange::PerpApi::place_order(const std::string& symbol,
@@ -99,6 +128,30 @@ bool BinanceExchange::PerpApi::place_order(const std::string& symbol,
             stp_mode
         });
         owner_.enqueue_deferred_order_locked_(due, [owner_ptr = &owner_, req_id, submitted_step, due, symbol, quantity, side, position_side, reduce_only, client_order_id, stp_mode](Account& acc, uint64_t step_seq) {
+            if (owner_ptr->perp_opening_blocked_by_basis_stress_account_locked_(acc, symbol, side, position_side, reduce_only)) {
+                owner_ptr->basis_stress_blocked_orders_.fetch_add(1, std::memory_order_relaxed);
+                owner_ptr->push_async_order_ack_locked_(BinanceExchange::AsyncOrderAck{
+                    req_id,
+                    BinanceExchange::AsyncOrderAck::Status::Rejected,
+                    QTrading::Dto::Trading::InstrumentType::Perp,
+                    symbol,
+                    quantity,
+                    0.0,
+                    side,
+                    position_side,
+                    reduce_only,
+                    submitted_step,
+                    due,
+                    step_seq,
+                    Account::OrderRejectInfo::Code::None,
+                    "Blocked by mark-index basis stress risk guard.",
+                    client_order_id,
+                    stp_mode,
+                    -2010,
+                    "NEW_ORDER_REJECTED"
+                });
+                return;
+            }
             const bool ok = acc.perp.place_order(symbol, quantity, side, position_side, reduce_only, client_order_id, stp_mode);
             auto rej = acc.consume_last_order_reject_info();
             auto binance_reject = BinanceExchange::map_binance_reject_(rej);
@@ -125,7 +178,12 @@ bool BinanceExchange::PerpApi::place_order(const std::string& symbol,
         });
         return true;
     }
-    return owner_.account_engine_->perp.place_order(symbol, quantity, side, position_side, reduce_only, client_order_id, stp_mode);
+    Account& acc = *owner_.account_engine_;
+    if (owner_.perp_opening_blocked_by_basis_stress_account_locked_(acc, symbol, side, position_side, reduce_only)) {
+        owner_.basis_stress_blocked_orders_.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+    return acc.perp.place_order(symbol, quantity, side, position_side, reduce_only, client_order_id, stp_mode);
 }
 
 void BinanceExchange::PerpApi::close_position(const std::string& symbol, double price)

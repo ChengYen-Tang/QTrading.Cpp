@@ -7,7 +7,7 @@
 #include <algorithm>
 #include <unordered_map>
 
-using QTrading::Dto::Market::Binance::KlineDto;
+using QTrading::Dto::Market::Binance::TradeKlineDto;
 using QTrading::Dto::Trading::InstrumentType;
 using QTrading::Dto::Trading::OrderSide;
 using QTrading::Dto::Trading::PositionSide;
@@ -30,7 +30,7 @@ struct FeeModel {
 struct FillModel {
     Account::KlineVolumeSplitMode split_mode{ Account::KlineVolumeSplitMode::LegacyTotalOnly };
 
-    std::pair<bool, bool> can_fill_and_taker(const Order& ord, const KlineDto& k) const
+    std::pair<bool, bool> can_fill_and_taker(const Order& ord, const TradeKlineDto& k) const
     {
         const bool is_market = (ord.price <= 0.0);
         if (is_market) {
@@ -47,7 +47,7 @@ struct FillModel {
         return { true, marketable_at_close };
     }
 
-    std::pair<bool, std::pair<double, double>> build_directional_liquidity(const KlineDto& k) const
+    std::pair<bool, std::pair<double, double>> build_directional_liquidity(const TradeKlineDto& k) const
     {
         const double vol = std::max(0.0, k.Volume);
         if (split_mode == Account::KlineVolumeSplitMode::LegacyTotalOnly || vol <= 0.0) {
@@ -193,7 +193,11 @@ Account::Account(const AccountInitConfig& init_config)
     per_symbol_.reserve(1024);
     per_symbol_active_ids_.reserve(1024);
     kline_by_id_.reserve(1024);
+    mark_kline_point_by_id_.reserve(1024);
+    index_kline_point_by_id_.reserve(1024);
     last_mark_price_by_id_.reserve(1024);
+    last_trade_price_by_id_.reserve(1024);
+    last_index_price_by_id_.reserve(1024);
     merge_indices_.reserve(1024);
     merged_positions_.reserve(1024);
 }
@@ -640,10 +644,10 @@ void Account::merge_positions() {
 
 void Account::update_positions(const std::unordered_map<std::string, std::pair<double, double>>& symbol_price_volume) {
     // Backward-compatible adapter: treat provided price as ClosePrice and use it also as High/Low.
-    std::unordered_map<std::string, KlineDto> kl;
+    std::unordered_map<std::string, TradeKlineDto> kl;
     kl.reserve(symbol_price_volume.size());
     for (const auto& kv : symbol_price_volume) {
-        KlineDto k;
+        TradeKlineDto k;
         k.OpenPrice = kv.second.first;
         k.HighPrice = kv.second.first;
         k.LowPrice = kv.second.first;
@@ -651,10 +655,113 @@ void Account::update_positions(const std::unordered_map<std::string, std::pair<d
         k.Volume = kv.second.second;
         kl.emplace(kv.first, k);
     }
-    update_positions(kl);
+    update_positions(kl, {}, {});
 }
 
-void Account::update_positions(const std::unordered_map<std::string, KlineDto>& symbol_kline) {
+void Account::update_positions(const std::unordered_map<std::string, TradeKlineDto>& symbol_kline) {
+    update_positions(symbol_kline, {}, {});
+}
+
+double Account::get_last_mark_price_(const std::string& symbol) const
+{
+    auto it = symbol_id_by_name_.find(symbol);
+    if (it == symbol_id_by_name_.end()) {
+        return 0.0;
+    }
+    const size_t sym_id = it->second;
+    if (sym_id >= last_mark_price_by_id_.size()) {
+        return 0.0;
+    }
+    const double mark = last_mark_price_by_id_[sym_id];
+    if (!std::isfinite(mark) || mark <= 0.0) {
+        return 0.0;
+    }
+    return mark;
+}
+
+Account::PerSymbolMarketContext Account::build_symbol_market_context_(size_t sym_id) const
+{
+    PerSymbolMarketContext ctx{};
+    if (sym_id >= per_symbol_.size()) {
+        return ctx;
+    }
+
+    if (sym_id < kline_by_id_.size()) {
+        ctx.trade_kline = kline_by_id_[sym_id];
+    }
+
+    if (sym_id < mark_kline_point_by_id_.size()) {
+        const auto& mk = mark_kline_point_by_id_[sym_id];
+        if (std::isfinite(mk.ClosePrice) && mk.ClosePrice > 0.0) {
+            ctx.mark_kline = &mk;
+        }
+    }
+
+    if (sym_id < index_kline_point_by_id_.size()) {
+        const auto& ik = index_kline_point_by_id_[sym_id];
+        if (std::isfinite(ik.ClosePrice) && ik.ClosePrice > 0.0) {
+            ctx.index_kline = &ik;
+        }
+    }
+
+    if (sym_id < last_trade_price_by_id_.size()) {
+        const double trade = last_trade_price_by_id_[sym_id];
+        if (std::isfinite(trade) && trade > 0.0) {
+            ctx.last_trade_price = trade;
+        }
+    }
+
+    if (sym_id < last_mark_price_by_id_.size()) {
+        const double mark = last_mark_price_by_id_[sym_id];
+        if (std::isfinite(mark) && mark > 0.0) {
+            ctx.last_mark_price = mark;
+        }
+    }
+
+    if (sym_id < last_index_price_by_id_.size()) {
+        const double index = last_index_price_by_id_[sym_id];
+        if (std::isfinite(index) && index > 0.0) {
+            ctx.last_index_price = index;
+        }
+    }
+
+    return ctx;
+}
+
+double Account::get_last_trade_price_(const std::string& symbol) const
+{
+    auto it = symbol_id_by_name_.find(symbol);
+    if (it == symbol_id_by_name_.end()) {
+        return 0.0;
+    }
+    const size_t sym_id = it->second;
+    if (sym_id >= last_trade_price_by_id_.size()) {
+        return 0.0;
+    }
+    const double trade = last_trade_price_by_id_[sym_id];
+    if (!std::isfinite(trade) || trade <= 0.0) {
+        return 0.0;
+    }
+    return trade;
+}
+
+double Account::get_reference_price_for_filters_(const std::string& symbol, InstrumentType instrument_type) const
+{
+    if (instrument_type == InstrumentType::Spot) {
+        return get_last_trade_price_(symbol);
+    }
+    return get_last_mark_price_(symbol);
+}
+
+void Account::update_positions(const std::unordered_map<std::string, TradeKlineDto>& symbol_kline,
+    const std::unordered_map<std::string, double>& symbol_mark_price)
+{
+    update_positions(symbol_kline, symbol_mark_price, {});
+}
+
+void Account::update_positions(const std::unordered_map<std::string, TradeKlineDto>& symbol_kline,
+    const std::unordered_map<std::string, double>& symbol_mark_price,
+    const std::unordered_map<std::string, double>& symbol_index_price) {
     bool dirty = false;
     bool open_orders_changed = false;
     bool positions_changed = false;
@@ -683,17 +790,72 @@ void Account::update_positions(const std::unordered_map<std::string, KlineDto>& 
         const auto& k = kv.second;
         kline_by_id_[sym_id] = &k;
         remaining_vol_[sym_id] = k.Volume;
-        last_mark_price_by_id_[sym_id] = k.ClosePrice;
-        mark_dirty = true;
+        last_trade_price_by_id_[sym_id] = k.ClosePrice;
+
+        auto it_mark = symbol_mark_price.find(kv.first);
+        if (it_mark != symbol_mark_price.end() && std::isfinite(it_mark->second) && it_mark->second > 0.0) {
+            last_mark_price_by_id_[sym_id] = it_mark->second;
+            auto& mk = mark_kline_point_by_id_[sym_id];
+            mk.Timestamp = k.Timestamp;
+            mk.OpenPrice = it_mark->second;
+            mk.HighPrice = it_mark->second;
+            mk.LowPrice = it_mark->second;
+            mk.ClosePrice = it_mark->second;
+            mk.Volume = 0.0;
+            mk.CloseTime = k.CloseTime;
+            mark_dirty = true;
+        }
+
+        auto it_index = symbol_index_price.find(kv.first);
+        if (it_index != symbol_index_price.end() && std::isfinite(it_index->second) && it_index->second > 0.0) {
+            last_index_price_by_id_[sym_id] = it_index->second;
+            auto& ik = index_kline_point_by_id_[sym_id];
+            ik.Timestamp = k.Timestamp;
+            ik.OpenPrice = it_index->second;
+            ik.HighPrice = it_index->second;
+            ik.LowPrice = it_index->second;
+            ik.ClosePrice = it_index->second;
+            ik.Volume = 0.0;
+            ik.CloseTime = k.CloseTime;
+        }
+
         if (!has_open_orders) {
             has_dir_liq_[sym_id] = 0;
             continue;
         }
-        const auto [has, liq] = policies_.directional_liquidity
-            ? policies_.directional_liquidity(kline_volume_split_mode_, k)
+        const auto market_ctx = build_symbol_market_context_(sym_id);
+        const auto [has, liq] = policies_.directional_liquidity_ctx
+            ? policies_.directional_liquidity_ctx(kline_volume_split_mode_, market_ctx)
             : fill_model.build_directional_liquidity(k);
         has_dir_liq_[sym_id] = has ? 1 : 0;
         remaining_liq_[sym_id] = liq;
+    }
+    for (const auto& kv : symbol_mark_price) {
+        if (!(std::isfinite(kv.second) && kv.second > 0.0)) {
+            continue;
+        }
+        const size_t sym_id = get_symbol_id_(kv.first);
+        last_mark_price_by_id_[sym_id] = kv.second;
+        auto& mk = mark_kline_point_by_id_[sym_id];
+        mk.OpenPrice = kv.second;
+        mk.HighPrice = kv.second;
+        mk.LowPrice = kv.second;
+        mk.ClosePrice = kv.second;
+        mk.Volume = 0.0;
+        mark_dirty = true;
+    }
+    for (const auto& kv : symbol_index_price) {
+        if (!(std::isfinite(kv.second) && kv.second > 0.0)) {
+            continue;
+        }
+        const size_t sym_id = get_symbol_id_(kv.first);
+        last_index_price_by_id_[sym_id] = kv.second;
+        auto& ik = index_kline_point_by_id_[sym_id];
+        ik.OpenPrice = kv.second;
+        ik.HighPrice = kv.second;
+        ik.LowPrice = kv.second;
+        ik.ClosePrice = kv.second;
+        ik.Volume = 0.0;
     }
     if (mark_dirty) {
         mark_balance_dirty_();
@@ -732,27 +894,22 @@ void Account::update_positions(const std::unordered_map<std::string, KlineDto>& 
         rebuild_position_index_();
     }
 
-    // Recalculate unrealized PnL (markPrice=Close).
+    // Recalculate unrealized PnL using mark price.
     for (auto& pos : positions_) {
-        const size_t pid = get_symbol_id_(pos.symbol);
-        if (pid >= kline_by_id_.size()) {
+        const double mark = get_last_mark_price_(pos.symbol);
+        if (mark <= 0.0) {
             continue;
         }
-        const KlineDto* pk = kline_by_id_[pid];
-        if (!pk) {
-            continue;
-        }
-        const double cp = pk->ClosePrice;
-        pos.unrealized_pnl = (cp - pos.entry_price) * pos.quantity * (pos.is_long ? 1.0 : -1.0);
+        pos.unrealized_pnl = (mark - pos.entry_price) * pos.quantity * (pos.is_long ? 1.0 : -1.0);
     }
 
     apply_perp_liquidation_(perp_fee_model.taker_fee, open_orders_changed, positions_changed);
 
     for (auto& p : positions_) {
-        auto itp = symbol_kline.find(p.symbol);
-        if (itp == symbol_kline.end()) continue;
-
-        const double mark = itp->second.ClosePrice;
+        const double mark = get_last_mark_price_(p.symbol);
+        if (mark <= 0.0) {
+            continue;
+        }
         p.notional = std::abs(p.quantity * mark);
         const auto& instrument_spec = resolve_instrument_spec_(p.symbol);
         if (!instrument_spec.maintenance_margin_enabled) {
@@ -1059,15 +1216,9 @@ bool Account::validate_order_filters_(const std::string& symbol,
         notional_est = quantity * price;
     }
     else {
-        auto it = symbol_id_by_name_.find(symbol);
-        if (it != symbol_id_by_name_.end()) {
-            const size_t sym_id = it->second;
-            if (sym_id < last_mark_price_by_id_.size()) {
-                const double mark = last_mark_price_by_id_[sym_id];
-                if (std::isfinite(mark) && mark > 0.0) {
-                    notional_est = quantity * mark * (1.0 + std::max(0.0, market_slippage_buffer_));
-                }
-            }
+        const double ref = get_reference_price_for_filters_(symbol, instrument_spec.type);
+        if (ref > 0.0) {
+            notional_est = quantity * ref * (1.0 + std::max(0.0, market_slippage_buffer_));
         }
     }
 
@@ -1094,17 +1245,7 @@ bool Account::validate_order_filters_(const std::string& symbol,
     }
 
     if (!is_market) {
-        auto it = symbol_id_by_name_.find(symbol);
-        double ref_price = 0.0;
-        if (it != symbol_id_by_name_.end()) {
-            const size_t sym_id = it->second;
-            if (sym_id < last_mark_price_by_id_.size()) {
-                const double mark = last_mark_price_by_id_[sym_id];
-                if (std::isfinite(mark) && mark > 0.0) {
-                    ref_price = mark;
-                }
-            }
-        }
+        const double ref_price = get_reference_price_for_filters_(symbol, instrument_spec.type);
 
         if (ref_price > 0.0) {
             double up = instrument_spec.percent_price_multiplier_up;

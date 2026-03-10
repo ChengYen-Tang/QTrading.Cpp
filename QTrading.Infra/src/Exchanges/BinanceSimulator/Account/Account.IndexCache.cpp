@@ -22,7 +22,11 @@ void Account::ensure_symbol_capacity_(size_t id)
         remaining_liq_.resize(need);
         has_dir_liq_.resize(need);
         kline_by_id_.resize(need);
+        mark_kline_point_by_id_.resize(need);
+        index_kline_point_by_id_.resize(need);
         last_mark_price_by_id_.resize(need);
+        last_trade_price_by_id_.resize(need);
+        last_index_price_by_id_.resize(need);
     }
 }
 

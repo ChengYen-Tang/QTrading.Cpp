@@ -117,10 +117,14 @@ int main()
             {"BTCUSDT_SPOT",
                 QTrading::Service::Helpers::Utf8Path(u8R"(\\synology\MarketData\General\MarketData\Kline\Spot\BTCUSDT.csv)"),
                 std::nullopt,
+                std::nullopt,
+                std::nullopt,
                 QTrading::Dto::Trading::InstrumentType::Spot},
             {"BTCUSDT_PERP",
                 QTrading::Service::Helpers::Utf8Path(u8R"(\\synology\MarketData\General\MarketData\Kline\UsdFutures\BTCUSDT.csv)"),
                 QTrading::Service::Helpers::Utf8Path(u8R"(\\synology\MarketData\General\MarketData\FundingRate\UsdFutures\BTCUSDT.csv)"),
+                QTrading::Service::Helpers::Utf8Path(u8R"(\\synology\MarketData\General\MarketData\MarkPriceKline\UsdFutures\BTCUSDT.csv)"),
+                QTrading::Service::Helpers::Utf8Path(u8R"(\\synology\MarketData\General\MarketData\IndexPriceKline\UsdFutures\BTCUSDT.csv)"),
                 QTrading::Dto::Trading::InstrumentType::Perp}
         };
         std::unordered_map<std::string, QTrading::Dto::Trading::InstrumentType> instrument_types;

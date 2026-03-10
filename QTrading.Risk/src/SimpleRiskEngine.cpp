@@ -19,11 +19,11 @@ std::optional<double> GetPriceBySymbol(
         return std::nullopt;
     }
 
-    if (market->symbols && !market->klines_by_id.empty()) {
+    if (market->symbols && !market->trade_klines_by_id.empty()) {
         const auto& symbols = *market->symbols;
         for (std::size_t i = 0; i < symbols.size(); ++i) {
-            if (symbols[i] == symbol && i < market->klines_by_id.size()) {
-                const auto& opt = market->klines_by_id[i];
+            if (symbols[i] == symbol && i < market->trade_klines_by_id.size()) {
+                const auto& opt = market->trade_klines_by_id[i];
                 if (opt.has_value()) {
                     return opt->ClosePrice;
                 }
@@ -32,12 +32,7 @@ std::optional<double> GetPriceBySymbol(
         }
     }
 
-    const auto& klines = market->klines;
-    auto it = klines.find(symbol);
-    if (it == klines.end() || !it->second.has_value()) {
-        return std::nullopt;
-    }
-    return it->second->ClosePrice;
+    return std::nullopt;
 }
 
 std::optional<double> GetFundingRateBySymbol(

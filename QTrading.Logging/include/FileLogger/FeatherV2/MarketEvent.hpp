@@ -23,6 +23,10 @@ namespace QTrading::Log::FileLogger::FeatherV2 {
         double close{};
         double volume{};
         double taker_buy_base_volume{};
+        bool has_mark_price{};
+        double mark_price{};
+        bool has_index_price{};
+        double index_price{};
     };
 
     namespace MarketEvent {
@@ -41,6 +45,10 @@ namespace QTrading::Log::FileLogger::FeatherV2 {
                 arrow::field("close", arrow::float64()),
                 arrow::field("volume", arrow::float64()),
                 arrow::field("taker_buy_base_volume", arrow::float64()),
+                arrow::field("has_mark_price", arrow::boolean()),
+                arrow::field("mark_price", arrow::float64()),
+                arrow::field("has_index_price", arrow::boolean()),
+                arrow::field("index_price", arrow::float64()),
                 arrow::field("ts_local", arrow::uint64())
             });
         }
@@ -60,7 +68,11 @@ namespace QTrading::Log::FileLogger::FeatherV2 {
             detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(9), e.close);
             detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(10), e.volume);
             detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(11), e.taker_buy_base_volume);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::UInt64Builder>(12), e.ts_local);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::BooleanBuilder>(12), e.has_mark_price);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(13), e.mark_price);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::BooleanBuilder>(14), e.has_index_price);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(15), e.index_price);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::UInt64Builder>(16), e.ts_local);
         }
     } // namespace MarketEvent
 

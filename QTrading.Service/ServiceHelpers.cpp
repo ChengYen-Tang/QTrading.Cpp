@@ -2,8 +2,10 @@
 
 #include <rapidjson/document.h>
 
+#include <algorithm>
 #include <atomic>
 #include <csignal>
+#include <cmath>
 #include <cstdlib>
 #include <fstream>
 #include <iomanip>
@@ -299,18 +301,57 @@ void EmitExchangeStatusLine(
         << " total_ledger=" << snap.total_ledger_value
         << " progress=" << snap.progress_pct << "%";
     oss << " prices=";
+    double max_abs_mark_index_bps = 0.0;
+    size_t mark_index_warning_symbols = 0;
+    size_t mark_index_stress_symbols = 0;
+    constexpr double kMarkIndexWarningBps = 50.0;
+    constexpr double kMarkIndexStressBps = 150.0;
     for (size_t i = 0; i < snap.prices.size(); ++i) {
         const auto& p = snap.prices[i];
         if (i > 0) {
             oss << ",";
         }
-        oss << p.symbol << "=";
+        oss << p.symbol << "(t=";
         if (p.has_price) {
             oss << p.price;
         }
         else {
             oss << "n/a";
         }
+        oss << ",m=";
+        if (p.has_mark_price) {
+            oss << p.mark_price;
+        }
+        else {
+            oss << "n/a";
+        }
+        oss << ",i=";
+        if (p.has_index_price) {
+            oss << p.index_price;
+        }
+        else {
+            oss << "n/a";
+        }
+        oss << ")";
+
+        if (p.has_mark_price && p.has_index_price && std::abs(p.index_price) > 1e-12) {
+            const double basis_bps = ((p.mark_price - p.index_price) / p.index_price) * 10000.0;
+            const double abs_basis_bps = std::abs(basis_bps);
+            max_abs_mark_index_bps = std::max(max_abs_mark_index_bps, abs_basis_bps);
+            if (abs_basis_bps >= kMarkIndexStressBps) {
+                ++mark_index_stress_symbols;
+            }
+            else if (abs_basis_bps >= kMarkIndexWarningBps) {
+                ++mark_index_warning_symbols;
+            }
+        }
+    }
+    oss << " mi_max_bps=" << max_abs_mark_index_bps;
+    if (mark_index_stress_symbols > 0) {
+        oss << " mi_alert=stress(" << mark_index_stress_symbols << ")";
+    }
+    else if (mark_index_warning_symbols > 0) {
+        oss << " mi_alert=warning(" << mark_index_warning_symbols << ")";
     }
     std::cout << oss.str() << std::endl;
 }

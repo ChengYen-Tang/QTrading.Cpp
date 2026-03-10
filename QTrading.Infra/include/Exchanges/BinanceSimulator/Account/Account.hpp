@@ -157,6 +157,15 @@ public:
     // --- Policies (P2.1) ---
     using FeeRates = std::tuple<double, double>; // (maker, taker)
 
+    struct PerSymbolMarketContext {
+        const QTrading::Dto::Market::Binance::TradeKlineDto* trade_kline{ nullptr };
+        const QTrading::Dto::Market::Binance::TradeKlineDto* mark_kline{ nullptr };
+        const QTrading::Dto::Market::Binance::TradeKlineDto* index_kline{ nullptr };
+        std::optional<double> last_trade_price{};
+        std::optional<double> last_mark_price{};
+        std::optional<double> last_index_price{};
+    };
+
     struct Policies {
         // Perp fee rates by VIP level (maker, taker).
         std::function<FeeRates(int vip_level)> fee_rates;
@@ -164,22 +173,16 @@ public:
         // If not provided, spot falls back to the default spot fee table.
         std::function<FeeRates(int vip_level)> spot_fee_rates;
 
-        // Decide if order can fill on this kline and whether it's taker
-        std::function<std::pair<bool, bool>(const Order& ord, const QTrading::Dto::Market::Binance::KlineDto& k)> can_fill_and_taker;
-
-        // Directional liquidity split: returns {has_dir_liq, {buy_liq, sell_liq}}
+        // Context-aware policy interfaces.
+        std::function<std::pair<bool, bool>(const Order& ord, const PerSymbolMarketContext& ctx)> can_fill_and_taker_ctx;
         std::function<std::pair<bool, std::pair<double, double>>(
             KlineVolumeSplitMode mode,
-            const QTrading::Dto::Market::Binance::KlineDto& k)> directional_liquidity;
-
-        // Execution price given slippage settings
+            const PerSymbolMarketContext& ctx)> directional_liquidity_ctx;
         std::function<double(const Order& ord,
-            const QTrading::Dto::Market::Binance::KlineDto& k,
+            const PerSymbolMarketContext& ctx,
             double market_exec_slip,
-            double limit_exec_slip)> execution_price;
-
-        // Liquidation execution price (defaults to Low/High)
-        std::function<double(const Position& pos, const QTrading::Dto::Market::Binance::KlineDto& k)> liquidation_price;
+            double limit_exec_slip)> execution_price_ctx;
+        std::function<double(const Position& pos, const PerSymbolMarketContext& ctx)> liquidation_price_ctx;
     };
 
     static Policies DefaultPolicies();
@@ -242,7 +245,12 @@ public:
     std::optional<OrderRejectInfo> consume_last_order_reject_info();
 
     void update_positions(const std::unordered_map<std::string, std::pair<double, double>>& symbol_price_volume);
-    void update_positions(const std::unordered_map<std::string, QTrading::Dto::Market::Binance::KlineDto>& symbol_kline);
+    void update_positions(const std::unordered_map<std::string, QTrading::Dto::Market::Binance::TradeKlineDto>& symbol_kline);
+    void update_positions(const std::unordered_map<std::string, QTrading::Dto::Market::Binance::TradeKlineDto>& symbol_kline,
+        const std::unordered_map<std::string, double>& symbol_mark_price);
+    void update_positions(const std::unordered_map<std::string, QTrading::Dto::Market::Binance::TradeKlineDto>& symbol_kline,
+        const std::unordered_map<std::string, double>& symbol_mark_price,
+        const std::unordered_map<std::string, double>& symbol_index_price);
 
     struct FundingApplyResult {
         int position_id{};
@@ -402,7 +410,9 @@ private:
     // Cached per-symbol open order indices in priority order (indexed by symbol id).
     std::vector<std::vector<size_t>> per_symbol_;
     std::vector<size_t> per_symbol_active_ids_;
-    std::vector<const QTrading::Dto::Market::Binance::KlineDto*> kline_by_id_;
+    std::vector<const QTrading::Dto::Market::Binance::TradeKlineDto*> kline_by_id_;
+    std::vector<QTrading::Dto::Market::Binance::TradeKlineDto> mark_kline_point_by_id_;
+    std::vector<QTrading::Dto::Market::Binance::TradeKlineDto> index_kline_point_by_id_;
     struct FillCandidate {
         size_t idx{};
         bool is_taker{};
@@ -410,9 +420,12 @@ private:
     std::vector<size_t> merge_indices_;
     std::vector<Position> merged_positions_;
 
-    // Last known mark/close price per symbol id (from kline ClosePrice).
-    // Used for market-order notional estimation.
+    // Last known mark/reference price per symbol id (exchange-provided mark stream only).
     std::vector<double> last_mark_price_by_id_;
+    // Last known trade/close price per symbol id (from trade kline ClosePrice).
+    std::vector<double> last_trade_price_by_id_;
+    // Last known index/reference price per symbol id.
+    std::vector<double> last_index_price_by_id_;
 
     // For market orders, notional is estimated as qty * mark * (1 + buffer).
     double market_slippage_buffer_{ 0.005 };
@@ -509,21 +522,27 @@ private:
         QTrading::Dto::Trading::OrderSide side,
         const QTrading::Dto::Trading::InstrumentSpec& instrument_spec);
     bool has_reducible_position_for_order_(const Order& ord) const;
-    void update_unrealized_for_symbol_(const std::string& symbol, double close_price);
+    void update_unrealized_for_symbol_(const std::string& symbol, double mark_price);
+    PerSymbolMarketContext build_symbol_market_context_(size_t sym_id) const;
+    double get_last_mark_price_(const std::string& symbol) const;
+    double get_last_trade_price_(const std::string& symbol) const;
+    double get_reference_price_for_filters_(const std::string& symbol,
+        QTrading::Dto::Trading::InstrumentType instrument_type) const;
     bool has_open_perp_position_() const;
     void apply_perp_liquidation_(double taker_fee, bool& open_orders_changed, bool& positions_changed);
     void process_open_orders_pipeline_(bool& dirty, bool& open_orders_changed, bool& positions_changed);
     std::pair<bool, bool> evaluate_can_fill_and_taker_(const Order& ord,
-        const QTrading::Dto::Market::Binance::KlineDto& k) const;
+        const QTrading::Dto::Market::Binance::TradeKlineDto& k,
+        const PerSymbolMarketContext& market_ctx) const;
     double limit_fill_probability_(const Order& ord,
-        const QTrading::Dto::Market::Binance::KlineDto& k,
+        const QTrading::Dto::Market::Binance::TradeKlineDto& k,
         bool is_taker) const;
     std::pair<double, double> apply_market_impact_slippage_(const Order& ord,
-        const QTrading::Dto::Market::Binance::KlineDto& k,
+        const QTrading::Dto::Market::Binance::TradeKlineDto& k,
         double base_fill_price,
         double fill_qty) const;
     double taker_probability_(const Order& ord,
-        const QTrading::Dto::Market::Binance::KlineDto& k,
+        const QTrading::Dto::Market::Binance::TradeKlineDto& k,
         bool base_is_taker) const;
     void close_spot_position_(const std::string& symbol, double price);
     void close_perp_position_(const std::string& symbol, double price);

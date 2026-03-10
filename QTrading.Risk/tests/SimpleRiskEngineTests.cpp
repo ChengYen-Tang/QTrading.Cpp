@@ -15,9 +15,9 @@ std::shared_ptr<QTrading::Dto::Market::Binance::MultiKlineDto> MakeTwoLegMarket(
     symbols->push_back("BTCUSDT_SPOT");
     symbols->push_back("BTCUSDT_PERP");
     dto->symbols = symbols;
-    dto->klines_by_id.resize(2);
-    dto->klines_by_id[0] = QTrading::Dto::Market::Binance::KlineDto(ts, 0, 0, 0, spot_close, 0, ts, 0, 0, 0, 0);
-    dto->klines_by_id[1] = QTrading::Dto::Market::Binance::KlineDto(ts, 0, 0, 0, perp_close, 0, ts, 0, 0, 0, 0);
+    dto->trade_klines_by_id.resize(2);
+    dto->trade_klines_by_id[0] = QTrading::Dto::Market::Binance::KlineDto(ts, 0, 0, 0, spot_close, 0, ts, 0, 0, 0, 0);
+    dto->trade_klines_by_id[1] = QTrading::Dto::Market::Binance::KlineDto(ts, 0, 0, 0, perp_close, 0, ts, 0, 0, 0, 0);
     return dto;
 }
 
@@ -49,9 +49,9 @@ std::shared_ptr<QTrading::Dto::Market::Binance::MultiKlineDto> MakeTwoLegMarketC
     symbols->push_back(leg_a_symbol);
     symbols->push_back(leg_b_symbol);
     dto->symbols = symbols;
-    dto->klines_by_id.resize(2);
-    dto->klines_by_id[0] = QTrading::Dto::Market::Binance::KlineDto(ts, 0, 0, 0, leg_a_close, 0, ts, 0, 0, 0, 0);
-    dto->klines_by_id[1] = QTrading::Dto::Market::Binance::KlineDto(ts, 0, 0, 0, leg_b_close, 0, ts, 0, 0, 0, 0);
+    dto->trade_klines_by_id.resize(2);
+    dto->trade_klines_by_id[0] = QTrading::Dto::Market::Binance::KlineDto(ts, 0, 0, 0, leg_a_close, 0, ts, 0, 0, 0, 0);
+    dto->trade_klines_by_id[1] = QTrading::Dto::Market::Binance::KlineDto(ts, 0, 0, 0, leg_b_close, 0, ts, 0, 0, 0, 0);
     return dto;
 }
 

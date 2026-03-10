@@ -36,8 +36,8 @@ MarketPtr MakeMarket(unsigned long long ts, const std::string& symbol, double cl
     auto symbols = std::make_shared<std::vector<std::string>>();
     symbols->push_back(symbol);
     dto->symbols = symbols;
-    dto->klines_by_id.resize(symbols->size());
-    dto->klines_by_id[0] = k;
+    dto->trade_klines_by_id.resize(symbols->size());
+    dto->trade_klines_by_id[0] = k;
     return dto;
 }
 
@@ -53,8 +53,8 @@ MarketPtr MakeMarketWithQuoteVolume(
     auto symbols = std::make_shared<std::vector<std::string>>();
     symbols->push_back(symbol);
     dto->symbols = symbols;
-    dto->klines_by_id.resize(symbols->size());
-    dto->klines_by_id[0] = k;
+    dto->trade_klines_by_id.resize(symbols->size());
+    dto->trade_klines_by_id[0] = k;
     return dto;
 }
 
@@ -71,9 +71,9 @@ MarketPtr MakeTwoSymbolMarket(
     symbols->push_back(symbol_a);
     symbols->push_back(symbol_b);
     dto->symbols = symbols;
-    dto->klines_by_id.resize(symbols->size());
-    dto->klines_by_id[0] = QTrading::Dto::Market::Binance::KlineDto(ts, 0, 0, 0, close_a, 0, ts, 0, 0, 0, 0);
-    dto->klines_by_id[1] = QTrading::Dto::Market::Binance::KlineDto(ts, 0, 0, 0, close_b, 0, ts, 0, 0, 0, 0);
+    dto->trade_klines_by_id.resize(symbols->size());
+    dto->trade_klines_by_id[0] = QTrading::Dto::Market::Binance::KlineDto(ts, 0, 0, 0, close_a, 0, ts, 0, 0, 0, 0);
+    dto->trade_klines_by_id[1] = QTrading::Dto::Market::Binance::KlineDto(ts, 0, 0, 0, close_b, 0, ts, 0, 0, 0, 0);
     return dto;
 }
 

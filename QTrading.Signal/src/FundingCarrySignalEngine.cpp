@@ -333,20 +333,14 @@ bool FundingCarrySignalEngine::market_has_symbols(
     }
 
     if (has_symbol_ids_ &&
-        spot_id_ < market->klines_by_id.size() &&
-        perp_id_ < market->klines_by_id.size())
+        spot_id_ < market->trade_klines_by_id.size() &&
+        perp_id_ < market->trade_klines_by_id.size())
     {
-        return market->klines_by_id[spot_id_].has_value() &&
-            market->klines_by_id[perp_id_].has_value();
+        return market->trade_klines_by_id[spot_id_].has_value() &&
+            market->trade_klines_by_id[perp_id_].has_value();
     }
 
-    const auto& klines = market->klines;
-    auto it_spot = klines.find(cfg_.spot_symbol);
-    auto it_perp = klines.find(cfg_.perp_symbol);
-    if (it_spot == klines.end() || it_perp == klines.end()) {
-        return false;
-    }
-    return it_spot->second.has_value() && it_perp->second.has_value();
+    return false;
 }
 
 SignalDecision FundingCarrySignalEngine::on_market(
@@ -371,11 +365,11 @@ SignalDecision FundingCarrySignalEngine::on_market(
     std::optional<double> spot_close;
     std::optional<double> perp_close;
     if (has_symbol_ids_ &&
-        spot_id_ < market->klines_by_id.size() &&
-        perp_id_ < market->klines_by_id.size())
+        spot_id_ < market->trade_klines_by_id.size() &&
+        perp_id_ < market->trade_klines_by_id.size())
     {
-        const auto& spot_opt = market->klines_by_id[spot_id_];
-        const auto& perp_opt = market->klines_by_id[perp_id_];
+        const auto& spot_opt = market->trade_klines_by_id[spot_id_];
+        const auto& perp_opt = market->trade_klines_by_id[perp_id_];
         if (spot_opt.has_value()) {
             spot_close = spot_opt->ClosePrice;
         }

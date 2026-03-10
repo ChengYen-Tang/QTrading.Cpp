@@ -35,15 +35,9 @@ bool Account::place_spot_order(const std::string& symbol,
             notional_est = quantity * price;
         }
         else {
-            auto it = symbol_id_by_name_.find(symbol);
-            if (it != symbol_id_by_name_.end()) {
-                const size_t sym_id = it->second;
-                if (sym_id < last_mark_price_by_id_.size()) {
-                    const double mark = last_mark_price_by_id_[sym_id];
-                    if (std::isfinite(mark) && mark > 0.0) {
-                        notional_est = quantity * mark * (1.0 + std::max(0.0, market_slippage_buffer_));
-                    }
-                }
+            const double trade = get_last_trade_price_(symbol);
+            if (trade > 0.0) {
+                notional_est = quantity * trade * (1.0 + std::max(0.0, market_slippage_buffer_));
             }
         }
 

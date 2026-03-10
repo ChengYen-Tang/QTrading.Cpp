@@ -45,15 +45,21 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
             std::string symbol;
             std::string kline_csv;
             std::optional<std::string> funding_csv;
+            std::optional<std::string> mark_kline_csv;
+            std::optional<std::string> index_kline_csv;
             std::optional<QTrading::Dto::Trading::InstrumentType> instrument_type;
 
             SymbolDataset(std::string sym,
                 std::string kline,
                 std::optional<std::string> funding,
+                std::optional<std::string> mark_kline = std::nullopt,
+                std::optional<std::string> index_kline = std::nullopt,
                 std::optional<QTrading::Dto::Trading::InstrumentType> type = std::nullopt)
                 : symbol(std::move(sym)),
                 kline_csv(std::move(kline)),
                 funding_csv(std::move(funding)),
+                mark_kline_csv(std::move(mark_kline)),
+                index_kline_csv(std::move(index_kline)),
                 instrument_type(type) {}
         };
 
@@ -145,8 +151,8 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
             const Account::AccountInitConfig& account_init,
             uint64_t run_id = 0);
 
-        /// @brief Construct with kline + optional funding CSV mappings.
-        /// @param datasets Vector of (symbol, kline_csv, optional funding_csv).
+        /// @brief Construct with trade/mark/index kline + optional funding CSV mappings.
+        /// @param datasets Vector of per-symbol datasets.
         /// @param logger Shared pointer to a Logger instance.
         /// @param init_balance Starting account balance.
         /// @param vip_level VIP level for fee tier (0–9).
@@ -170,7 +176,7 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
             uint64_t run_id = 0);
 
         /// @brief Construct with datasets, logger, and existing Account.
-        /// @param datasets Vector of (symbol, kline_csv, optional funding_csv).
+        /// @param datasets Vector of per-symbol datasets.
         /// @param logger Shared pointer to a Logger instance.
         /// @param account Shared pointer to a preconfigured Account.
         BinanceExchange(const std::vector<SymbolDataset>& datasets,
@@ -238,20 +244,30 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
         };
         void set_funding_apply_timing(FundingApplyTiming timing);
         FundingApplyTiming funding_apply_timing() const;
-        // Max allowed age (ms) for using last close as funding mark-price fallback.
-        // 0 means no limit.
-        void set_funding_mark_price_max_age_ms(uint64_t max_age_ms);
-        uint64_t funding_mark_price_max_age_ms() const;
         void set_uncertainty_band_bps(double bps);
         double uncertainty_band_bps() const;
+        void set_mark_index_basis_thresholds_bps(double warning_bps, double stress_bps);
+        void set_basis_risk_leverage_caps(double warning_cap, double stress_cap);
+        void set_basis_risk_guard_enabled(bool enabled);
+        bool basis_risk_guard_enabled() const;
+        void set_basis_stress_blocks_opening_orders(bool enabled);
+        bool basis_stress_blocks_opening_orders() const;
         /// @brief Close all channels and mark simulation complete.
         void  close() override;
 
         struct StatusSnapshot {
             struct PriceSnapshot {
                 std::string symbol;
+                // Legacy trade close fields kept for compatibility.
                 double price{ 0.0 };
                 bool has_price{ false };
+                // Explicit split prices.
+                double trade_price{ 0.0 };
+                bool has_trade_price{ false };
+                double mark_price{ 0.0 };
+                bool has_mark_price{ false };
+                double index_price{ 0.0 };
+                bool has_index_price{ false };
             };
 
             uint64_t ts_exchange{ 0 };
@@ -276,6 +292,9 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
             double total_ledger_value_conservative{ 0.0 };
             double total_ledger_value_optimistic{ 0.0 };
             double uncertainty_band_bps{ 0.0 };
+            uint32_t basis_warning_symbols{ 0 };
+            uint32_t basis_stress_symbols{ 0 };
+            uint64_t basis_stress_blocked_orders{ 0 };
 
             double progress_pct{ 0.0 };
             std::vector<PriceSnapshot> prices;
@@ -294,10 +313,13 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
         QTrading::Log::Logger::ModuleId market_event_module_id_{ QTrading::Log::Logger::kInvalidModuleId };
         QTrading::Log::Logger::ModuleId funding_event_module_id_{ QTrading::Log::Logger::kInvalidModuleId };
         bool enable_event_logging_{ true };
-        bool enable_klines_map_{ false };
         std::vector<std::string>                    symbols_; ///< Stable symbol list.
         std::shared_ptr<const std::vector<std::string>> symbols_shared_;
         std::vector<MarketData>                     md_;      ///< CSV-backed data provider per symbol.
+        std::vector<std::unique_ptr<MarketData>>   mark_md_; ///< Optional mark-price kline data per symbol.
+        std::vector<std::unique_ptr<MarketData>>   index_md_; ///< Optional index-price kline data per symbol.
+        std::vector<uint8_t>                       has_mark_md_;
+        std::vector<uint8_t>                       has_index_md_;
         std::vector<size_t>                         cursor_;  ///< Current read index per symbol.
         std::vector<size_t>                         kline_window_begin_idx_; ///< Inclusive begin index per symbol.
         std::vector<size_t>                         kline_window_end_idx_;   ///< Exclusive end index per symbol.
@@ -376,9 +398,28 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
         std::vector<double> last_close_by_symbol_;
         std::vector<uint64_t> last_close_ts_by_symbol_;
         std::vector<uint8_t> has_last_close_;
+        std::vector<double> last_mark_by_symbol_;
+        std::vector<uint64_t> last_mark_ts_by_symbol_;
+        std::vector<uint8_t> has_last_mark_;
+        std::vector<double> last_index_by_symbol_;
+        std::vector<uint64_t> last_index_ts_by_symbol_;
+        std::vector<uint8_t> has_last_index_;
+        std::vector<double> last_mark_index_basis_bps_by_symbol_;
+        std::vector<uint8_t> has_last_mark_index_basis_;
+        double last_mark_index_max_abs_basis_bps_{ 0.0 };
+        uint32_t last_mark_index_warning_symbols_{ 0 };
+        uint32_t last_mark_index_stress_symbols_{ 0 };
+        std::vector<uint8_t> basis_warning_active_by_symbol_;
+        std::vector<uint8_t> basis_stress_active_by_symbol_;
+        double mark_index_warning_bps_{ 50.0 };
+        double mark_index_stress_bps_{ 150.0 };
+        bool basis_risk_guard_enabled_{ true };
+        bool basis_stress_blocks_opening_orders_{ true };
+        double basis_warning_leverage_cap_{ 10.0 };
+        double basis_stress_leverage_cap_{ 5.0 };
+        std::atomic<uint64_t> basis_stress_blocked_orders_{ 0 };
         size_t order_latency_bars_{ 0 };
         FundingApplyTiming funding_apply_timing_{ FundingApplyTiming::BeforeMatching };
-        uint64_t funding_mark_price_max_age_ms_{ 0 };
         uint64_t processed_steps_{ 0 };
         double uncertainty_band_bps_{ 0.0 };
         struct DeferredOrderCommand {
@@ -395,10 +436,10 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
         bool     next_timestamp(uint64_t& ts);
         /// @brief Build a MultiKlineDto for timestamp ts and advance cursors.
         /// @param ts Timestamp to snapshot.
-        /// @param[out] out DTO to populate with per-symbol KlineDto or std::nullopt.
+        /// @param[out] out DTO to populate with per-symbol TradeKlineDto or std::nullopt.
         void     build_multikline(uint64_t ts,
             QTrading::Dto::Market::Binance::MultiKlineDto& out,
-            std::unordered_map<std::string, QTrading::Dto::Market::Binance::KlineDto>& kline_snap_cache);
+            std::unordered_map<std::string, QTrading::Dto::Market::Binance::TradeKlineDto>& kline_snap_cache);
         /// @brief Log current account balance, positions and orders via logger.
         void log_status_snapshot(const QTrading::Dto::Account::BalanceSnapshot& perp_balance,
             const QTrading::Dto::Account::BalanceSnapshot& spot_balance,
@@ -429,6 +470,13 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
         void push_async_order_ack_locked_(AsyncOrderAck ack);
         static std::pair<int, std::string> map_binance_reject_(const std::optional<Account::OrderRejectInfo>& reject);
         bool interpolate_mark_price_(size_t sym_id, uint64_t ts, double& out_price) const;
+        bool interpolate_index_price_(size_t sym_id, uint64_t ts, double& out_price) const;
+        bool perp_opening_blocked_by_basis_stress_account_locked_(
+            Account& acc,
+            const std::string& symbol,
+            QTrading::Dto::Trading::OrderSide side,
+            QTrading::Dto::Trading::PositionSide position_side,
+            bool reduce_only) const;
         void collect_funding_events_unlocked_(uint64_t ts,
             std::vector<QTrading::Log::FileLogger::FeatherV2::FundingEventDto>& out);
         double progress_pct_unlocked_() const;

@@ -5,7 +5,7 @@
 #include <algorithm>
 #include <cmath>
 
-using QTrading::Dto::Market::Binance::KlineDto;
+using QTrading::Dto::Market::Binance::TradeKlineDto;
 using QTrading::Dto::Trading::OrderSide;
 
 namespace {
@@ -13,7 +13,7 @@ namespace {
 struct FillModel {
     Account::KlineVolumeSplitMode split_mode{ Account::KlineVolumeSplitMode::LegacyTotalOnly };
 
-    std::pair<bool, std::pair<double, double>> build_directional_liquidity(const KlineDto& k) const
+    std::pair<bool, std::pair<double, double>> build_directional_liquidity(const TradeKlineDto& k) const
     {
         const double vol = std::max(0.0, k.Volume);
         if (split_mode == Account::KlineVolumeSplitMode::LegacyTotalOnly || vol <= 0.0) {
@@ -52,7 +52,7 @@ struct PriceExecutionModel {
     double market_exec_slippage{};
     double limit_exec_slippage{};
 
-    double execution_price(const Order& ord, const KlineDto& k) const
+    double execution_price(const Order& ord, const TradeKlineDto& k) const
     {
         const bool is_market = (ord.price <= 0.0);
         double fill_price = is_market ? k.ClosePrice : ord.price;
@@ -108,7 +108,11 @@ Account::Policies AccountPolicies::Default()
         return std::make_tuple(spot_vip_fee_rates.at(0).maker_fee_rate, spot_vip_fee_rates.at(0).taker_fee_rate);
     };
 
-    p.can_fill_and_taker = [](const Order& ord, const KlineDto& k) -> std::pair<bool, bool> {
+    p.can_fill_and_taker_ctx = [](const Order& ord, const Account::PerSymbolMarketContext& ctx) -> std::pair<bool, bool> {
+        if (ctx.trade_kline == nullptr) {
+            return { false, false };
+        }
+        const TradeKlineDto& k = *ctx.trade_kline;
         const bool is_market = (ord.price <= 0.0);
         if (is_market) {
             return { true, true };
@@ -124,22 +128,36 @@ Account::Policies AccountPolicies::Default()
         return { true, marketable_at_close };
     };
 
-    p.directional_liquidity = [](Account::KlineVolumeSplitMode mode, const KlineDto& k)
+    p.directional_liquidity_ctx = [](Account::KlineVolumeSplitMode mode, const Account::PerSymbolMarketContext& ctx)
         -> std::pair<bool, std::pair<double, double>> {
+        if (ctx.trade_kline == nullptr) {
+            return { false, {0.0, 0.0} };
+        }
+        const TradeKlineDto& k = *ctx.trade_kline;
         FillModel m;
         m.split_mode = mode;
         return m.build_directional_liquidity(k);
     };
 
-    p.execution_price = [](const Order& ord, const KlineDto& k, double market_exec_slip, double limit_exec_slip) -> double {
+    p.execution_price_ctx = [](const Order& ord,
+        const Account::PerSymbolMarketContext& ctx,
+        double market_exec_slip,
+        double limit_exec_slip) -> double {
+        if (ctx.trade_kline == nullptr) {
+            return 0.0;
+        }
+        const TradeKlineDto& k = *ctx.trade_kline;
         PriceExecutionModel px;
         px.market_exec_slippage = market_exec_slip;
         px.limit_exec_slippage = limit_exec_slip;
         return px.execution_price(ord, k);
     };
 
-    p.liquidation_price = [](const Position& pos, const KlineDto& k) -> double {
-        return pos.is_long ? k.LowPrice : k.HighPrice;
+    p.liquidation_price_ctx = [](const Position&, const Account::PerSymbolMarketContext& ctx) -> double {
+        if (ctx.last_mark_price.has_value()) {
+            return *ctx.last_mark_price;
+        }
+        return 0.0;
     };
 
     return p;

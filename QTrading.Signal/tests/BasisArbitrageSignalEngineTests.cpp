@@ -20,10 +20,10 @@ std::shared_ptr<QTrading::Dto::Market::Binance::MultiKlineDto> MakeMarket(
     symbols->push_back("BTCUSDT_SPOT");
     symbols->push_back("BTCUSDT_PERP");
     dto->symbols = symbols;
-    dto->klines_by_id.resize(symbols->size());
-    dto->klines_by_id[0] =
+    dto->trade_klines_by_id.resize(symbols->size());
+    dto->trade_klines_by_id[0] =
         include_spot ? std::optional<QTrading::Dto::Market::Binance::KlineDto>(spot) : std::nullopt;
-    dto->klines_by_id[1] =
+    dto->trade_klines_by_id[1] =
         include_perp ? std::optional<QTrading::Dto::Market::Binance::KlineDto>(perp) : std::nullopt;
     return dto;
 }

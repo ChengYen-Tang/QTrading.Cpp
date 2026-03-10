@@ -21,10 +21,10 @@ std::shared_ptr<QTrading::Dto::Market::Binance::MultiKlineDto> MakeMarket(
     symbols->push_back("BTCUSDT_SPOT");
     symbols->push_back("BTCUSDT_PERP");
     dto->symbols = symbols;
-    dto->klines_by_id.resize(symbols->size());
+    dto->trade_klines_by_id.resize(symbols->size());
     dto->funding_by_id.resize(symbols->size());
-    dto->klines_by_id[0] = include_spot ? std::optional<QTrading::Dto::Market::Binance::KlineDto>(spot) : std::nullopt;
-    dto->klines_by_id[1] = include_perp ? std::optional<QTrading::Dto::Market::Binance::KlineDto>(perp) : std::nullopt;
+    dto->trade_klines_by_id[0] = include_spot ? std::optional<QTrading::Dto::Market::Binance::KlineDto>(spot) : std::nullopt;
+    dto->trade_klines_by_id[1] = include_perp ? std::optional<QTrading::Dto::Market::Binance::KlineDto>(perp) : std::nullopt;
     if (perp_funding_rate.has_value()) {
         const auto funding_ts = perp_funding_time.value_or(ts);
         dto->funding_by_id[1] = QTrading::Dto::Market::Binance::FundingRateDto(funding_ts, *perp_funding_rate);
@@ -49,9 +49,9 @@ std::shared_ptr<QTrading::Dto::Market::Binance::MultiKlineDto> MakeMarketCustomS
     symbols->push_back(spot_symbol);
     symbols->push_back(perp_symbol);
     dto->symbols = symbols;
-    dto->klines_by_id.resize(symbols->size());
-    dto->klines_by_id[0] = include_spot ? std::optional<QTrading::Dto::Market::Binance::KlineDto>(spot) : std::nullopt;
-    dto->klines_by_id[1] = include_perp ? std::optional<QTrading::Dto::Market::Binance::KlineDto>(perp) : std::nullopt;
+    dto->trade_klines_by_id.resize(symbols->size());
+    dto->trade_klines_by_id[0] = include_spot ? std::optional<QTrading::Dto::Market::Binance::KlineDto>(spot) : std::nullopt;
+    dto->trade_klines_by_id[1] = include_perp ? std::optional<QTrading::Dto::Market::Binance::KlineDto>(perp) : std::nullopt;
     return dto;
 }
 

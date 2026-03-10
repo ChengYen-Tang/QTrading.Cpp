@@ -30,19 +30,11 @@ QTrading::Dto::Account::BalanceSnapshot Account::get_spot_balance() const
             continue;
         }
 
-        const auto it = symbol_id_by_name_.find(ord.symbol);
-        if (it == symbol_id_by_name_.end()) {
+        const double trade = get_last_trade_price_(ord.symbol);
+        if (trade <= 0.0) {
             continue;
         }
-        const size_t sym_id = it->second;
-        if (sym_id >= last_mark_price_by_id_.size()) {
-            continue;
-        }
-        const double mark = last_mark_price_by_id_[sym_id];
-        if (!std::isfinite(mark) || mark <= 0.0) {
-            continue;
-        }
-        const double notional = ord.quantity * mark * (1.0 + std::max(0.0, market_slippage_buffer_));
+        const double notional = ord.quantity * trade * (1.0 + std::max(0.0, market_slippage_buffer_));
         reserved += notional * (1.0 + worst_fee_rate);
     }
 

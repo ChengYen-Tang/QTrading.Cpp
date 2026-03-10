@@ -99,6 +99,22 @@ protected:
             << std::get<10>(r) << '\n';// takerBQ
     }
 
+    /// @brief Write a compact 6-column kline CSV.
+    void writeCompactCsv(const std::string& fileName,
+        const std::vector<std::tuple<uint64_t, double, double, double, double, uint64_t>>& rows)
+    {
+        std::ofstream f(tmpDir / fileName, std::ios::trunc);
+        f << "openTime,open,high,low,close,closeTime\n";
+        for (const auto& r : rows) {
+            f << std::get<0>(r) << ','
+              << std::get<1>(r) << ','
+              << std::get<2>(r) << ','
+              << std::get<3>(r) << ','
+              << std::get<4>(r) << ','
+              << std::get<5>(r) << '\n';
+        }
+    }
+
     /// @brief Write a minimal funding CSV (FundingTime,Rate,MarkPrice).
     void writeFundingCsv(const std::string& fileName,
         const std::vector<std::tuple<uint64_t, double, std::optional<double>>>& rows)
@@ -174,22 +190,22 @@ TEST_F(BinanceExchangeFixture, SymbolsSynchronisedWithHoles)
     const auto eth_id = find_id("ETHUSDT");
     ASSERT_LT(btc_id, symbols->size());
     ASSERT_LT(eth_id, symbols->size());
-    EXPECT_TRUE(dto1->get()->klines_by_id[btc_id].has_value());
-    EXPECT_FALSE(dto1->get()->klines_by_id[eth_id].has_value());
+    EXPECT_TRUE(dto1->get()->trade_klines_by_id[btc_id].has_value());
+    EXPECT_FALSE(dto1->get()->trade_klines_by_id[eth_id].has_value());
 
     // ---------- step #2  (t = 30 000) -----
     ASSERT_TRUE(ex.step());
     auto dto2 = mCh->Receive();
     EXPECT_EQ(dto2->get()->Timestamp, 30000u);
-    EXPECT_FALSE(dto2->get()->klines_by_id[btc_id].has_value());
-    EXPECT_TRUE(dto2->get()->klines_by_id[eth_id].has_value());
+    EXPECT_FALSE(dto2->get()->trade_klines_by_id[btc_id].has_value());
+    EXPECT_TRUE(dto2->get()->trade_klines_by_id[eth_id].has_value());
 
     // ---------- step #3  (t = 60 000) -----
     ASSERT_TRUE(ex.step());
     auto dto3 = mCh->Receive();
     EXPECT_EQ(dto3->get()->Timestamp, 60000u);
-    EXPECT_TRUE(dto3->get()->klines_by_id[btc_id].has_value());
-    EXPECT_TRUE(dto3->get()->klines_by_id[eth_id].has_value());
+    EXPECT_TRUE(dto3->get()->trade_klines_by_id[btc_id].has_value());
+    EXPECT_TRUE(dto3->get()->trade_klines_by_id[eth_id].has_value());
 
     // ---------- step #4  (EOF) ------------
     EXPECT_FALSE(ex.step());          // nothing left
@@ -517,6 +533,12 @@ TEST_F(BinanceExchangeFixture, FundingAppliedAndDeduped)
         {  60000, 110,110,110,110,1000, 90000,100,1,0,0 },
         { 120000, 120,120,120,120,1000,150000,100,1,0,0 }
         });
+    writeCompactCsv("btc_mark.csv", {
+        {      0, 130,130,130,130,  30000 },
+        {  60000, 140,140,140,140,  90000 },
+        { 120000, 150,150,150,150, 150000 }
+        });
+    const std::string mark_path = (tmpDir / "btc_mark.csv").string();
 
     writeFundingCsv("btc_funding.csv", {
         {  60000,  0.001, std::nullopt },
@@ -524,8 +546,11 @@ TEST_F(BinanceExchangeFixture, FundingAppliedAndDeduped)
         });
 
     BinanceExchange ex(
-        { {"BTCUSDT", (tmpDir / "btc.csv").string(),
-            std::optional<std::string>((tmpDir / "btc_funding.csv").string())} },
+        { BinanceExchange::SymbolDataset{
+            "BTCUSDT",
+            (tmpDir / "btc.csv").string(),
+            std::optional<std::string>((tmpDir / "btc_funding.csv").string()),
+            mark_path} },
         logger,
         /*balance*/ 1000.0);
 
@@ -544,13 +569,13 @@ TEST_F(BinanceExchangeFixture, FundingAppliedAndDeduped)
     mCh->Receive();
     ex.FillStatusSnapshot(snap);
     const double after1 = snap.wallet_balance;
-    EXPECT_NEAR(after1 - base, -0.11, 1e-6);
+    EXPECT_NEAR(after1 - base, -0.14, 1e-6);
 
     ASSERT_TRUE(ex.step());
     mCh->Receive();
     ex.FillStatusSnapshot(snap);
     const double after2 = snap.wallet_balance;
-    EXPECT_NEAR(after2 - base, 0.09, 1e-6);
+    EXPECT_NEAR(after2 - base, 0.06, 1e-6);
 
     EXPECT_FALSE(ex.step());
 }
@@ -561,6 +586,11 @@ TEST_F(BinanceExchangeFixture, FundingTimestampUsesInterpolatedMarkPriceBetweenB
         {      0, 100,100,100,100,1000, 30000,100,1,0,0 },
         { 120000, 120,120,120,120,1000,150000,100,1,0,0 }
         });
+    writeCompactCsv("btc_mark.csv", {
+        {      0, 100,100,100,100,  30000 },
+        { 120000, 120,120,120,120, 150000 }
+        });
+    const std::string mark_path = (tmpDir / "btc_mark.csv").string();
 
     // Funding event falls between two kline timestamps and has no mark price.
     // Expected interpolated mark: 110.
@@ -569,8 +599,11 @@ TEST_F(BinanceExchangeFixture, FundingTimestampUsesInterpolatedMarkPriceBetweenB
         });
 
     BinanceExchange ex(
-        { {"BTCUSDT", (tmpDir / "btc.csv").string(),
-            std::optional<std::string>((tmpDir / "btc_funding.csv").string())} },
+        { BinanceExchange::SymbolDataset{
+            "BTCUSDT",
+            (tmpDir / "btc.csv").string(),
+            std::optional<std::string>((tmpDir / "btc_funding.csv").string()),
+            mark_path} },
         logger,
         /*balance*/ 1000.0);
 
@@ -596,6 +629,279 @@ TEST_F(BinanceExchangeFixture, FundingTimestampUsesInterpolatedMarkPriceBetweenB
     ASSERT_TRUE(ex.step());
     mCh->Receive();
     EXPECT_FALSE(ex.step());
+}
+
+TEST_F(BinanceExchangeFixture, PerpUnrealizedPnlUsesMarkDatasetWhenAvailable)
+{
+    writeCsv("btc.csv", {
+        {      0, 100,100,100,100,1000,  30000,100,1,0,0 },
+        {  60000, 100,100,100,100,1000,  90000,100,1,0,0 }
+        });
+    writeCompactCsv("btc_mark.csv", {
+        {      0, 100,100,100,100,  30000 },
+        {  60000,  80, 80, 80, 80,  90000 }
+        });
+
+    const std::string mark_path = (tmpDir / "btc_mark.csv").string();
+    BinanceExchange ex(
+        { BinanceExchange::SymbolDataset{
+            "BTCUSDT",
+            (tmpDir / "btc.csv").string(),
+            std::nullopt,
+            mark_path} },
+        logger,
+        /*balance*/ 1000.0);
+
+    using QTrading::Dto::Trading::OrderSide;
+    ASSERT_TRUE(ex.perp.place_order("BTCUSDT", 1.0, OrderSide::Buy));
+    auto mCh = ex.get_market_channel();
+
+    BinanceExchange::StatusSnapshot snap{};
+    ASSERT_TRUE(ex.step());
+    mCh->Receive();
+
+    ASSERT_TRUE(ex.step());
+    mCh->Receive();
+    ex.FillStatusSnapshot(snap);
+    EXPECT_NEAR(snap.unrealized_pnl, -20.0, 1e-8);
+}
+
+TEST_F(BinanceExchangeFixture, StatusSnapshotPriceIncludesTradeMarkAndIndex)
+{
+    writeCsv("btc.csv", {
+        {      0, 100,100,100,100,1000,  30000,100,1,0,0 }
+        });
+    writeCompactCsv("btc_mark.csv", {
+        {      0, 123,123,123,123,  30000 }
+        });
+
+    const std::string mark_path = (tmpDir / "btc_mark.csv").string();
+    BinanceExchange ex(
+        { BinanceExchange::SymbolDataset{
+            "BTCUSDT",
+            (tmpDir / "btc.csv").string(),
+            std::nullopt,
+            mark_path,
+            mark_path} },
+        logger,
+        /*balance*/ 1000.0);
+    ASSERT_TRUE(ex.step());
+
+    BinanceExchange::StatusSnapshot snap{};
+    ex.FillStatusSnapshot(snap);
+    ASSERT_EQ(snap.prices.size(), 1u);
+    const auto& p = snap.prices[0];
+
+    EXPECT_EQ(p.symbol, "BTCUSDT");
+    EXPECT_TRUE(p.has_price);
+    EXPECT_NEAR(p.price, 100.0, 1e-12);
+    EXPECT_TRUE(p.has_trade_price);
+    EXPECT_NEAR(p.trade_price, 100.0, 1e-12);
+    EXPECT_TRUE(p.has_mark_price);
+    EXPECT_NEAR(p.mark_price, 123.0, 1e-12);
+    EXPECT_TRUE(p.has_index_price);
+    EXPECT_NEAR(p.index_price, 123.0, 1e-12);
+}
+
+TEST_F(BinanceExchangeFixture, MarkIndexDivergenceAddsUncertaintyBand)
+{
+    writeCsv("btc.csv", {
+        {      0, 100,100,100,100,1000,  30000,100,1,0,0 }
+        });
+    writeCompactCsv("btc_mark.csv", {
+        {      0, 120,120,120,120,  30000 }
+        });
+    writeCompactCsv("btc_index.csv", {
+        {      0, 100,100,100,100,  30000 }
+        });
+
+    const std::string mark_path = (tmpDir / "btc_mark.csv").string();
+    const std::string index_path = (tmpDir / "btc_index.csv").string();
+
+    BinanceExchange ex(
+        { BinanceExchange::SymbolDataset{
+            "BTCUSDT",
+            (tmpDir / "btc.csv").string(),
+            std::nullopt,
+            mark_path,
+            index_path} },
+        logger,
+        /*balance*/ 1000.0);
+    ex.set_uncertainty_band_bps(20.0);
+    ASSERT_TRUE(ex.step());
+
+    BinanceExchange::StatusSnapshot snap{};
+    ex.FillStatusSnapshot(snap);
+
+    ASSERT_EQ(snap.prices.size(), 1u);
+    EXPECT_TRUE(snap.prices[0].has_mark_price);
+    EXPECT_TRUE(snap.prices[0].has_index_price);
+    EXPECT_NEAR(snap.prices[0].mark_price, 120.0, 1e-12);
+    EXPECT_NEAR(snap.prices[0].index_price, 100.0, 1e-12);
+
+    // base uncertainty(20 bps) + |mark-index|/index (2000 bps)
+    EXPECT_NEAR(snap.uncertainty_band_bps, 2020.0, 1e-9);
+    const double band = snap.uncertainty_band_bps / 10000.0;
+    EXPECT_NEAR(snap.total_ledger_value_conservative, snap.total_ledger_value_base * (1.0 - band), 1e-9);
+    EXPECT_NEAR(snap.total_ledger_value_optimistic, snap.total_ledger_value_base * (1.0 + band), 1e-9);
+}
+
+TEST_F(BinanceExchangeFixture, MarkIndexStressBlocksNewPerpOpeningOrders)
+{
+    writeCsv("btc.csv", {
+        {      0, 100,100,100,100,1000, 30000,100,1,0,0 }
+        });
+    writeCompactCsv("btc_mark.csv", {
+        {      0, 120,120,120,120, 30000 }
+        });
+    writeCompactCsv("btc_index.csv", {
+        {      0, 100,100,100,100, 30000 }
+        });
+
+    BinanceExchange ex(
+        { BinanceExchange::SymbolDataset{
+            "BTCUSDT",
+            (tmpDir / "btc.csv").string(),
+            std::nullopt,
+            (tmpDir / "btc_mark.csv").string(),
+            (tmpDir / "btc_index.csv").string()} },
+        logger,
+        /*balance*/ 1000.0);
+    ASSERT_TRUE(ex.step());
+
+    using QTrading::Dto::Trading::OrderSide;
+    EXPECT_FALSE(ex.perp.place_order("BTCUSDT", 1.0, OrderSide::Buy));
+
+    BinanceExchange::StatusSnapshot snap{};
+    ex.FillStatusSnapshot(snap);
+    EXPECT_EQ(snap.basis_stress_symbols, 1u);
+    EXPECT_EQ(snap.basis_stress_blocked_orders, 1u);
+}
+
+TEST_F(BinanceExchangeFixture, MarkIndexStressAllowsReduceOnlyPerpClose)
+{
+    writeCsv("btc.csv", {
+        {      0, 100,100,100,100,1000, 30000,100,1,0,0 },
+        {  60000, 100,100,100,100,1000, 90000,100,1,0,0 },
+        { 120000, 100,100,100,100,1000,150000,100,1,0,0 }
+        });
+    writeCompactCsv("btc_mark.csv", {
+        {      0, 100,100,100,100, 30000 },
+        {  60000, 120,120,120,120, 90000 },
+        { 120000, 120,120,120,120,150000 }
+        });
+    writeCompactCsv("btc_index.csv", {
+        {      0, 100,100,100,100, 30000 },
+        {  60000, 100,100,100,100, 90000 },
+        { 120000, 100,100,100,100,150000 }
+        });
+
+    BinanceExchange ex(
+        { BinanceExchange::SymbolDataset{
+            "BTCUSDT",
+            (tmpDir / "btc.csv").string(),
+            std::nullopt,
+            (tmpDir / "btc_mark.csv").string(),
+            (tmpDir / "btc_index.csv").string()} },
+        logger,
+        /*balance*/ 1000.0);
+
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+    ASSERT_TRUE(ex.perp.place_order("BTCUSDT", 1.0, OrderSide::Buy));
+    ASSERT_TRUE(ex.step());
+    ASSERT_EQ(ex.get_all_positions().size(), 1u);
+
+    // Move into stress basis regime.
+    ASSERT_TRUE(ex.step());
+
+    EXPECT_TRUE(ex.perp.place_order(
+        "BTCUSDT",
+        1.0,
+        OrderSide::Sell,
+        PositionSide::Both,
+        true));
+}
+
+TEST_F(BinanceExchangeFixture, MarkIndexWarningAutoDeleveragesPerpLeverage)
+{
+    writeCsv("btc.csv", {
+        {      0, 100,100,100,100,1000, 30000,100,1,0,0 }
+        });
+    writeCompactCsv("btc_mark.csv", {
+        {      0, 100.6,100.6,100.6,100.6, 30000 }
+        });
+    writeCompactCsv("btc_index.csv", {
+        {      0, 100,100,100,100, 30000 }
+        });
+
+    BinanceExchange ex(
+        { BinanceExchange::SymbolDataset{
+            "BTCUSDT",
+            (tmpDir / "btc.csv").string(),
+            std::nullopt,
+            (tmpDir / "btc_mark.csv").string(),
+            (tmpDir / "btc_index.csv").string()} },
+        logger,
+        /*balance*/ 1000.0);
+
+    ex.set_symbol_leverage("BTCUSDT", 20.0);
+    ex.set_basis_risk_leverage_caps(/*warning*/7.0, /*stress*/3.0);
+    ASSERT_TRUE(ex.step());
+
+    EXPECT_DOUBLE_EQ(ex.get_symbol_leverage("BTCUSDT"), 7.0);
+
+    BinanceExchange::StatusSnapshot snap{};
+    ex.FillStatusSnapshot(snap);
+    EXPECT_EQ(snap.basis_warning_symbols, 1u);
+    EXPECT_EQ(snap.basis_stress_symbols, 0u);
+}
+
+TEST_F(BinanceExchangeFixture, FundingInterpolationPrefersConfiguredMarkDataset)
+{
+    writeCsv("btc.csv", {
+        {      0, 100,100,100,100,1000,  30000,100,1,0,0 },
+        { 120000, 120,120,120,120,1000, 150000,100,1,0,0 }
+        });
+    writeCompactCsv("btc_mark.csv", {
+        {      0, 200,200,200,200,  30000 },
+        { 120000, 220,220,220,220, 150000 }
+        });
+    writeFundingCsv("btc_funding.csv", {
+        {  60000,  0.001, std::nullopt }
+        });
+
+    const std::string mark_path = (tmpDir / "btc_mark.csv").string();
+    BinanceExchange ex(
+        { BinanceExchange::SymbolDataset{
+            "BTCUSDT",
+            (tmpDir / "btc.csv").string(),
+            std::optional<std::string>((tmpDir / "btc_funding.csv").string()),
+            mark_path} },
+        logger,
+        /*balance*/ 1000.0);
+
+    using QTrading::Dto::Trading::OrderSide;
+    ASSERT_TRUE(ex.perp.place_order("BTCUSDT", 1.0, OrderSide::Buy));
+    auto mCh = ex.get_market_channel();
+
+    BinanceExchange::StatusSnapshot snap{};
+    ASSERT_TRUE(ex.step());
+    mCh->Receive();
+    ex.FillStatusSnapshot(snap);
+    const double after_entry = snap.wallet_balance;
+
+    ASSERT_TRUE(ex.step());
+    auto dto2 = mCh->Receive();
+    ASSERT_TRUE(dto2.has_value());
+    EXPECT_EQ(dto2->get()->Timestamp, 60000u);
+    ex.FillStatusSnapshot(snap);
+    const double after_funding = snap.wallet_balance;
+
+    // Mark interpolation from configured mark dataset:
+    // t=0 => 200, t=120000 => 220, so t=60000 => 210.
+    // 1 BTC long with rate 0.001 pays 0.21.
+    EXPECT_NEAR(after_funding - after_entry, -0.21, 1e-6);
 }
 
 TEST_F(BinanceExchangeFixture, FundingApplyTimingControlsSameTimestampFunding)
@@ -709,7 +1015,7 @@ TEST_F(BinanceExchangeFixture, MarketSnapshotFundingUsesPreviousPeriodUntilUpdat
     EXPECT_NEAR(after_matching, 0.0002, 1e-12);
 }
 
-TEST_F(BinanceExchangeFixture, FundingMarkPriceMaxAgeSkipsStaleOneSidedInterpolation)
+TEST_F(BinanceExchangeFixture, FundingWithoutMarkSourceIsSkipped)
 {
     writeCsv("btc.csv", {
         {      0, 100,100,100,100,1000, 30000,100,1,0,0 }
@@ -725,7 +1031,6 @@ TEST_F(BinanceExchangeFixture, FundingMarkPriceMaxAgeSkipsStaleOneSidedInterpola
             std::optional<std::string>((tmpDir / "btc_funding.csv").string())} },
         logger,
         /*balance*/ 1000.0);
-    ex.set_funding_mark_price_max_age_ms(60000); // 1 minute max-age
 
     auto mCh = ex.get_market_channel();
     using QTrading::Dto::Trading::OrderSide;
@@ -738,7 +1043,7 @@ TEST_F(BinanceExchangeFixture, FundingMarkPriceMaxAgeSkipsStaleOneSidedInterpola
     ex.FillStatusSnapshot(snap);
     const double after_entry = snap.wallet_balance;
 
-    // Next step is funding-only timestamp (no kline). Funding should be skipped due to stale fallback.
+    // Next step is funding-only timestamp (no kline). Without mark source, funding is skipped.
     ASSERT_TRUE(ex.step());
     mCh->Receive();
     ex.FillStatusSnapshot(snap);
@@ -790,6 +1095,8 @@ TEST_F(BinanceExchangeFixture, ExplicitInstrumentTypeSpotWorksWithoutSuffixSymbo
         { {"BTCUSDT",
             (tmpDir / "btc_cash.csv").string(),
             std::nullopt,
+            std::nullopt,
+            std::nullopt,
             QTrading::Dto::Trading::InstrumentType::Spot} },
         logger,
         cfg);
@@ -838,6 +1145,8 @@ TEST_F(BinanceExchangeFixture, StatusSnapshotExposesDualLedgerTotals)
     BinanceExchange ex(
         { {"BTCUSDT",
             (tmpDir / "btc_spot.csv").string(),
+            std::nullopt,
+            std::nullopt,
             std::nullopt,
             QTrading::Dto::Trading::InstrumentType::Spot} },
         logger,

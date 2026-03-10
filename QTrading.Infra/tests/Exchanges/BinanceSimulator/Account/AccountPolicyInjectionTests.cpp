@@ -30,7 +30,7 @@ TEST(AccountPoliciesTest, InjectedExecutionPriceIsUsed)
     Account::Policies p = AccountPolicies::Default();
 
     // Force every fill to happen at 123 regardless of kline/order.
-    p.execution_price = [](const Order&, const KlineDto&, double, double) {
+    p.execution_price_ctx = [](const Order&, const Account::PerSymbolMarketContext&, double, double) {
         return 123.0;
     };
 
@@ -55,7 +55,7 @@ TEST(AccountPoliciesTest, InjectedFeeRatesAffectChargedFeeRate)
     };
 
     // Always taker so fee_rate should be 0.20.
-    p.can_fill_and_taker = [](const Order&, const KlineDto&) {
+    p.can_fill_and_taker_ctx = [](const Order&, const Account::PerSymbolMarketContext&) {
         return std::make_pair(true, true);
     };
 
@@ -73,4 +73,34 @@ TEST(AccountPoliciesTest, InjectedFeeRatesAffectChargedFeeRate)
     // Fill price default is close=100, qty=1 => notional=100.
     // Fee = 20.
     EXPECT_NEAR(account.get_wallet_balance(), 100000.0 - 20.0, 1e-9);
+}
+
+TEST(AccountPoliciesTest, ContextExecutionPriceSeesMarkPrice)
+{
+    Account::Policies p = AccountPolicies::Default();
+
+    bool context_called = false;
+    std::optional<double> observed_mark;
+    p.execution_price_ctx = [&](const Order&, const Account::PerSymbolMarketContext& ctx, double, double) {
+        context_called = true;
+        observed_mark = ctx.last_mark_price;
+        return ctx.last_mark_price.value_or(0.0);
+    };
+
+    Account account(100000.0, 0, std::move(p));
+    account.set_symbol_leverage("BTCUSDT", 10.0);
+
+    ASSERT_TRUE(account.place_order("BTCUSDT", 1.0, 0.0, OrderSide::Buy, PositionSide::Both));
+
+    std::unordered_map<std::string, double> mark_price{
+        { "BTCUSDT", 250.0 }
+    };
+    account.update_positions(oneKline("BTCUSDT", 100.0, 110.0, 90.0, 100.0, 1000.0), mark_price);
+
+    const auto& pos = account.get_all_positions();
+    ASSERT_EQ(pos.size(), 1u);
+    EXPECT_NEAR(pos[0].entry_price, 250.0, 1e-12);
+    EXPECT_TRUE(context_called);
+    ASSERT_TRUE(observed_mark.has_value());
+    EXPECT_NEAR(*observed_mark, 250.0, 1e-12);
 }

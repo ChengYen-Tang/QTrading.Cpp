@@ -360,10 +360,52 @@ TEST(AccountTest, InstrumentFiltersRejectOrderByMinNotional) {
     account.set_instrument_spec("BTCUSDT", spec);
 
     // Set last mark so market-order notional can be estimated.
-    account.update_positions(oneKline("BTCUSDT", 100.0, 100.0, 100.0, 100.0, 1000.0));
+    account.update_positions(
+        oneKline("BTCUSDT", 100.0, 100.0, 100.0, 100.0, 1000.0),
+        { {"BTCUSDT", 100.0} });
 
     EXPECT_FALSE(account.place_order("BTCUSDT", 0.4, 0.0, OrderSide::Buy, PositionSide::Both));
     EXPECT_TRUE(account.place_order("BTCUSDT", 0.5, 0.0, OrderSide::Buy, PositionSide::Both));
+}
+
+TEST(AccountTest, InstrumentFiltersPerpMarketNotionalUsesMarkPrice) {
+    Account account(10000.0, 0);
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+
+    auto spec = QTrading::Dto::Trading::PerpInstrumentSpec();
+    spec.min_notional = 150.0;
+    account.set_instrument_spec("BTCUSDT", spec);
+    account.set_market_slippage_buffer(0.0);
+
+    // Trade close is 100, but mark override is 200.
+    account.update_positions(
+        oneKline("BTCUSDT", 100.0, 100.0, 100.0, 100.0, 1000.0),
+        { {"BTCUSDT", 200.0} });
+
+    // Should pass only when perp market-notional estimation uses mark=200.
+    EXPECT_TRUE(account.place_order("BTCUSDT", 1.0, 0.0, OrderSide::Buy, PositionSide::Both));
+}
+
+TEST(AccountTest, SpotMarketBudgetUsesTradePriceNotMarkPrice) {
+    Account::AccountInitConfig cfg;
+    cfg.spot_initial_cash = 100.0;
+    cfg.perp_initial_wallet = 0.0;
+    Account account(cfg);
+    using QTrading::Dto::Trading::InstrumentType;
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+
+    account.set_instrument_type("BTCUSDT_SPOT", InstrumentType::Spot);
+    account.set_market_slippage_buffer(0.0);
+
+    // Trade close is high (100), mark override is low (1).
+    account.update_positions(
+        oneKline("BTCUSDT_SPOT", 100.0, 100.0, 100.0, 100.0, 1000.0),
+        { {"BTCUSDT_SPOT", 1.0} });
+
+    // If spot budget check used mark=1 this would pass; using trade=100 must reject.
+    EXPECT_FALSE(account.place_order("BTCUSDT_SPOT", 2.0, 0.0, OrderSide::Buy, PositionSide::Both));
 }
 
 TEST(AccountTest, MixedBookSpotAndPerpRulesApplyByInstrumentType) {
@@ -674,11 +716,15 @@ TEST(AccountTest, Liquidation) {
     using QTrading::Dto::Trading::PositionSide;
 
     ASSERT_TRUE(account.place_order("BTCUSDT", 5000.0, 500.0, OrderSide::Buy, PositionSide::Both));
-    account.update_positions(partialMarketDataBTC(500.0, 10000.0));
+    account.update_positions(
+        oneKline("BTCUSDT", 500.0, 500.0, 500.0, 500.0, 10000.0),
+        { {"BTCUSDT", 500.0} });
     EXPECT_DOUBLE_EQ(account.get_all_positions().size(), 1);
 
     testing::internal::CaptureStderr();
-    account.update_positions(partialMarketDataBTC(1.0, 10000.0));
+    account.update_positions(
+        oneKline("BTCUSDT", 1.0, 1.0, 1.0, 1.0, 10000.0),
+        { {"BTCUSDT", 1.0} });
     std::string logs = testing::internal::GetCapturedStderr();
 
     EXPECT_TRUE(logs.find("Liquidation triggered") != std::string::npos);
@@ -694,12 +740,16 @@ TEST(AccountTest, LiquidationWarningZoneTriggersStagedReduction) {
     using QTrading::Dto::Trading::PositionSide;
 
     ASSERT_TRUE(account.place_order("BTCUSDT", 5000.0, 500.0, OrderSide::Buy, PositionSide::Both));
-    account.update_positions(partialMarketDataBTC(500.0, 10000.0));
+    account.update_positions(
+        oneKline("BTCUSDT", 500.0, 500.0, 500.0, 500.0, 10000.0),
+        { {"BTCUSDT", 500.0} });
     ASSERT_EQ(account.get_all_positions().size(), 1u);
     const double qty_before = account.get_all_positions()[0].quantity;
 
     testing::internal::CaptureStderr();
-    account.update_positions(partialMarketDataBTC(433.2, 10000.0));
+    account.update_positions(
+        oneKline("BTCUSDT", 433.2, 433.2, 433.2, 433.2, 10000.0),
+        { {"BTCUSDT", 433.2} });
     (void)testing::internal::GetCapturedStderr();
 
     const auto& pos = account.get_all_positions();
@@ -716,7 +766,9 @@ TEST(AccountTest, DistressedLiquidationCancelsPerpOpenOrdersBeforeReduction) {
     using QTrading::Dto::Trading::PositionSide;
 
     ASSERT_TRUE(account.place_order("BTCUSDT", 5000.0, 500.0, OrderSide::Buy, PositionSide::Both));
-    account.update_positions(partialMarketDataBTC(500.0, 10000.0));
+    account.update_positions(
+        oneKline("BTCUSDT", 500.0, 500.0, 500.0, 500.0, 10000.0),
+        { {"BTCUSDT", 500.0} });
     ASSERT_EQ(account.get_all_positions().size(), 1u);
 
     account.close_position("BTCUSDT", 700.0);
@@ -724,7 +776,9 @@ TEST(AccountTest, DistressedLiquidationCancelsPerpOpenOrdersBeforeReduction) {
     EXPECT_GE(account.get_all_open_orders()[0].closing_position_id, 0);
 
     testing::internal::CaptureStderr();
-    account.update_positions(partialMarketDataBTC(432.4, 10000.0));
+    account.update_positions(
+        oneKline("BTCUSDT", 432.4, 432.4, 432.4, 432.4, 10000.0),
+        { {"BTCUSDT", 432.4} });
     std::string logs = testing::internal::GetCapturedStderr();
 
     EXPECT_TRUE(logs.find("Liquidation triggered") != std::string::npos);
@@ -1624,14 +1678,38 @@ TEST(AccountTest, OpenOrderInitialMargin_MarketOrderUsesLastMarkWithBuffer) {
     using QTrading::Dto::Trading::OrderSide;
     using QTrading::Dto::Trading::PositionSide;
 
-    // Establish last mark=100
-    account.update_positions(oneKline("BTCUSDT", 100.0, 100.0, 100.0, 100.0, 1000.0));
+    // Trade close is 50, but mark override is 100.
+    account.update_positions(
+        oneKline("BTCUSDT", 50.0, 50.0, 50.0, 50.0, 1000.0),
+        { {"BTCUSDT", 100.0} });
 
     ASSERT_TRUE(account.place_order("BTCUSDT", 2.0, 0.0, OrderSide::Buy, PositionSide::Both));
 
     auto bal = account.get_balance();
     // notional = 2*100, lev=10 => 20
     EXPECT_NEAR(bal.OpenOrderInitialMargin, 20.0, 1e-12);
+}
+
+TEST(AccountTest, UnrealizedPnlUsesMarkOverrideNotTradeClose) {
+    Account account(50000.0, 0);
+    account.set_symbol_leverage("BTCUSDT", 10.0);
+
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+
+    ASSERT_TRUE(account.place_order("BTCUSDT", 1.0, 100.0, OrderSide::Buy, PositionSide::Both));
+    account.update_positions(
+        oneKline("BTCUSDT", 100.0, 100.0, 100.0, 100.0, 1000.0),
+        { {"BTCUSDT", 100.0} });
+
+    // Trade close moves up to 150, but mark is overridden to 80.
+    account.update_positions(
+        oneKline("BTCUSDT", 150.0, 150.0, 150.0, 150.0, 1000.0),
+        { {"BTCUSDT", 80.0} });
+
+    const auto bal = account.get_balance();
+    EXPECT_NEAR(bal.UnrealizedPnl, -20.0, 1e-12);
+    EXPECT_NEAR(account.total_unrealized_pnl(), -20.0, 1e-12);
 }
 
 TEST(AccountTest, OpenOrderInitialMargin_OneWayClosingDirectionDoesNotReserveMargin) {

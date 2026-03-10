@@ -37,10 +37,10 @@ double ClosePriceFromId(
     const std::shared_ptr<QTrading::Dto::Market::Binance::MultiKlineDto>& market,
     std::size_t id)
 {
-    if (!market || id >= market->klines_by_id.size()) {
+    if (!market || id >= market->trade_klines_by_id.size()) {
         return 0.0;
     }
-    const auto& opt = market->klines_by_id[id];
+    const auto& opt = market->trade_klines_by_id[id];
     if (!opt.has_value()) {
         return 0.0;
     }
@@ -51,10 +51,10 @@ double QuoteVolumeFromId(
     const std::shared_ptr<QTrading::Dto::Market::Binance::MultiKlineDto>& market,
     std::size_t id)
 {
-    if (!market || id >= market->klines_by_id.size()) {
+    if (!market || id >= market->trade_klines_by_id.size()) {
         return 0.0;
     }
-    const auto& opt = market->klines_by_id[id];
+    const auto& opt = market->trade_klines_by_id[id];
     if (!opt.has_value()) {
         return 0.0;
     }
@@ -155,7 +155,7 @@ std::vector<ExecutionSlice> LiquidityAwareExecutionScheduler::BuildSlices(
 
     if ((!apply_participation_cap && !apply_window_budget && !apply_increase_batching) ||
         !has_symbol_index_ ||
-        market->klines_by_id.empty()) {
+        market->trade_klines_by_id.empty()) {
         for (const auto& parent : parent_orders) {
             slices.push_back(
                 ExecutionSlice{

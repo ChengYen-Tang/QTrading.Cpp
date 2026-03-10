@@ -101,3 +101,25 @@ TEST_F(MarketDataTests, ConstIteratorTraversal) {
     }
     EXPECT_EQ(count, md.get_klines_count());
 }
+
+/// @brief Verifies compact 6-column CSV format can be parsed for mark/index klines.
+TEST_F(MarketDataTests, LoadCompactSixColumnCsv)
+{
+    const char* compact_csv = "test_kline_data_compact.csv";
+    {
+        boost::filesystem::ofstream ofs(compact_csv);
+        ofs << "OpenTime,OpenPrice,HighPrice,LowPrice,ClosePrice,CloseTime\n";
+        ofs << "1733497260000,7000,7050,6950,7020,1733497319999\n";
+        ofs << "1733497320000,7020,7100,7000,7050,1733497379999\n";
+    }
+
+    MarketData md("BTCUSDT", compact_csv);
+    EXPECT_EQ(md.get_klines_count(), 2u);
+    const auto& latest = md.get_latest_kline();
+    EXPECT_EQ(latest.Timestamp, 1733497320000);
+    EXPECT_DOUBLE_EQ(latest.ClosePrice, 7050.0);
+    EXPECT_DOUBLE_EQ(latest.Volume, 0.0);
+    EXPECT_EQ(latest.TradeCount, 0);
+
+    boost::filesystem::remove(compact_csv);
+}

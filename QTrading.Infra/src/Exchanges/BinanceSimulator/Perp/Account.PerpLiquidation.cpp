@@ -4,12 +4,12 @@
 #include <cmath>
 #include <iostream>
 
-using QTrading::Dto::Market::Binance::KlineDto;
+using QTrading::Dto::Market::Binance::TradeKlineDto;
 using QTrading::Dto::Trading::InstrumentType;
 using QTrading::Dto::Trading::OrderSide;
 using QTrading::Dto::Trading::PositionSide;
 
-void Account::update_unrealized_for_symbol_(const std::string& symbol, double close_price)
+void Account::update_unrealized_for_symbol_(const std::string& symbol, double mark_price)
 {
     auto it_idx = position_indices_by_symbol_.find(symbol);
     if (it_idx != position_indices_by_symbol_.end()) {
@@ -17,13 +17,13 @@ void Account::update_unrealized_for_symbol_(const std::string& symbol, double cl
             if (idx >= positions_.size()) continue;
             auto& pos = positions_[idx];
             if (pos.symbol != symbol) continue;
-            pos.unrealized_pnl = (close_price - pos.entry_price) * pos.quantity * (pos.is_long ? 1.0 : -1.0);
+            pos.unrealized_pnl = (mark_price - pos.entry_price) * pos.quantity * (pos.is_long ? 1.0 : -1.0);
         }
         return;
     }
     for (auto& pos : positions_) {
         if (pos.symbol != symbol) continue;
-        pos.unrealized_pnl = (close_price - pos.entry_price) * pos.quantity * (pos.is_long ? 1.0 : -1.0);
+        pos.unrealized_pnl = (mark_price - pos.entry_price) * pos.quantity * (pos.is_long ? 1.0 : -1.0);
     }
 }
 
@@ -113,13 +113,13 @@ void Account::apply_perp_liquidation_(double taker_fee, bool& open_orders_change
         Position& pos = positions_[worst_idx];
         const size_t sym_id = get_symbol_id_(pos.symbol);
         if (sym_id >= kline_by_id_.size()) break;
-        const KlineDto* kptr = kline_by_id_[sym_id];
+        const TradeKlineDto* kptr = kline_by_id_[sym_id];
         if (!kptr) break;
-        const KlineDto& k = *kptr;
+        const auto market_ctx = build_symbol_market_context_(sym_id);
 
-        const double liq_price = policies_.liquidation_price
-            ? policies_.liquidation_price(pos, k)
-            : (pos.is_long ? k.LowPrice : k.HighPrice);
+        const double liq_price = policies_.liquidation_price_ctx
+            ? policies_.liquidation_price_ctx(pos, market_ctx)
+            : get_last_mark_price_(pos.symbol);
         if (liq_price <= 0.0) break;
 
         double vol_avail = 0.0;
@@ -198,7 +198,10 @@ void Account::apply_perp_liquidation_(double taker_fee, bool& open_orders_change
         fill.fee_rate = taker_fee;
         fill.closing_position_id = liq_ord.closing_position_id;
         fill.instrument_type = liq_ord.instrument_type;
-        update_unrealized_for_symbol_(fill.symbol, kptr->ClosePrice);
+        const double mark = get_last_mark_price_(fill.symbol);
+        if (mark > 0.0) {
+            update_unrealized_for_symbol_(fill.symbol, mark);
+        }
         mark_balance_dirty_();
         fill.perp_balance_snapshot = get_perp_balance();
         fill.spot_balance_snapshot = get_spot_balance();
@@ -216,16 +219,11 @@ void Account::apply_perp_liquidation_(double taker_fee, bool& open_orders_change
         rebuild_position_index_();
 
         for (auto& p : positions_) {
-            const size_t pid = get_symbol_id_(p.symbol);
-            if (pid >= kline_by_id_.size()) {
+            const double mark = get_last_mark_price_(p.symbol);
+            if (mark <= 0.0) {
                 continue;
             }
-            const KlineDto* pk = kline_by_id_[pid];
-            if (!pk) {
-                continue;
-            }
-            const double cp = pk->ClosePrice;
-            p.unrealized_pnl = (cp - p.entry_price) * p.quantity * (p.is_long ? 1.0 : -1.0);
+            p.unrealized_pnl = (mark - p.entry_price) * p.quantity * (p.is_long ? 1.0 : -1.0);
         }
     }
 

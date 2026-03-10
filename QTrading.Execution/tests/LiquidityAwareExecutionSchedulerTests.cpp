@@ -19,8 +19,8 @@ MarketPtr MakeMarketWithSymbol(
     auto symbols = std::make_shared<std::vector<std::string>>();
     symbols->push_back(symbol);
     market->symbols = symbols;
-    market->klines_by_id.resize(1);
-    market->klines_by_id[0] = QTrading::Dto::Market::Binance::KlineDto(
+    market->trade_klines_by_id.resize(1);
+    market->trade_klines_by_id[0] = QTrading::Dto::Market::Binance::KlineDto(
         ts,
         0,
         0,

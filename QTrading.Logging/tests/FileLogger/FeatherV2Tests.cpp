@@ -2,6 +2,7 @@
 #include "FileLogger/FeatherV2/AccountLog.hpp"
 #include "FileLogger/FeatherV2/AccountEvent.hpp"
 #include "FileLogger/FeatherV2/FundingEvent.hpp"
+#include "FileLogger/FeatherV2/MarketEvent.hpp"
 #include "FileLogger/FeatherV2/Order.hpp"
 #include "FileLogger/FeatherV2/OrderEvent.hpp"
 #include "FileLogger/FeatherV2/Position.hpp"
@@ -309,5 +310,13 @@ TEST(FeatherSchemaTests, EventSchemasExposeInstrumentType)
     const auto funding_type = funding_schema->GetFieldByName("instrument_type");
     ASSERT_NE(funding_type, nullptr);
     EXPECT_TRUE(funding_type->type()->Equals(arrow::int32()));
+
+    const auto market_schema = QTrading::Log::FileLogger::FeatherV2::MarketEvent::Schema();
+    const auto market_mark = market_schema->GetFieldByName("mark_price");
+    ASSERT_NE(market_mark, nullptr);
+    EXPECT_TRUE(market_mark->type()->Equals(arrow::float64()));
+    const auto market_has_index = market_schema->GetFieldByName("has_index_price");
+    ASSERT_NE(market_has_index, nullptr);
+    EXPECT_TRUE(market_has_index->type()->Equals(arrow::boolean()));
 }
 

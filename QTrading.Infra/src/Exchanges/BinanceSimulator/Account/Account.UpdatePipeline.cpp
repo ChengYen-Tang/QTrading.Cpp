@@ -12,7 +12,7 @@
 #endif
 #include <boost/asio.hpp>
 
-using QTrading::Dto::Market::Binance::KlineDto;
+using QTrading::Dto::Market::Binance::TradeKlineDto;
 using QTrading::Dto::Trading::InstrumentType;
 using QTrading::Dto::Trading::OrderSide;
 
@@ -25,7 +25,7 @@ static boost::asio::thread_pool& account_update_plan_pool()
     return pool;
 }
 
-static bool is_limit_order_marketable_at_open(const Order& ord, const KlineDto& k)
+static bool is_limit_order_marketable_at_open(const Order& ord, const TradeKlineDto& k)
 {
     if (ord.price <= 0.0) {
         return true;
@@ -48,7 +48,7 @@ struct PriceExecutionModel {
     double market_exec_slippage{};
     double limit_exec_slippage{};
 
-    double execution_price(const Order& ord, const KlineDto& k) const
+    double execution_price(const Order& ord, const TradeKlineDto& k) const
     {
         const bool is_market = (ord.price <= 0.0);
         double fill_price = is_market ? k.ClosePrice : ord.price;
@@ -85,7 +85,7 @@ struct PriceExecutionModel {
 struct FillModel {
     Account::KlineVolumeSplitMode split_mode{ Account::KlineVolumeSplitMode::LegacyTotalOnly };
 
-    std::pair<bool, bool> can_fill_and_taker(const Order& ord, const KlineDto& k) const
+    std::pair<bool, bool> can_fill_and_taker(const Order& ord, const TradeKlineDto& k) const
     {
         const bool is_market = (ord.price <= 0.0);
         if (is_market) {
@@ -102,7 +102,7 @@ struct FillModel {
         return { true, marketable_at_close };
     }
 
-    std::pair<bool, std::pair<double, double>> build_directional_liquidity(const KlineDto& k) const
+    std::pair<bool, std::pair<double, double>> build_directional_liquidity(const TradeKlineDto& k) const
     {
         const double vol = std::max(0.0, k.Volume);
         if (split_mode == Account::KlineVolumeSplitMode::LegacyTotalOnly || vol <= 0.0) {
@@ -139,11 +139,13 @@ struct FillModel {
 
 } // namespace
 
-std::pair<bool, bool> Account::evaluate_can_fill_and_taker_(const Order& ord, const KlineDto& k) const
+std::pair<bool, bool> Account::evaluate_can_fill_and_taker_(const Order& ord,
+    const TradeKlineDto& k,
+    const PerSymbolMarketContext& market_ctx) const
 {
     const FillModel fill_model{ kline_volume_split_mode_ };
-    const auto base = policies_.can_fill_and_taker
-        ? policies_.can_fill_and_taker(ord, k)
+    const auto base = policies_.can_fill_and_taker_ctx
+        ? policies_.can_fill_and_taker_ctx(ord, market_ctx)
         : fill_model.can_fill_and_taker(ord, k);
 
     if (!base.first) {
@@ -162,7 +164,7 @@ std::pair<bool, bool> Account::evaluate_can_fill_and_taker_(const Order& ord, co
     return { true, is_limit_order_marketable_at_open(ord, k) };
 }
 
-double Account::limit_fill_probability_(const Order& ord, const KlineDto& k, bool is_taker) const
+double Account::limit_fill_probability_(const Order& ord, const TradeKlineDto& k, bool is_taker) const
 {
     if (ord.price <= 0.0 || is_taker || !limit_fill_probability_enabled_) {
         return 1.0;
@@ -204,7 +206,7 @@ double Account::limit_fill_probability_(const Order& ord, const KlineDto& k, boo
 }
 
 std::pair<double, double> Account::apply_market_impact_slippage_(const Order& ord,
-    const KlineDto& k,
+    const TradeKlineDto& k,
     double base_fill_price,
     double fill_qty) const
 {
@@ -241,7 +243,7 @@ std::pair<double, double> Account::apply_market_impact_slippage_(const Order& or
     return { impacted, std::max(0.0, impact_bps) };
 }
 
-double Account::taker_probability_(const Order& ord, const KlineDto& k, bool base_is_taker) const
+double Account::taker_probability_(const Order& ord, const TradeKlineDto& k, bool base_is_taker) const
 {
     if (base_is_taker || ord.price <= 0.0) {
         return 1.0;
@@ -376,11 +378,12 @@ void Account::process_open_orders_pipeline_(bool& dirty, bool& open_orders_chang
             if (sym_id >= kline_by_id_.size()) {
                 continue;
             }
-            const KlineDto* kptr = kline_by_id_[sym_id];
+            const TradeKlineDto* kptr = kline_by_id_[sym_id];
             if (!kptr) {
                 continue;
             }
-            const KlineDto& k = *kptr;
+            const TradeKlineDto& k = *kptr;
+            const auto market_ctx = build_symbol_market_context_(sym_id);
 
             const double total_vol_init = remaining_vol_[sym_id];
             if (total_vol_init <= 0.0) {
@@ -413,7 +416,7 @@ void Account::process_open_orders_pipeline_(bool& dirty, bool& open_orders_chang
                     }
                     if (total_vol <= 0.0) break;
 
-                    const auto [can_fill, base_is_taker] = evaluate_can_fill_and_taker_(open_orders_[idx], k);
+                    const auto [can_fill, base_is_taker] = evaluate_can_fill_and_taker_(open_orders_[idx], k, market_ctx);
                     if (!can_fill) continue;
 
                     const Order& ord = open_orders_[idx];
@@ -437,8 +440,8 @@ void Account::process_open_orders_pipeline_(bool& dirty, bool& open_orders_chang
                         total_vol -= fill_qty;
                     }
 
-                    const double base_fill_price = policies_.execution_price
-                        ? policies_.execution_price(ord, k, market_execution_slippage_, limit_execution_slippage_)
+                    const double base_fill_price = policies_.execution_price_ctx
+                        ? policies_.execution_price_ctx(ord, market_ctx, market_execution_slippage_, limit_execution_slippage_)
                         : PriceExecutionModel{ market_execution_slippage_, limit_execution_slippage_ }.execution_price(ord, k);
                     const auto [fill_price, impact_bps] = apply_market_impact_slippage_(ord, k, base_fill_price, fill_qty);
 
@@ -477,7 +480,7 @@ void Account::process_open_orders_pipeline_(bool& dirty, bool& open_orders_chang
 
                 for (size_t local = 0; local < n; ++local) {
                     const Order& ord = open_orders_[indices[local]];
-                    const auto [ok, base_taker] = evaluate_can_fill_and_taker_(ord, k);
+                    const auto [ok, base_taker] = evaluate_can_fill_and_taker_(ord, k, market_ctx);
                     if (!ok) {
                         continue;
                     }
@@ -569,8 +572,8 @@ void Account::process_open_orders_pipeline_(bool& dirty, bool& open_orders_chang
                     }
                     const size_t idx = indices[local];
                     const Order& ord = open_orders_[idx];
-                    const double base_fill_price = policies_.execution_price
-                        ? policies_.execution_price(ord, k, market_execution_slippage_, limit_execution_slippage_)
+                    const double base_fill_price = policies_.execution_price_ctx
+                        ? policies_.execution_price_ctx(ord, market_ctx, market_execution_slippage_, limit_execution_slippage_)
                         : PriceExecutionModel{ market_execution_slippage_, limit_execution_slippage_ }.execution_price(ord, k);
                     const auto [fill_price, impact_bps] = apply_market_impact_slippage_(ord, k, base_fill_price, qty);
                     plan.fills.push_back(FillPlanEntry{
@@ -626,7 +629,7 @@ void Account::process_open_orders_pipeline_(bool& dirty, bool& open_orders_chang
         remaining_vol_[sym_id] = symbol_plans[s].remaining_vol;
         remaining_liq_[sym_id] = { symbol_plans[s].remaining_buy_liq, symbol_plans[s].remaining_sell_liq };
 
-        const KlineDto* kptr = (sym_id < kline_by_id_.size()) ? kline_by_id_[sym_id] : nullptr;
+        const TradeKlineDto* kptr = (sym_id < kline_by_id_.size()) ? kline_by_id_[sym_id] : nullptr;
         const double close_price = kptr ? kptr->ClosePrice : 0.0;
 
         auto& fills = symbol_plans[s].fills;
@@ -699,7 +702,13 @@ void Account::process_open_orders_pipeline_(bool& dirty, bool& open_orders_chang
             fill.fee_rate = fee_rate;
             fill.closing_position_id = ord.closing_position_id;
             fill.instrument_type = ord.instrument_type;
-            if (kptr) {
+            if (fill.instrument_type == InstrumentType::Perp) {
+                const double mark = get_last_mark_price_(fill.symbol);
+                if (mark > 0.0) {
+                    update_unrealized_for_symbol_(fill.symbol, mark);
+                }
+            }
+            else if (kptr && close_price > 0.0) {
                 update_unrealized_for_symbol_(fill.symbol, close_price);
             }
             mark_balance_dirty_();
