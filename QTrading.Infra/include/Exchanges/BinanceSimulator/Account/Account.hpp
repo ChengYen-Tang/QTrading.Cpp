@@ -426,6 +426,8 @@ private:
     std::unordered_map<std::string, std::vector<size_t>> position_indices_by_symbol_;
     std::unordered_map<std::string, size_t> open_order_client_id_count_;
     std::unordered_map<std::string, double> pending_close_sell_qty_by_symbol_;
+    double spot_open_buy_limit_notional_total_{ 0.0 };
+    std::unordered_map<std::string, double> spot_open_buy_market_qty_by_symbol_;
     struct StpBucketKey {
         size_t symbol_id{};
         QTrading::Dto::Trading::InstrumentType instrument_type{ QTrading::Dto::Trading::InstrumentType::Perp };
@@ -638,11 +640,15 @@ private:
         double fee, double feeRate, std::vector<Order>& leftover);
 
     void rebuild_open_order_index_();
+    bool filter_open_orders_(const std::function<bool(const Order&)>& remove_pred);
     void rebuild_position_index_();
     void rebuild_per_symbol_cache_();
     void append_open_order_(Order ord);
     void index_open_order_entry_(const Order& ord, size_t idx);
     static bool is_pending_close_sell_order_(const Order& ord);
+    static bool is_spot_open_buy_reserve_order_(const Order& ord);
+    double spot_open_buy_market_notional_total_() const;
+    double spot_open_buy_reserved_cash_() const;
     double pending_close_sell_qty_for_symbol_(const std::string& symbol) const;
     size_t get_symbol_id_(const std::string& symbol);
     void ensure_symbol_capacity_(size_t id);

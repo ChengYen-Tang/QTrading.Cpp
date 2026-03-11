@@ -72,12 +72,7 @@ void Account::close_perp_position_side_(const std::string& symbol,
 
 bool Account::cancel_perp_open_orders_(const std::string& symbol)
 {
-    const size_t before = open_orders_.size();
-    open_orders_.erase(
-        std::remove_if(open_orders_.begin(), open_orders_.end(),
-            [&](const Order& o) {
-                return o.symbol == symbol && o.instrument_type == InstrumentType::Perp;
-            }),
-        open_orders_.end());
-    return open_orders_.size() != before;
+    return filter_open_orders_([&](const Order& o) {
+        return o.symbol == symbol && o.instrument_type == InstrumentType::Perp;
+        });
 }

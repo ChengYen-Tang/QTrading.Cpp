@@ -123,3 +123,28 @@ TEST_F(MarketDataTests, LoadCompactSixColumnCsv)
 
     boost::filesystem::remove(compact_csv);
 }
+
+TEST_F(MarketDataTests, LowerUpperBoundByTimestamp)
+{
+    MarketData md("BTCUSDT", test_csv_filename);
+
+    EXPECT_EQ(md.lower_bound_ts(1733497260000), 0u);
+    EXPECT_EQ(md.upper_bound_ts(1733497260000), 1u);
+    EXPECT_EQ(md.lower_bound_ts(1733497260001), 1u);
+    EXPECT_EQ(md.upper_bound_ts(1733497320000), 2u);
+}
+
+TEST_F(MarketDataTests, GetLatestKlineThrowsWhenNoParsedRows)
+{
+    const char* header_only_csv = "test_kline_header_only.csv";
+    {
+        boost::filesystem::ofstream ofs(header_only_csv);
+        ofs << "OpenTime,OpenPrice,HighPrice,LowPrice,ClosePrice,Volume,CloseTime,QuoteVolume,TradeCount,TakerBuyBaseVolume,TakerBuyQuoteVolume\n";
+    }
+
+    MarketData md("BTCUSDT", header_only_csv);
+    EXPECT_EQ(md.get_klines_count(), 0u);
+    EXPECT_THROW(md.get_latest_kline(), std::out_of_range);
+
+    boost::filesystem::remove(header_only_csv);
+}

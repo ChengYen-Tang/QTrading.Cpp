@@ -41,7 +41,9 @@ void Account::applyOpeningFillToPosition(Order& ord, double fill_qty, double fil
             ord.instrument_type
             });
         order_to_position_[ord.id] = pid;
-        rebuild_position_index_();
+        const size_t new_idx = positions_.size() - 1;
+        position_index_by_id_[pid] = new_idx;
+        position_indices_by_symbol_[ord.symbol].push_back(new_idx);
         return;
     }
 

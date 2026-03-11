@@ -71,15 +71,12 @@ void Account::apply_perp_liquidation_(double taker_fee, bool& open_orders_change
 
     // Phase 1: cancel all perp open orders first.
     if (distressed) {
-        const size_t before = open_orders_.size();
-        open_orders_.erase(
-            std::remove_if(open_orders_.begin(), open_orders_.end(),
-                [](const Order& o) { return o.instrument_type == InstrumentType::Perp; }),
-            open_orders_.end());
-        if (open_orders_.size() != before) {
+        const bool removed = filter_open_orders_([](const Order& o) {
+            return o.instrument_type == InstrumentType::Perp;
+            });
+        if (removed) {
             open_orders_changed = true;
             mark_open_orders_dirty_();
-            rebuild_open_order_index_();
         }
         snapshot = get_perp_balance();
         distressed = snapshot.MarginBalance < snapshot.MaintenanceMargin;
@@ -87,6 +84,8 @@ void Account::apply_perp_liquidation_(double taker_fee, bool& open_orders_change
     }
 
     // Phase 2: staged partial liquidation.
+    std::vector<Order> liquidation_leftover;
+    liquidation_leftover.reserve(1);
     for (int step = 0; step < kMaxLiquidationStepsPerTick; ++step) {
         snapshot = get_perp_balance();
         if (!has_open_perp_position_()) break;
@@ -178,9 +177,8 @@ void Account::apply_perp_liquidation_(double taker_fee, bool& open_orders_change
 
         const double notional = close_qty * liq_price;
         const double fee = notional * taker_fee;
-        std::vector<Order> leftover;
-        leftover.reserve(1);
-        processClosingOrder(liq_ord, close_qty, liq_price, fee, leftover);
+        liquidation_leftover.clear();
+        processClosingOrder(liq_ord, close_qty, liq_price, fee, liquidation_leftover);
 
         FillEvent fill{};
         fill.order_id = liq_ord.id;
@@ -212,20 +210,35 @@ void Account::apply_perp_liquidation_(double taker_fee, bool& open_orders_change
         fill.positions_snapshot = positions_;
         fill_events_.push_back(std::move(fill));
 
-        positions_.erase(
-            std::remove_if(positions_.begin(), positions_.end(),
-                [](const Position& p) { return p.quantity <= 1e-8; }),
-            positions_.end());
+        bool need_fallback_tiny_cleanup = false;
+        auto it_pos_idx = position_index_by_id_.find(liq_ord.closing_position_id);
+        if (it_pos_idx != position_index_by_id_.end()) {
+            const size_t idx = it_pos_idx->second;
+            if (idx < positions_.size() && positions_[idx].id == liq_ord.closing_position_id) {
+                if (positions_[idx].quantity <= 1e-8) {
+                    positions_.erase(positions_.begin() + static_cast<std::vector<Position>::difference_type>(idx));
+                }
+            }
+            else {
+                need_fallback_tiny_cleanup = true;
+            }
+        }
+        else {
+            need_fallback_tiny_cleanup = true;
+        }
+        if (need_fallback_tiny_cleanup) {
+            positions_.erase(
+                std::remove_if(positions_.begin(), positions_.end(),
+                    [](const Position& p) { return p.quantity <= 1e-8; }),
+                positions_.end());
+        }
 
         merge_positions();
         rebuild_position_index_();
 
-        for (auto& p : positions_) {
-            const double mark = get_last_mark_price_(p.symbol);
-            if (mark <= 0.0) {
-                continue;
-            }
-            p.unrealized_pnl = (mark - p.entry_price) * p.quantity * (p.is_long ? 1.0 : -1.0);
+        const double updated_mark = get_last_mark_price_(liq_ord.symbol);
+        if (updated_mark > 0.0) {
+            update_unrealized_for_symbol_(liq_ord.symbol, updated_mark);
         }
     }
 
@@ -241,15 +254,12 @@ void Account::apply_perp_liquidation_(double taker_fee, bool& open_orders_change
         mark_balance_dirty_();
         rebuild_position_index_();
         if (!open_orders_.empty()) {
-            const auto before = open_orders_.size();
-            open_orders_.erase(
-                std::remove_if(open_orders_.begin(), open_orders_.end(),
-                    [](const Order& o) { return o.instrument_type == InstrumentType::Perp; }),
-                open_orders_.end());
-            if (open_orders_.size() != before) {
+            const bool removed = filter_open_orders_([](const Order& o) {
+                return o.instrument_type == InstrumentType::Perp;
+                });
+            if (removed) {
                 open_orders_changed = true;
                 mark_open_orders_dirty_();
-                rebuild_open_order_index_();
             }
         }
         order_to_position_.clear();

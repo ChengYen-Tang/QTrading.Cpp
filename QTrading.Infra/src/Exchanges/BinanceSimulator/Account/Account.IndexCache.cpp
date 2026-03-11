@@ -48,14 +48,55 @@ void Account::rebuild_open_order_index_()
     open_order_index_by_id_.clear();
     open_order_client_id_count_.clear();
     pending_close_sell_qty_by_symbol_.clear();
+    spot_open_buy_limit_notional_total_ = 0.0;
+    spot_open_buy_market_qty_by_symbol_.clear();
     stp_order_ids_by_bucket_.clear();
     open_order_index_by_id_.reserve(open_orders_.size());
     open_order_client_id_count_.reserve(open_orders_.size());
     pending_close_sell_qty_by_symbol_.reserve(open_orders_.size());
+    spot_open_buy_market_qty_by_symbol_.reserve(open_orders_.size());
     stp_order_ids_by_bucket_.reserve(open_orders_.size());
     for (size_t i = 0; i < open_orders_.size(); ++i) {
         index_open_order_entry_(open_orders_[i], i);
     }
+}
+
+bool Account::filter_open_orders_(const std::function<bool(const Order&)>& remove_pred)
+{
+    if (open_orders_.empty()) {
+        return false;
+    }
+
+    open_order_index_by_id_.clear();
+    open_order_client_id_count_.clear();
+    pending_close_sell_qty_by_symbol_.clear();
+    spot_open_buy_limit_notional_total_ = 0.0;
+    spot_open_buy_market_qty_by_symbol_.clear();
+    stp_order_ids_by_bucket_.clear();
+    open_order_index_by_id_.reserve(open_orders_.size());
+    open_order_client_id_count_.reserve(open_orders_.size());
+    pending_close_sell_qty_by_symbol_.reserve(open_orders_.size());
+    spot_open_buy_market_qty_by_symbol_.reserve(open_orders_.size());
+    stp_order_ids_by_bucket_.reserve(open_orders_.size());
+
+    bool changed = false;
+    size_t write = 0;
+    for (size_t read = 0; read < open_orders_.size(); ++read) {
+        if (remove_pred(open_orders_[read])) {
+            changed = true;
+            continue;
+        }
+        if (write != read) {
+            open_orders_[write] = std::move(open_orders_[read]);
+        }
+        index_open_order_entry_(open_orders_[write], write);
+        ++write;
+    }
+
+    if (changed) {
+        open_orders_.resize(write);
+    }
+    return changed;
 }
 
 void Account::append_open_order_(Order ord)
@@ -76,6 +117,14 @@ void Account::index_open_order_entry_(const Order& ord, size_t idx)
     if (is_pending_close_sell_order_(ord)) {
         pending_close_sell_qty_by_symbol_[ord.symbol] += ord.quantity;
     }
+    if (is_spot_open_buy_reserve_order_(ord)) {
+        if (ord.price > 0.0) {
+            spot_open_buy_limit_notional_total_ += ord.quantity * ord.price;
+        }
+        else {
+            spot_open_buy_market_qty_by_symbol_[ord.symbol] += ord.quantity;
+        }
+    }
 
     const size_t sym_id = get_symbol_id_(ord.symbol);
     StpBucketKey key{ sym_id, ord.instrument_type, ord.side };
@@ -87,6 +136,15 @@ bool Account::is_pending_close_sell_order_(const Order& ord)
     return ord.side == QTrading::Dto::Trading::OrderSide::Sell &&
         ord.quantity > 1e-8 &&
         (ord.closing_position_id >= 0 || ord.reduce_only);
+}
+
+bool Account::is_spot_open_buy_reserve_order_(const Order& ord)
+{
+    return ord.instrument_type == QTrading::Dto::Trading::InstrumentType::Spot &&
+        ord.side == QTrading::Dto::Trading::OrderSide::Buy &&
+        ord.closing_position_id < 0 &&
+        !ord.reduce_only &&
+        ord.quantity > 1e-8;
 }
 
 double Account::pending_close_sell_qty_for_symbol_(const std::string& symbol) const

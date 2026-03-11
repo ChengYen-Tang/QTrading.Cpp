@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <stdexcept>
 #include <string_view>
 
@@ -130,7 +131,23 @@ void FundingRateData::load_csv(const std::string& csv_file) {
     }
 
     rates.clear();
-    rates.reserve(1 << 12);
+    std::error_code ec;
+    const auto file_bytes = std::filesystem::file_size(path, ec);
+    if (!ec && file_bytes > 0) {
+        constexpr uintmax_t kAvgBytesPerRow = 48;
+        uintmax_t est_rows = file_bytes / kAvgBytesPerRow;
+        if (est_rows < 128) {
+            est_rows = 128;
+        }
+        const uintmax_t size_t_max = static_cast<uintmax_t>((std::numeric_limits<size_t>::max)());
+        if (est_rows > size_t_max) {
+            est_rows = size_t_max;
+        }
+        rates.reserve(static_cast<size_t>(est_rows));
+    }
+    else {
+        rates.reserve(1 << 12);
+    }
 
     std::string line;
 
@@ -169,6 +186,9 @@ void FundingRateData::load_csv(const std::string& csv_file) {
 }
 
 const FundingRateDto& FundingRateData::get_latest() const {
+    if (rates.empty()) {
+        throw std::out_of_range("No funding-rate data available");
+    }
     return rates.back();
 }
 

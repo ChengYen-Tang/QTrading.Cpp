@@ -102,7 +102,6 @@ void Account::PerpApi::cancel_open_orders(const std::string& symbol)
         return;
     }
 
-    owner_->rebuild_open_order_index_();
     owner_->mark_open_orders_dirty_();
     ++owner_->state_version_;
 }

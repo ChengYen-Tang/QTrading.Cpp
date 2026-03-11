@@ -644,6 +644,12 @@ void Account::process_open_orders_pipeline_(bool& dirty, bool& open_orders_chang
             const double order_qty = ord.quantity;
             const double order_price = ord.price;
             const bool was_pending_close_sell = is_pending_close_sell_order_(ord);
+            const bool tracked_spot_buy_reserve =
+                ord.instrument_type == InstrumentType::Spot &&
+                ord.side == OrderSide::Buy &&
+                ord.closing_position_id < 0 &&
+                !ord.reduce_only &&
+                order_qty > 1e-8;
             const std::string& order_symbol = ord.symbol;
 
             const double notional = fill_qty * fill_price;
@@ -691,6 +697,31 @@ void Account::process_open_orders_pipeline_(bool& dirty, bool& open_orders_chang
                     it_pending->second += (remaining_qty - order_qty);
                     if (it_pending->second <= 1e-12) {
                         pending_close_sell_qty_by_symbol_.erase(it_pending);
+                    }
+                }
+            }
+            if (tracked_spot_buy_reserve) {
+                const double qty_delta = remaining_qty - order_qty;
+                if (std::abs(qty_delta) > 1e-12) {
+                    if (order_price > 0.0) {
+                        spot_open_buy_limit_notional_total_ += qty_delta * order_price;
+                        if (spot_open_buy_limit_notional_total_ < 1e-12) {
+                            spot_open_buy_limit_notional_total_ = 0.0;
+                        }
+                    }
+                    else {
+                        auto it_market_qty = spot_open_buy_market_qty_by_symbol_.find(order_symbol);
+                        if (it_market_qty == spot_open_buy_market_qty_by_symbol_.end()) {
+                            if (remaining_qty > 1e-8) {
+                                spot_open_buy_market_qty_by_symbol_[order_symbol] = remaining_qty;
+                            }
+                        }
+                        else {
+                            it_market_qty->second += qty_delta;
+                            if (it_market_qty->second <= 1e-8) {
+                                spot_open_buy_market_qty_by_symbol_.erase(it_market_qty);
+                            }
+                        }
                     }
                 }
             }

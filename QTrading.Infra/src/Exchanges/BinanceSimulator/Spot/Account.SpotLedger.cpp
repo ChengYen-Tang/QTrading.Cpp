@@ -4,46 +4,53 @@
 #include <cmath>
 
 using QTrading::Dto::Trading::InstrumentType;
-using QTrading::Dto::Trading::OrderSide;
+
+double Account::spot_open_buy_market_notional_total_() const
+{
+    double notional = 0.0;
+    const double slippage_mul = 1.0 + std::max(0.0, market_slippage_buffer_);
+    for (const auto& kv : spot_open_buy_market_qty_by_symbol_) {
+        const double qty = kv.second;
+        if (qty <= 1e-12) {
+            continue;
+        }
+        const double trade = get_last_trade_price_(kv.first);
+        if (trade <= 0.0) {
+            continue;
+        }
+        notional += qty * trade * slippage_mul;
+    }
+    return notional;
+}
+
+double Account::spot_open_buy_reserved_cash_() const
+{
+    const double buy_open_notional = std::max(0.0, spot_open_buy_limit_notional_total_) +
+        spot_open_buy_market_notional_total_();
+    if (buy_open_notional <= 0.0) {
+        return 0.0;
+    }
+
+    if (spot_commission_mode_ != SpotCommissionMode::QuoteAsset) {
+        return buy_open_notional;
+    }
+
+    const auto fee_rates = get_fee_rates(InstrumentType::Spot);
+    const double worst_fee_rate = std::max(0.0, std::max(std::get<0>(fee_rates), std::get<1>(fee_rates)));
+    return buy_open_notional * (1.0 + worst_fee_rate);
+}
 
 QTrading::Dto::Account::BalanceSnapshot Account::get_spot_balance() const
 {
     QTrading::Dto::Account::BalanceSnapshot s;
-    s.WalletBalance = spot_ledger_.cash_balance();
-    const auto fee_rates = get_fee_rates(InstrumentType::Spot);
-    const double worst_fee_rate = std::max(0.0, std::max(std::get<0>(fee_rates), std::get<1>(fee_rates)));
-
-    double reserved = 0.0;
-    const bool quote_fee_mode = (spot_commission_mode_ == SpotCommissionMode::QuoteAsset);
-    for (const auto& ord : open_orders_) {
-        if (ord.instrument_type != InstrumentType::Spot) {
-            continue;
-        }
-        if (ord.side != OrderSide::Buy || ord.closing_position_id >= 0 || ord.reduce_only) {
-            continue;
-        }
-        if (ord.quantity <= 0.0) {
-            continue;
-        }
-
-        if (ord.price > 0.0) {
-            const double notional = ord.quantity * ord.price;
-            reserved += quote_fee_mode ? (notional * (1.0 + worst_fee_rate)) : notional;
-            continue;
-        }
-
-        const double trade = get_last_trade_price_(ord.symbol);
-        if (trade <= 0.0) {
-            continue;
-        }
-        const double notional = ord.quantity * trade * (1.0 + std::max(0.0, market_slippage_buffer_));
-        reserved += quote_fee_mode ? (notional * (1.0 + worst_fee_rate)) : notional;
-    }
+    const double wallet = spot_ledger_.cash_balance();
+    s.WalletBalance = wallet;
+    const double reserved = spot_open_buy_reserved_cash_();
 
     s.OpenOrderInitialMargin = reserved;
-    s.AvailableBalance = std::max(0.0, spot_ledger_.cash_balance() - reserved);
-    s.MarginBalance = spot_ledger_.cash_balance();
-    s.Equity = spot_ledger_.cash_balance();
+    s.AvailableBalance = std::max(0.0, wallet - reserved);
+    s.MarginBalance = wallet;
+    s.Equity = wallet;
     return s;
 }
 

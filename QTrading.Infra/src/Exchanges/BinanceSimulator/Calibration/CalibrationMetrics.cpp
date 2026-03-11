@@ -45,6 +45,60 @@ MetricVector average_slice(
     return out;
 }
 
+struct MetricPrefixSums {
+    std::vector<double> fill_ratio;
+    std::vector<double> avg_slippage_bps;
+    std::vector<double> taker_ratio;
+    std::vector<double> funding_cost;
+    std::vector<double> tail_loss;
+};
+
+MetricPrefixSums build_prefix_sums(const std::vector<MetricVector>& series, size_t count)
+{
+    MetricPrefixSums prefix{};
+    prefix.fill_ratio.resize(count + 1, 0.0);
+    prefix.avg_slippage_bps.resize(count + 1, 0.0);
+    prefix.taker_ratio.resize(count + 1, 0.0);
+    prefix.funding_cost.resize(count + 1, 0.0);
+    prefix.tail_loss.resize(count + 1, 0.0);
+
+    for (size_t i = 0; i < count; ++i) {
+        prefix.fill_ratio[i + 1] = prefix.fill_ratio[i] + series[i].fill_ratio;
+        prefix.avg_slippage_bps[i + 1] = prefix.avg_slippage_bps[i] + series[i].avg_slippage_bps;
+        prefix.taker_ratio[i + 1] = prefix.taker_ratio[i] + series[i].taker_ratio;
+        prefix.funding_cost[i + 1] = prefix.funding_cost[i] + series[i].funding_cost;
+        prefix.tail_loss[i + 1] = prefix.tail_loss[i] + series[i].tail_loss;
+    }
+
+    return prefix;
+}
+
+MetricVector average_slice(
+    const MetricPrefixSums& prefix,
+    size_t begin,
+    size_t end,
+    size_t total_count)
+{
+    MetricVector out{};
+    if (begin >= end || begin >= total_count) {
+        return out;
+    }
+
+    const size_t clamped_end = std::min(end, total_count);
+    if (begin >= clamped_end) {
+        return out;
+    }
+
+    const size_t count = clamped_end - begin;
+    const double denom = static_cast<double>(count);
+    out.fill_ratio = (prefix.fill_ratio[clamped_end] - prefix.fill_ratio[begin]) / denom;
+    out.avg_slippage_bps = (prefix.avg_slippage_bps[clamped_end] - prefix.avg_slippage_bps[begin]) / denom;
+    out.taker_ratio = (prefix.taker_ratio[clamped_end] - prefix.taker_ratio[begin]) / denom;
+    out.funding_cost = (prefix.funding_cost[clamped_end] - prefix.funding_cost[begin]) / denom;
+    out.tail_loss = (prefix.tail_loss[clamped_end] - prefix.tail_loss[begin]) / denom;
+    return out;
+}
+
 } // namespace
 
 AcceptanceKpiResult evaluate_acceptance_kpi(
@@ -132,7 +186,11 @@ WalkForwardCalibrationResult evaluate_walk_forward_pipeline(
         return out;
     }
 
+    const auto sim_prefix = build_prefix_sums(simulated_series, total_points);
+    const auto ref_prefix = build_prefix_sums(reference_series, total_points);
+
     size_t passed = 0;
+    out.windows.reserve(windows.size());
     for (const auto& window : windows) {
         if (window.train_begin >= window.train_end ||
             window.validate_begin >= window.validate_end ||
@@ -141,10 +199,10 @@ WalkForwardCalibrationResult evaluate_walk_forward_pipeline(
             continue;
         }
 
-        const MetricVector train_sim = average_slice(simulated_series, window.train_begin, window.train_end);
-        const MetricVector train_ref = average_slice(reference_series, window.train_begin, window.train_end);
-        const MetricVector validate_sim = average_slice(simulated_series, window.validate_begin, window.validate_end);
-        const MetricVector validate_ref = average_slice(reference_series, window.validate_begin, window.validate_end);
+        const MetricVector train_sim = average_slice(sim_prefix, window.train_begin, window.train_end, total_points);
+        const MetricVector train_ref = average_slice(ref_prefix, window.train_begin, window.train_end, total_points);
+        const MetricVector validate_sim = average_slice(sim_prefix, window.validate_begin, window.validate_end, total_points);
+        const MetricVector validate_ref = average_slice(ref_prefix, window.validate_begin, window.validate_end, total_points);
 
         WindowCalibrationResult row{};
         row.window = window;

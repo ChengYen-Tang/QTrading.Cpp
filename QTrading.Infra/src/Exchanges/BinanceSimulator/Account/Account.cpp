@@ -6,6 +6,7 @@
 #include <cmath>
 #include <algorithm>
 #include <unordered_map>
+#include <unordered_set>
 
 using QTrading::Dto::Market::Binance::TradeKlineDto;
 using QTrading::Dto::Trading::InstrumentType;
@@ -184,6 +185,7 @@ Account::Account(const AccountInitConfig& init_config)
     open_order_index_by_id_.reserve(2048);
     open_order_client_id_count_.reserve(2048);
     pending_close_sell_qty_by_symbol_.reserve(1024);
+    spot_open_buy_market_qty_by_symbol_.reserve(1024);
     stp_order_ids_by_bucket_.reserve(2048);
     position_index_by_id_.reserve(2048);
     position_indices_by_symbol_.reserve(1024);
@@ -636,7 +638,40 @@ void Account::merge_positions() {
     if (!merge_positions_enabled_) {
         return;
     }
-    if (positions_.empty()) return;
+    if (positions_.size() < 2) return;
+
+    struct MergeKey {
+        std::string symbol;
+        bool is_long{};
+        bool operator==(const MergeKey& other) const noexcept
+        {
+            return is_long == other.is_long && symbol == other.symbol;
+        }
+    };
+    struct MergeKeyHash {
+        size_t operator()(const MergeKey& k) const noexcept
+        {
+            size_t h = std::hash<std::string>{}(k.symbol);
+            h ^= (std::hash<bool>{}(k.is_long) + 0x9e3779b9 + (h << 6) + (h >> 2));
+            return h;
+        }
+    };
+
+    // Fast path: if each (symbol, side) pair appears at most once,
+    // there is nothing to merge; skip sort/merge work entirely.
+    std::unordered_set<MergeKey, MergeKeyHash> seen;
+    seen.reserve(positions_.size());
+    bool has_mergeable_duplicates = false;
+    for (const auto& p : positions_) {
+        if (!seen.emplace(MergeKey{ p.symbol, p.is_long }).second) {
+            has_mergeable_duplicates = true;
+            break;
+        }
+    }
+    if (!has_mergeable_duplicates) {
+        return;
+    }
+
     merge_indices_.clear();
     merge_indices_.reserve(positions_.size());
     for (size_t i = 0; i < positions_.size(); ++i) {
@@ -909,7 +944,6 @@ void Account::update_positions(const std::unordered_map<std::string, TradeKlineD
     }
     if (has_open_orders && per_symbol_cache_version_ != open_orders_version_) {
         rebuild_per_symbol_cache_();
-        rebuild_open_order_index_();
     }
     else if (!has_open_orders) {
         if (!per_symbol_active_ids_.empty()) {
@@ -1052,6 +1086,13 @@ void Account::processClosingOrder(Order& ord, double fill_qty, double fill_price
 }
 
 void Account::cancel_order_by_id(int order_id) {
+    if (open_orders_.empty()) {
+        if (enable_console_output_) {
+            std::cerr << "[cancel_order_by_id] No open order with ID=" << order_id << "\n";
+        }
+        return;
+    }
+
     auto it = open_order_index_by_id_.find(order_id);
     if (it == open_order_index_by_id_.end()) {
         if (enable_console_output_) {
@@ -1060,19 +1101,18 @@ void Account::cancel_order_by_id(int order_id) {
         return;
     }
 
-    // Preserve original order: erase the one element and rebuild indices.
-    open_orders_.erase(open_orders_.begin() + static_cast<std::ptrdiff_t>(it->second));
-    rebuild_open_order_index_();
+    const bool changed = filter_open_orders_([&](const Order& o) { return o.id == order_id; });
+    if (!changed) {
+        return;
+    }
     mark_open_orders_dirty_();
     ++state_version_;
 }
 
 void Account::cancel_open_orders(const std::string& symbol) {
     if (open_orders_.empty()) return;
-    const bool spot_changed = cancel_spot_open_orders_(symbol);
-    const bool perp_changed = cancel_perp_open_orders_(symbol);
-    if (!spot_changed && !perp_changed) return;
-    rebuild_open_order_index_();
+    const bool changed = filter_open_orders_([&](const Order& o) { return o.symbol == symbol; });
+    if (!changed) return;
     mark_open_orders_dirty_();
     ++state_version_;
 }
@@ -1453,19 +1493,38 @@ size_t Account::cancel_stp_conflicting_orders_(const std::string& symbol,
 
 /// @brief Adjust leverage on existing positions for a symbol.
 bool Account::adjust_position_leverage(const std::string& symbol, double oldLev, double newLev) {
-    std::vector<std::reference_wrapper<Position>> related;
-    for (auto& pos : positions_) {
-        if (pos.symbol == symbol) {
-            related.push_back(pos);
+    (void)oldLev;
+
+    auto it_symbol = position_indices_by_symbol_.find(symbol);
+    if (it_symbol == position_indices_by_symbol_.end() || it_symbol->second.empty()) {
+        return true;
+    }
+
+    auto has_valid_symbol_indices = [&](const std::vector<size_t>& indices) {
+        for (size_t idx : indices) {
+            if (idx >= positions_.size() || positions_[idx].symbol != symbol) {
+                return false;
+            }
+        }
+        return true;
+    };
+
+    if (!has_valid_symbol_indices(it_symbol->second)) {
+        rebuild_position_index_();
+        it_symbol = position_indices_by_symbol_.find(symbol);
+        if (it_symbol == position_indices_by_symbol_.end() || it_symbol->second.empty()) {
+            return true;
         }
     }
-    if (related.empty())
-        return true;
+
+    const auto& related_indices = it_symbol->second;
 
     double totalDiff = 0.0;
-    std::vector<double> newMaint(related.size());
-    for (size_t i = 0; i < related.size(); ++i) {
-        Position& p = related[i].get();
+    for (size_t idx : related_indices) {
+        if (idx >= positions_.size()) {
+            continue;
+        }
+        Position& p = positions_[idx];
         double maxLev = 1.0;
         std::tie(std::ignore, maxLev) = get_tier_info(p.notional);
         if (newLev > maxLev) {
@@ -1478,7 +1537,6 @@ bool Account::adjust_position_leverage(const std::string& symbol, double oldLev,
         double newM = p.notional / newLev;
         double diff = newM - oldM;
         totalDiff += diff;
-        newMaint[i] = maintenance_margin_for_notional_(p.notional);
     }
     double eq = get_equity();
     if (totalDiff > 0) {
@@ -1493,11 +1551,14 @@ bool Account::adjust_position_leverage(const std::string& symbol, double oldLev,
     else {
         perp_ledger_.decrease_used_margin(std::fabs(totalDiff));
     }
-    for (size_t i = 0; i < related.size(); i++) {
-        Position& p = related[i].get();
+    for (size_t idx : related_indices) {
+        if (idx >= positions_.size()) {
+            continue;
+        }
+        Position& p = positions_[idx];
         p.initial_margin = p.notional / newLev;
         p.leverage = newLev;
-        p.maintenance_margin = newMaint[i];
+        p.maintenance_margin = maintenance_margin_for_notional_(p.notional);
     }
     mark_balance_dirty_();
     return true;
@@ -1505,10 +1566,6 @@ bool Account::adjust_position_leverage(const std::string& symbol, double oldLev,
 
 /// @brief Process a reduce_only opening order fill.
 bool Account::processReduceOnlyOrder(Order& ord, double fill_qty, double fill_price, double fee, std::vector<Order>& leftover) {
-    if (!has_reducible_position(positions_, ord, hedge_mode_)) {
-        return false;
-    }
-
     for (auto& pos : positions_) {
         if (!order_closes_position(ord, pos, hedge_mode_)) continue;
 
@@ -1523,9 +1580,10 @@ bool Account::processReduceOnlyOrder(Order& ord, double fill_qty, double fill_pr
             pos.id
         };
 
-        std::vector<Order> tmp;
-        tmp.reserve(1);
-        processClosingOrder(closeOrd, fill_qty, fill_price, fee, tmp);
+        thread_local std::vector<Order> close_tmp;
+        close_tmp.clear();
+        close_tmp.reserve(1);
+        processClosingOrder(closeOrd, fill_qty, fill_price, fee, close_tmp);
 
         ord.quantity = closeOrd.quantity;
         if (ord.quantity > 1e-8) leftover.push_back(ord);

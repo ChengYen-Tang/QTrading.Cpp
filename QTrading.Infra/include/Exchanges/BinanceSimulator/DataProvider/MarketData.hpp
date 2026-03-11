@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <vector>
 #include "Dto/Market/Binance/Kline.hpp"
@@ -30,6 +31,12 @@ public:
     /// @brief Get the total number of Kline entries loaded.
     /// @return Size of the internal Kline vector.
     size_t get_klines_count() const;
+
+    /// @brief Lower bound index for a timestamp (first index with Timestamp >= ts).
+    size_t lower_bound_ts(uint64_t ts) const;
+
+    /// @brief Upper bound index for a timestamp (first index with Timestamp > ts).
+    size_t upper_bound_ts(uint64_t ts) const;
 
     /// @brief Iterator over mutable TradeKlineDto entries.
     using iterator = std::vector<TradeKlineDto>::iterator;

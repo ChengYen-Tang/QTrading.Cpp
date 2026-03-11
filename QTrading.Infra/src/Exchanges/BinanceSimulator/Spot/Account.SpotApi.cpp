@@ -1,7 +1,5 @@
 #include "Exchanges/BinanceSimulator/Account/Account.hpp"
 
-#include <unordered_set>
-
 using QTrading::Dto::Trading::InstrumentType;
 using QTrading::Dto::Trading::OrderSide;
 using QTrading::Dto::Trading::PositionSide;
@@ -90,26 +88,27 @@ bool Account::SpotApi::place_market_order_quote(const std::string& symbol,
         return owner_->reject_order_(OrderRejectInfo::Code::InvalidQuantity, "quoteOrderQty conversion produced non-positive base quantity");
     }
 
-    std::unordered_set<int> before_ids;
-    before_ids.reserve(owner_->open_orders_.size());
-    for (const auto& ord : owner_->open_orders_) {
-        before_ids.insert(ord.id);
-    }
+    const int expected_new_order_id = owner_->next_order_id_;
 
     const bool ok = owner_->place_order(symbol, base_qty, side, PositionSide::Both, reduce_only, client_order_id, stp_mode);
     if (!ok) {
         return false;
     }
 
-    for (auto& ord : owner_->open_orders_) {
-        if (before_ids.find(ord.id) != before_ids.end()) {
-            continue;
-        }
-        if (ord.symbol != symbol || ord.instrument_type != InstrumentType::Spot) {
-            continue;
-        }
+    auto it = owner_->open_order_index_by_id_.find(expected_new_order_id);
+    if (it == owner_->open_order_index_by_id_.end()) {
+        return true;
+    }
+    const size_t idx = it->second;
+    if (idx >= owner_->open_orders_.size()) {
+        return true;
+    }
+
+    auto& ord = owner_->open_orders_[idx];
+    if (ord.symbol == symbol && ord.instrument_type == InstrumentType::Spot) {
         ord.quote_order_qty = quote_order_qty;
     }
+
     return true;
 }
 
@@ -130,7 +129,6 @@ void Account::SpotApi::cancel_open_orders(const std::string& symbol)
         return;
     }
 
-    owner_->rebuild_open_order_index_();
     owner_->mark_open_orders_dirty_();
     ++owner_->state_version_;
 }

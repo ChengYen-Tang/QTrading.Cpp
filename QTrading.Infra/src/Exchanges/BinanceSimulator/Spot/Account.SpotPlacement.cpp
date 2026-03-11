@@ -48,8 +48,8 @@ bool Account::place_spot_order(const std::string& symbol,
                 const double worst_fee_rate = std::max(0.0, std::max(std::get<0>(fee_rates), std::get<1>(fee_rates)));
                 required_cash = notional_est * (1.0 + worst_fee_rate);
             }
-            const auto spot_bal = get_spot_balance();
-            if (spot_bal.AvailableBalance + 1e-12 < required_cash) {
+            const double available_cash = std::max(0.0, spot_ledger_.cash_balance() - spot_open_buy_reserved_cash_());
+            if (available_cash + 1e-12 < required_cash) {
                 if (enable_console_output_) {
                     std::cerr << "[place_order] Spot buy rejected: insufficient spot available cash.\n";
                 }

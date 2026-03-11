@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <stdexcept>
 #include <string_view>
 
@@ -160,10 +161,24 @@ void MarketData::load_csv(const std::string& csv_file) {
         throw std::runtime_error("Cannot open file: " + csv_file);
     }
 
-    // Simple reserve heuristic: for backtests, 1-minute data is large.
-    // Reserve some upfront to reduce reallocations; will grow as needed.
     klines.clear();
-    klines.reserve(1 << 16);
+    std::error_code ec;
+    const auto file_bytes = std::filesystem::file_size(path, ec);
+    if (!ec && file_bytes > 0) {
+        constexpr uintmax_t kAvgBytesPerRow = 80;
+        uintmax_t est_rows = file_bytes / kAvgBytesPerRow;
+        if (est_rows < 1024) {
+            est_rows = 1024;
+        }
+        const uintmax_t size_t_max = static_cast<uintmax_t>((std::numeric_limits<size_t>::max)());
+        if (est_rows > size_t_max) {
+            est_rows = size_t_max;
+        }
+        klines.reserve(static_cast<size_t>(est_rows));
+    }
+    else {
+        klines.reserve(1 << 16);
+    }
 
     std::string line;
 
@@ -205,6 +220,9 @@ void MarketData::load_csv(const std::string& csv_file) {
 /// @brief Get the most recent Kline entry.
 /// @return Reference to the last element in `klines`.
 const TradeKlineDto& MarketData::get_latest_kline() const {
+    if (klines.empty()) {
+        throw std::out_of_range("No kline data available");
+    }
     return klines.back();
 }
 
@@ -225,6 +243,24 @@ const TradeKlineDto& MarketData::get_kline(size_t index) const {
 /// @return Size of the `klines` vector.
 size_t MarketData::get_klines_count() const {
     return klines.size();
+}
+
+size_t MarketData::lower_bound_ts(uint64_t ts) const
+{
+    const auto it = std::lower_bound(klines.begin(), klines.end(), ts,
+        [](const TradeKlineDto& entry, uint64_t value) {
+            return entry.Timestamp < value;
+        });
+    return static_cast<size_t>(std::distance(klines.begin(), it));
+}
+
+size_t MarketData::upper_bound_ts(uint64_t ts) const
+{
+    const auto it = std::upper_bound(klines.begin(), klines.end(), ts,
+        [](uint64_t value, const TradeKlineDto& entry) {
+            return value < entry.Timestamp;
+        });
+    return static_cast<size_t>(std::distance(klines.begin(), it));
 }
 
 /// @brief Iterator to first mutable Kline.
