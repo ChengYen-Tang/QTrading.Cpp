@@ -14,6 +14,7 @@ QTrading::Dto::Account::BalanceSnapshot Account::get_spot_balance() const
     const double worst_fee_rate = std::max(0.0, std::max(std::get<0>(fee_rates), std::get<1>(fee_rates)));
 
     double reserved = 0.0;
+    const bool quote_fee_mode = (spot_commission_mode_ == SpotCommissionMode::QuoteAsset);
     for (const auto& ord : open_orders_) {
         if (ord.instrument_type != InstrumentType::Spot) {
             continue;
@@ -26,7 +27,8 @@ QTrading::Dto::Account::BalanceSnapshot Account::get_spot_balance() const
         }
 
         if (ord.price > 0.0) {
-            reserved += ord.quantity * ord.price * (1.0 + worst_fee_rate);
+            const double notional = ord.quantity * ord.price;
+            reserved += quote_fee_mode ? (notional * (1.0 + worst_fee_rate)) : notional;
             continue;
         }
 
@@ -35,7 +37,7 @@ QTrading::Dto::Account::BalanceSnapshot Account::get_spot_balance() const
             continue;
         }
         const double notional = ord.quantity * trade * (1.0 + std::max(0.0, market_slippage_buffer_));
-        reserved += notional * (1.0 + worst_fee_rate);
+        reserved += quote_fee_mode ? (notional * (1.0 + worst_fee_rate)) : notional;
     }
 
     s.OpenOrderInitialMargin = reserved;

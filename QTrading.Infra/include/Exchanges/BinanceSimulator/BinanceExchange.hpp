@@ -81,6 +81,12 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
                 bool reduce_only = false,
                 const std::string& client_order_id = {},
                 Account::SelfTradePreventionMode stp_mode = Account::SelfTradePreventionMode::None);
+            bool place_market_order_quote(const std::string& symbol,
+                double quote_order_qty,
+                QTrading::Dto::Trading::OrderSide side = QTrading::Dto::Trading::OrderSide::Buy,
+                bool reduce_only = false,
+                const std::string& client_order_id = {},
+                Account::SelfTradePreventionMode stp_mode = Account::SelfTradePreventionMode::None);
 
             void close_position(const std::string& symbol, double price = 0.0);
             void cancel_open_orders(const std::string& symbol);
@@ -107,6 +113,12 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
                 QTrading::Dto::Trading::OrderSide side,
                 QTrading::Dto::Trading::PositionSide position_side = QTrading::Dto::Trading::PositionSide::Both,
                 bool reduce_only = false,
+                const std::string& client_order_id = {},
+                Account::SelfTradePreventionMode stp_mode = Account::SelfTradePreventionMode::None);
+            bool place_close_position_order(const std::string& symbol,
+                QTrading::Dto::Trading::OrderSide side,
+                QTrading::Dto::Trading::PositionSide position_side = QTrading::Dto::Trading::PositionSide::Both,
+                double price = 0.0,
                 const std::string& client_order_id = {},
                 Account::SelfTradePreventionMode stp_mode = Account::SelfTradePreventionMode::None);
 
@@ -236,11 +248,17 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
             Account::SelfTradePreventionMode stp_mode{ Account::SelfTradePreventionMode::None };
             int binance_error_code{ 0 };
             std::string binance_error_message;
+            bool close_position{ false };
         };
         std::vector<AsyncOrderAck> drain_async_order_acks();
         enum class FundingApplyTiming {
             BeforeMatching = 0,
             AfterMatching = 1,
+        };
+        enum class ReferencePriceSource : int32_t {
+            None = 0,
+            Raw = 1,
+            Interpolated = 2,
         };
         void set_funding_apply_timing(FundingApplyTiming timing);
         FundingApplyTiming funding_apply_timing() const;
@@ -248,6 +266,8 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
         double uncertainty_band_bps() const;
         void set_mark_index_basis_thresholds_bps(double warning_bps, double stress_bps);
         void set_basis_risk_leverage_caps(double warning_cap, double stress_cap);
+        void set_simulator_risk_overlay_enabled(bool enabled);
+        bool simulator_risk_overlay_enabled() const;
         void set_basis_risk_guard_enabled(bool enabled);
         bool basis_risk_guard_enabled() const;
         void set_basis_stress_blocks_opening_orders(bool enabled);
@@ -266,8 +286,10 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
                 bool has_trade_price{ false };
                 double mark_price{ 0.0 };
                 bool has_mark_price{ false };
+                int32_t mark_price_source{ static_cast<int32_t>(ReferencePriceSource::None) };
                 double index_price{ 0.0 };
                 bool has_index_price{ false };
+                int32_t index_price_source{ static_cast<int32_t>(ReferencePriceSource::None) };
             };
 
             uint64_t ts_exchange{ 0 };
@@ -295,6 +317,8 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
             uint32_t basis_warning_symbols{ 0 };
             uint32_t basis_stress_symbols{ 0 };
             uint64_t basis_stress_blocked_orders{ 0 };
+            uint64_t funding_applied_events{ 0 };
+            uint64_t funding_skipped_no_mark{ 0 };
 
             double progress_pct{ 0.0 };
             std::vector<PriceSnapshot> prices;
@@ -401,23 +425,30 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
         std::vector<double> last_mark_by_symbol_;
         std::vector<uint64_t> last_mark_ts_by_symbol_;
         std::vector<uint8_t> has_last_mark_;
+        std::vector<int32_t> last_mark_source_by_symbol_;
         std::vector<double> last_index_by_symbol_;
         std::vector<uint64_t> last_index_ts_by_symbol_;
         std::vector<uint8_t> has_last_index_;
+        std::vector<int32_t> last_index_source_by_symbol_;
         std::vector<double> last_mark_index_basis_bps_by_symbol_;
         std::vector<uint8_t> has_last_mark_index_basis_;
         double last_mark_index_max_abs_basis_bps_{ 0.0 };
-        uint32_t last_mark_index_warning_symbols_{ 0 };
-        uint32_t last_mark_index_stress_symbols_{ 0 };
-        std::vector<uint8_t> basis_warning_active_by_symbol_;
-        std::vector<uint8_t> basis_stress_active_by_symbol_;
-        double mark_index_warning_bps_{ 50.0 };
-        double mark_index_stress_bps_{ 150.0 };
-        bool basis_risk_guard_enabled_{ true };
-        bool basis_stress_blocks_opening_orders_{ true };
-        double basis_warning_leverage_cap_{ 10.0 };
-        double basis_stress_leverage_cap_{ 5.0 };
-        std::atomic<uint64_t> basis_stress_blocked_orders_{ 0 };
+        struct SimulatorRiskOverlay {
+            bool enabled{ true };
+            bool basis_stress_blocks_opening_orders{ true };
+            double mark_index_warning_bps{ 50.0 };
+            double mark_index_stress_bps{ 150.0 };
+            double basis_warning_leverage_cap{ 10.0 };
+            double basis_stress_leverage_cap{ 5.0 };
+            uint32_t warning_symbols{ 0 };
+            uint32_t stress_symbols{ 0 };
+            std::vector<uint8_t> warning_active_by_symbol{};
+            std::vector<uint8_t> stress_active_by_symbol{};
+            std::atomic<uint64_t> stress_blocked_orders{ 0 };
+        };
+        SimulatorRiskOverlay simulator_risk_overlay_{};
+        uint64_t funding_applied_events_total_{ 0 };
+        uint64_t funding_skipped_no_mark_total_{ 0 };
         size_t order_latency_bars_{ 0 };
         FundingApplyTiming funding_apply_timing_{ FundingApplyTiming::BeforeMatching };
         uint64_t processed_steps_{ 0 };
@@ -471,6 +502,14 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
         static std::pair<int, std::string> map_binance_reject_(const std::optional<Account::OrderRejectInfo>& reject);
         bool interpolate_mark_price_(size_t sym_id, uint64_t ts, double& out_price) const;
         bool interpolate_index_price_(size_t sym_id, uint64_t ts, double& out_price) const;
+        bool resolve_mark_price_with_source_(size_t sym_id,
+            uint64_t ts,
+            double& out_price,
+            ReferencePriceSource& out_source) const;
+        bool resolve_index_price_with_source_(size_t sym_id,
+            uint64_t ts,
+            double& out_price,
+            ReferencePriceSource& out_source) const;
         bool perp_opening_blocked_by_basis_stress_account_locked_(
             Account& acc,
             const std::string& symbol,

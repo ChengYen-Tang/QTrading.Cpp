@@ -25,8 +25,10 @@ namespace QTrading::Log::FileLogger::FeatherV2 {
         double taker_buy_base_volume{};
         bool has_mark_price{};
         double mark_price{};
+        int32_t mark_price_source{}; // 0=None, 1=Raw, 2=Interpolated
         bool has_index_price{};
         double index_price{};
+        int32_t index_price_source{}; // 0=None, 1=Raw, 2=Interpolated
     };
 
     namespace MarketEvent {
@@ -47,8 +49,10 @@ namespace QTrading::Log::FileLogger::FeatherV2 {
                 arrow::field("taker_buy_base_volume", arrow::float64()),
                 arrow::field("has_mark_price", arrow::boolean()),
                 arrow::field("mark_price", arrow::float64()),
+                arrow::field("mark_price_source", arrow::int32()),
                 arrow::field("has_index_price", arrow::boolean()),
                 arrow::field("index_price", arrow::float64()),
+                arrow::field("index_price_source", arrow::int32()),
                 arrow::field("ts_local", arrow::uint64())
             });
         }
@@ -70,9 +74,11 @@ namespace QTrading::Log::FileLogger::FeatherV2 {
             detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(11), e.taker_buy_base_volume);
             detail::AppendOrThrow(builder.GetFieldAs<arrow::BooleanBuilder>(12), e.has_mark_price);
             detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(13), e.mark_price);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::BooleanBuilder>(14), e.has_index_price);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(15), e.index_price);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::UInt64Builder>(16), e.ts_local);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::Int32Builder>(14), e.mark_price_source);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::BooleanBuilder>(15), e.has_index_price);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(16), e.index_price);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::Int32Builder>(17), e.index_price_source);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::UInt64Builder>(18), e.ts_local);
         }
     } // namespace MarketEvent
 

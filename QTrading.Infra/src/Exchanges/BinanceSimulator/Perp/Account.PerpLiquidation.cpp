@@ -188,6 +188,8 @@ void Account::apply_perp_liquidation_(double taker_fee, bool& open_orders_change
         fill.side = liq_ord.side;
         fill.position_side = liq_ord.position_side;
         fill.reduce_only = liq_ord.reduce_only;
+        fill.close_position = liq_ord.close_position;
+        fill.quote_order_qty = liq_ord.quote_order_qty;
         fill.order_qty = liq_ord.quantity;
         fill.order_price = liq_ord.price;
         fill.exec_qty = close_qty;

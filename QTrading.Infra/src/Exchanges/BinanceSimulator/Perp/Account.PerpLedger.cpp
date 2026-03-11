@@ -93,6 +93,40 @@ QTrading::Dto::Account::BalanceSnapshot BuildPerpSnapshot(
         if (o.instrument_type != InstrumentType::Perp) {
             continue;
         }
+
+        if (o.one_way_reverse && o.closing_position_id >= 0) {
+            double referenced_qty = 0.0;
+            bool has_referenced_pos = false;
+            for (const auto& p : positions) {
+                if (p.id != o.closing_position_id ||
+                    p.instrument_type != InstrumentType::Perp ||
+                    p.quantity <= 0.0) {
+                    continue;
+                }
+                referenced_qty = p.quantity;
+                has_referenced_pos = true;
+                break;
+            }
+
+            const double opening_qty = has_referenced_pos
+                ? std::max(0.0, o.quantity - referenced_qty)
+                : std::max(0.0, o.quantity);
+            if (opening_qty <= 0.0) {
+                continue;
+            }
+
+            Order opening_leg = o;
+            opening_leg.quantity = opening_qty;
+            opening_leg.closing_position_id = -1;
+            opening_leg.one_way_reverse = false;
+            const double notional = estimate_notional(opening_leg);
+            if (notional <= 0.0) {
+                continue;
+            }
+            openOrdInit += notional / get_lev(o);
+            continue;
+        }
+
         if (!OrderReservesOpenMargin(o)) continue;
 
         const double notional = estimate_notional(o);

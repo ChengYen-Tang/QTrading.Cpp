@@ -6,7 +6,11 @@
 using QTrading::Dto::Trading::InstrumentType;
 using QTrading::Dto::Trading::PositionSide;
 
-void Account::close_perp_position_(const std::string& symbol, double price)
+void Account::close_perp_position_(const std::string& symbol,
+    double price,
+    const std::string& client_order_id,
+    SelfTradePreventionMode stp_mode,
+    bool close_position)
 {
     bool found = false;
     auto it = position_indices_by_symbol_.find(symbol);
@@ -16,7 +20,11 @@ void Account::close_perp_position_(const std::string& symbol, double price)
             if (pos.symbol != symbol) continue;
             if (pos.instrument_type != InstrumentType::Perp) continue;
             found = true;
-            place_closing_order(pos.id, pos.quantity, price);
+            std::string derived_client_order_id;
+            if (!client_order_id.empty()) {
+                derived_client_order_id = client_order_id + ":" + std::to_string(pos.id);
+            }
+            place_closing_order(pos.id, pos.quantity, price, derived_client_order_id, stp_mode, close_position);
         }
     }
     if (found) {
@@ -28,7 +36,12 @@ void Account::close_perp_position_(const std::string& symbol, double price)
     }
 }
 
-void Account::close_perp_position_side_(const std::string& symbol, PositionSide position_side, double price)
+void Account::close_perp_position_side_(const std::string& symbol,
+    PositionSide position_side,
+    double price,
+    const std::string& client_order_id,
+    SelfTradePreventionMode stp_mode,
+    bool close_position)
 {
     const bool want_long = (position_side == PositionSide::Long);
     bool found = false;
@@ -40,7 +53,11 @@ void Account::close_perp_position_side_(const std::string& symbol, PositionSide 
             if (pos.instrument_type != InstrumentType::Perp) continue;
             if (pos.is_long != want_long) continue;
             found = true;
-            place_closing_order(pos.id, pos.quantity, price);
+            std::string derived_client_order_id;
+            if (!client_order_id.empty()) {
+                derived_client_order_id = client_order_id + ":" + std::to_string(pos.id);
+            }
+            place_closing_order(pos.id, pos.quantity, price, derived_client_order_id, stp_mode, close_position);
         }
     }
     if (found) {

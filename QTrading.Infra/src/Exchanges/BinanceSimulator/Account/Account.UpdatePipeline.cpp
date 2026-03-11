@@ -652,11 +652,23 @@ void Account::process_open_orders_pipeline_(bool& dirty, bool& open_orders_chang
             const double taker_rate = is_spot ? spot_taker_fee : perp_taker_fee;
             const double fee_rate = is_taker ? taker_rate : maker_rate;
             const double fee = notional * fee_rate;
+            const bool is_buy = (ord.side == OrderSide::Buy);
+            const bool quote_fee_mode = (spot_commission_mode_ == SpotCommissionMode::QuoteAsset);
+            const double fee_native_base = fill_qty * std::max(0.0, fee_rate);
 
             keep_open_order[entry.idx] = false;
 
             // Reuse single-order leftover buffer (avoids per-fill tiny vector alloc).
             single_leftover.clear();
+
+            if (ord.one_way_reverse &&
+                ord.closing_position_id >= 0 &&
+                position_index_by_id_.find(ord.closing_position_id) == position_index_by_id_.end()) {
+                // The close leg has already fully consumed the referenced position.
+                // Continue this order as a normal opening leg without placement-time split.
+                ord.closing_position_id = -1;
+                ord.one_way_reverse = false;
+            }
 
             if (ord.closing_position_id >= 0) {
                 processClosingOrder(ord, fill_qty, fill_price, fee, single_leftover);
@@ -689,6 +701,8 @@ void Account::process_open_orders_pipeline_(bool& dirty, bool& open_orders_chang
             fill.side = ord.side;
             fill.position_side = ord.position_side;
             fill.reduce_only = ord.reduce_only;
+            fill.close_position = ord.close_position;
+            fill.quote_order_qty = ord.quote_order_qty;
             fill.order_qty = order_qty;
             fill.order_price = order_price;
             fill.exec_qty = fill_qty;
@@ -700,6 +714,37 @@ void Account::process_open_orders_pipeline_(bool& dirty, bool& open_orders_chang
             fill.impact_slippage_bps = impact_slippage_bps;
             fill.fee = fee;
             fill.fee_rate = fee_rate;
+            fill.fee_quote_equiv = fee;
+            fill.fee_native = fee;
+            fill.fee_asset = static_cast<int32_t>(CommissionAsset::None);
+            fill.commission_model_source = static_cast<int32_t>(CommissionModelSource::None);
+            fill.spot_cash_delta = 0.0;
+            fill.spot_inventory_delta = 0.0;
+            if (is_spot) {
+                if (is_buy && ord.closing_position_id < 0 && !ord.reduce_only) {
+                    if (quote_fee_mode) {
+                        fill.fee_asset = static_cast<int32_t>(CommissionAsset::QuoteAsset);
+                        fill.fee_native = fee;
+                        fill.commission_model_source = static_cast<int32_t>(CommissionModelSource::ImputedQuote);
+                        fill.spot_cash_delta = -(notional + fee);
+                        fill.spot_inventory_delta = fill_qty;
+                    }
+                    else {
+                        fill.fee_asset = static_cast<int32_t>(CommissionAsset::BaseAsset);
+                        fill.fee_native = fee_native_base;
+                        fill.commission_model_source = static_cast<int32_t>(CommissionModelSource::ImputedBuyBase);
+                        fill.spot_cash_delta = -notional;
+                        fill.spot_inventory_delta = std::max(0.0, fill_qty - fee_native_base);
+                    }
+                }
+                else {
+                    fill.fee_asset = static_cast<int32_t>(CommissionAsset::QuoteAsset);
+                    fill.fee_native = fee;
+                    fill.commission_model_source = static_cast<int32_t>(CommissionModelSource::ImputedQuote);
+                    fill.spot_cash_delta = notional - fee;
+                    fill.spot_inventory_delta = -fill_qty;
+                }
+            }
             fill.closing_position_id = ord.closing_position_id;
             fill.instrument_type = ord.instrument_type;
             if (fill.instrument_type == InstrumentType::Perp) {

@@ -15,7 +15,9 @@ namespace QTrading::Log::FileLogger::FeatherV2::Order {
         arrow::field("price",               arrow::float64()), ///< Order price.
         arrow::field("is_long",             arrow::boolean()), ///< True if long.
         arrow::field("reduce_only",         arrow::boolean()), ///< Reduce-only flag.
-        arrow::field("closing_position_id", arrow::int32())    ///< Position to close, or -1.
+        arrow::field("closing_position_id", arrow::int32()),   ///< Position to close, or -1.
+        arrow::field("close_position",      arrow::boolean()), ///< closePosition-style intent.
+        arrow::field("quote_order_qty",     arrow::float64())  ///< Raw quoteOrderQty input when provided.
         });
 
     /// @brief Serializer for Order payloads.
@@ -32,5 +34,7 @@ namespace QTrading::Log::FileLogger::FeatherV2::Order {
         (void)b.GetFieldAs<arrow::BooleanBuilder>(6)->Append(o->side == QTrading::Dto::Trading::OrderSide::Buy);
         (void)b.GetFieldAs<arrow::BooleanBuilder>(7)->Append(o->reduce_only);
         (void)b.GetFieldAs<arrow::Int32Builder>(8)->Append(o->closing_position_id);
+        (void)b.GetFieldAs<arrow::BooleanBuilder>(9)->Append(o->close_position);
+        (void)b.GetFieldAs<arrow::DoubleBuilder>(10)->Append(o->quote_order_qty);
         };
 }

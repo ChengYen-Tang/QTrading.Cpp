@@ -164,6 +164,7 @@ Account::Account(const AccountInitConfig& init_config)
     vip_level_(0),
     hedge_mode_(false),
     strict_binance_mode_(false),
+    strict_symbol_registration_mode_(false),
     next_order_id_(1),
     next_position_id_(1),
     policies_(DefaultPolicies()),
@@ -172,6 +173,7 @@ Account::Account(const AccountInitConfig& init_config)
     const auto cfg = validate_account_init_config(init_config);
     vip_level_ = cfg.vip_level;
     strict_binance_mode_ = cfg.strict_binance_mode;
+    strict_symbol_registration_mode_ = cfg.strict_symbol_registration_mode;
     spot_ledger_.set_cash_balance(cfg.spot_initial_cash);
     perp_ledger_.set_wallet_balance(cfg.perp_initial_wallet);
     perp_ledger_.set_used_margin(0.0);
@@ -353,6 +355,16 @@ void Account::set_taker_probability_model_coefficients(double intercept,
     taker_prob_penetration_weight_ = penetration_weight;
 }
 
+void Account::set_spot_commission_mode(SpotCommissionMode mode)
+{
+    spot_commission_mode_ = mode;
+}
+
+Account::SpotCommissionMode Account::spot_commission_mode() const
+{
+    return spot_commission_mode_;
+}
+
 double Account::get_total_cash_balance() const {
     return perp_ledger_.wallet_balance() + spot_ledger_.cash_balance();
 }
@@ -398,6 +410,31 @@ bool Account::is_strict_binance_mode() const
     return strict_binance_mode_;
 }
 
+void Account::set_strict_symbol_registration_mode(bool enable)
+{
+    strict_symbol_registration_mode_ = enable;
+}
+
+bool Account::is_strict_symbol_registration_mode() const
+{
+    return strict_symbol_registration_mode_;
+}
+
+void Account::set_merge_positions_enabled(bool enable)
+{
+    merge_positions_enabled_ = enable;
+}
+
+bool Account::is_merge_positions_enabled() const
+{
+    return merge_positions_enabled_;
+}
+
+bool Account::has_explicit_instrument_symbol_(const std::string& symbol) const
+{
+    return instrument_registry_.HasExplicit(symbol);
+}
+
 const QTrading::Dto::Trading::InstrumentSpec& Account::resolve_instrument_spec_(const std::string& symbol) const
 {
     return instrument_registry_.Resolve(symbol);
@@ -405,8 +442,9 @@ const QTrading::Dto::Trading::InstrumentSpec& Account::resolve_instrument_spec_(
 
 void Account::set_instrument_type(const std::string& symbol, InstrumentType type)
 {
+    const bool has_explicit = instrument_registry_.HasExplicit(symbol);
     const auto& cur = instrument_registry_.Resolve(symbol);
-    if (cur.type == type) {
+    if (has_explicit && cur.type == type) {
         return;
     }
 
@@ -522,6 +560,12 @@ bool Account::place_order(const std::string& symbol,
         }
         return reject_order_(OrderRejectInfo::Code::InvalidQuantity, "Invalid quantity <= 0");
     }
+    if (strict_symbol_registration_mode_ && !has_explicit_instrument_symbol_(symbol)) {
+        if (enable_console_output_) {
+            std::cerr << "[place_order] Unknown symbol rejected in strict Binance mode.\n";
+        }
+        return reject_order_(OrderRejectInfo::Code::UnknownSymbol, "Unknown symbol in strict symbol-registration mode");
+    }
 
     const auto& instrument_spec = resolve_instrument_spec_(symbol);
     if (!validate_order_filters_(symbol, quantity, price, side, instrument_spec)) {
@@ -589,6 +633,9 @@ std::optional<Account::OrderRejectInfo> Account::consume_last_order_reject_info(
 /// @brief Merge positions of the same symbol & direction into one.
 /// @details Aggregates quantities and recalculates weighted entry price, margin, fees.
 void Account::merge_positions() {
+    if (!merge_positions_enabled_) {
+        return;
+    }
     if (positions_.empty()) return;
     merge_indices_.clear();
     merge_indices_.reserve(positions_.size());

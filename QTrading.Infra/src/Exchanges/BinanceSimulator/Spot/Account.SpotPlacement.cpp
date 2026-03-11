@@ -42,9 +42,12 @@ bool Account::place_spot_order(const std::string& symbol,
         }
 
         if (notional_est > 0.0) {
-            const auto fee_rates = get_fee_rates(InstrumentType::Spot);
-            const double worst_fee_rate = std::max(0.0, std::max(std::get<0>(fee_rates), std::get<1>(fee_rates)));
-            const double required_cash = notional_est * (1.0 + worst_fee_rate);
+            double required_cash = notional_est;
+            if (spot_commission_mode_ == SpotCommissionMode::QuoteAsset) {
+                const auto fee_rates = get_fee_rates(InstrumentType::Spot);
+                const double worst_fee_rate = std::max(0.0, std::max(std::get<0>(fee_rates), std::get<1>(fee_rates)));
+                required_cash = notional_est * (1.0 + worst_fee_rate);
+            }
             const auto spot_bal = get_spot_balance();
             if (spot_bal.AvailableBalance + 1e-12 < required_cash) {
                 if (enable_console_output_) {

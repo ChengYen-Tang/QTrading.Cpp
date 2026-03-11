@@ -39,7 +39,7 @@ bool BinanceExchange::PerpApi::place_order(const std::string& symbol,
         });
         owner_.enqueue_deferred_order_locked_(due, [owner_ptr = &owner_, req_id, submitted_step, due, symbol, quantity, price, side, position_side, reduce_only, client_order_id, stp_mode](Account& acc, uint64_t step_seq) {
             if (owner_ptr->perp_opening_blocked_by_basis_stress_account_locked_(acc, symbol, side, position_side, reduce_only)) {
-                owner_ptr->basis_stress_blocked_orders_.fetch_add(1, std::memory_order_relaxed);
+                owner_ptr->simulator_risk_overlay_.stress_blocked_orders.fetch_add(1, std::memory_order_relaxed);
                 owner_ptr->push_async_order_ack_locked_(BinanceExchange::AsyncOrderAck{
                     req_id,
                     BinanceExchange::AsyncOrderAck::Status::Rejected,
@@ -90,7 +90,7 @@ bool BinanceExchange::PerpApi::place_order(const std::string& symbol,
     }
     Account& acc = *owner_.account_engine_;
     if (owner_.perp_opening_blocked_by_basis_stress_account_locked_(acc, symbol, side, position_side, reduce_only)) {
-        owner_.basis_stress_blocked_orders_.fetch_add(1, std::memory_order_relaxed);
+        owner_.simulator_risk_overlay_.stress_blocked_orders.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
     return acc.perp.place_order(symbol, quantity, price, side, position_side, reduce_only, client_order_id, stp_mode);
@@ -129,7 +129,7 @@ bool BinanceExchange::PerpApi::place_order(const std::string& symbol,
         });
         owner_.enqueue_deferred_order_locked_(due, [owner_ptr = &owner_, req_id, submitted_step, due, symbol, quantity, side, position_side, reduce_only, client_order_id, stp_mode](Account& acc, uint64_t step_seq) {
             if (owner_ptr->perp_opening_blocked_by_basis_stress_account_locked_(acc, symbol, side, position_side, reduce_only)) {
-                owner_ptr->basis_stress_blocked_orders_.fetch_add(1, std::memory_order_relaxed);
+                owner_ptr->simulator_risk_overlay_.stress_blocked_orders.fetch_add(1, std::memory_order_relaxed);
                 owner_ptr->push_async_order_ack_locked_(BinanceExchange::AsyncOrderAck{
                     req_id,
                     BinanceExchange::AsyncOrderAck::Status::Rejected,
@@ -180,10 +180,77 @@ bool BinanceExchange::PerpApi::place_order(const std::string& symbol,
     }
     Account& acc = *owner_.account_engine_;
     if (owner_.perp_opening_blocked_by_basis_stress_account_locked_(acc, symbol, side, position_side, reduce_only)) {
-        owner_.basis_stress_blocked_orders_.fetch_add(1, std::memory_order_relaxed);
+        owner_.simulator_risk_overlay_.stress_blocked_orders.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
     return acc.perp.place_order(symbol, quantity, side, position_side, reduce_only, client_order_id, stp_mode);
+}
+
+bool BinanceExchange::PerpApi::place_close_position_order(const std::string& symbol,
+    OrderSide side,
+    PositionSide position_side,
+    double price,
+    const std::string& client_order_id,
+    Account::SelfTradePreventionMode stp_mode)
+{
+    std::lock_guard<std::mutex> lk(owner_.account_mtx_);
+    if (owner_.order_latency_bars_ > 0) {
+        const uint64_t req_id = owner_.next_async_order_request_id_++;
+        const uint64_t submitted_step = owner_.processed_steps_;
+        const uint64_t due = owner_.processed_steps_ + static_cast<uint64_t>(owner_.order_latency_bars_);
+        BinanceExchange::AsyncOrderAck pending{
+            req_id,
+            BinanceExchange::AsyncOrderAck::Status::Pending,
+            QTrading::Dto::Trading::InstrumentType::Perp,
+            symbol,
+            0.0,
+            price,
+            side,
+            position_side,
+            false,
+            submitted_step,
+            due,
+            0,
+            Account::OrderRejectInfo::Code::None,
+            {},
+            client_order_id,
+            stp_mode
+        };
+        pending.close_position = true;
+        owner_.push_async_order_ack_locked_(std::move(pending));
+
+        owner_.enqueue_deferred_order_locked_(due, [owner_ptr = &owner_, req_id, submitted_step, due, symbol, price, side, position_side, client_order_id, stp_mode](Account& acc, uint64_t step_seq) {
+            const bool ok = acc.perp.place_close_position_order(symbol, side, position_side, price, client_order_id, stp_mode);
+            auto rej = acc.consume_last_order_reject_info();
+            auto binance_reject = BinanceExchange::map_binance_reject_(rej);
+            BinanceExchange::AsyncOrderAck resolved{
+                req_id,
+                ok ? BinanceExchange::AsyncOrderAck::Status::Accepted : BinanceExchange::AsyncOrderAck::Status::Rejected,
+                QTrading::Dto::Trading::InstrumentType::Perp,
+                symbol,
+                0.0,
+                price,
+                side,
+                position_side,
+                false,
+                submitted_step,
+                due,
+                step_seq,
+                rej ? rej->code : Account::OrderRejectInfo::Code::None,
+                rej ? rej->message : std::string{},
+                client_order_id,
+                stp_mode,
+                binance_reject.first,
+                std::move(binance_reject.second)
+            };
+            resolved.close_position = true;
+            owner_ptr->push_async_order_ack_locked_(std::move(resolved));
+        });
+        return true;
+    }
+
+    Account& acc = *owner_.account_engine_;
+    return acc.perp.place_close_position_order(symbol, side, position_side, price, client_order_id, stp_mode);
 }
 
 void BinanceExchange::PerpApi::close_position(const std::string& symbol, double price)

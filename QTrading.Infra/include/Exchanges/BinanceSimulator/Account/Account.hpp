@@ -33,29 +33,30 @@ public:
     struct OrderRejectInfo {
         enum class Code {
             None = 0,
-            InvalidQuantity = 1,
-            DuplicateClientOrderId = 2,
-            StpExpiredTaker = 3,
-            StpExpiredBoth = 4,
-            SpotHedgeModeUnsupported = 5,
-            SpotInsufficientCash = 6,
-            SpotNoInventory = 7,
-            SpotQuantityExceedsInventory = 8,
-            SpotNoLongPositionToClose = 9,
-            HedgeModePositionSideRequired = 10,
-            StrictHedgeReduceOnlyDisabled = 11,
-            ReduceOnlyNoReduciblePosition = 12,
-            PriceFilterBelowMin = 13,
-            PriceFilterAboveMax = 14,
-            PriceFilterInvalidTick = 15,
-            LotSizeBelowMinQty = 16,
-            LotSizeAboveMaxQty = 17,
-            LotSizeInvalidStep = 18,
-            NotionalNoReferencePrice = 19,
-            NotionalBelowMin = 20,
-            NotionalAboveMax = 21,
-            PercentPriceAboveBound = 22,
-            PercentPriceBelowBound = 23,
+            UnknownSymbol = 1,
+            InvalidQuantity = 2,
+            DuplicateClientOrderId = 3,
+            StpExpiredTaker = 4,
+            StpExpiredBoth = 5,
+            SpotHedgeModeUnsupported = 6,
+            SpotInsufficientCash = 7,
+            SpotNoInventory = 8,
+            SpotQuantityExceedsInventory = 9,
+            SpotNoLongPositionToClose = 10,
+            HedgeModePositionSideRequired = 11,
+            StrictHedgeReduceOnlyDisabled = 12,
+            ReduceOnlyNoReduciblePosition = 13,
+            PriceFilterBelowMin = 14,
+            PriceFilterAboveMax = 15,
+            PriceFilterInvalidTick = 16,
+            LotSizeBelowMinQty = 17,
+            LotSizeAboveMaxQty = 18,
+            LotSizeInvalidStep = 19,
+            NotionalNoReferencePrice = 20,
+            NotionalBelowMin = 21,
+            NotionalAboveMax = 22,
+            PercentPriceAboveBound = 23,
+            PercentPriceBelowBound = 24,
         };
 
         Code code{ Code::None };
@@ -80,6 +81,12 @@ public:
         bool place_order(const std::string& symbol,
             double quantity,
             QTrading::Dto::Trading::OrderSide side,
+            bool reduce_only = false,
+            const std::string& client_order_id = {},
+            SelfTradePreventionMode stp_mode = SelfTradePreventionMode::None);
+        bool place_market_order_quote(const std::string& symbol,
+            double quote_order_qty,
+            QTrading::Dto::Trading::OrderSide side = QTrading::Dto::Trading::OrderSide::Buy,
             bool reduce_only = false,
             const std::string& client_order_id = {},
             SelfTradePreventionMode stp_mode = SelfTradePreventionMode::None);
@@ -116,6 +123,12 @@ public:
             bool reduce_only = false,
             const std::string& client_order_id = {},
             SelfTradePreventionMode stp_mode = SelfTradePreventionMode::None);
+        bool place_close_position_order(const std::string& symbol,
+            QTrading::Dto::Trading::OrderSide side,
+            QTrading::Dto::Trading::PositionSide position_side = QTrading::Dto::Trading::PositionSide::Both,
+            double price = 0.0,
+            const std::string& client_order_id = {},
+            SelfTradePreventionMode stp_mode = SelfTradePreventionMode::None);
 
         void close_position(const std::string& symbol, double price = 0.0);
         void close_position(const std::string& symbol,
@@ -139,7 +152,8 @@ public:
         double spot_initial_cash{ 0.0 };
         double perp_initial_wallet{ 1'000'000.0 };
         int vip_level{ 0 };
-        bool strict_binance_mode{ false };
+        bool strict_binance_mode{ true };
+        bool strict_symbol_registration_mode{ false };
     };
 
     enum class KlineVolumeSplitMode {
@@ -152,6 +166,23 @@ public:
         LegacyCloseHeuristic = 0,
         ExpectedPath = 1,
         MonteCarloPath = 2,
+    };
+
+    enum class SpotCommissionMode : int32_t {
+        QuoteAsset = 0,
+        BaseOnBuyQuoteOnSell = 1,
+    };
+
+    enum class CommissionAsset : int32_t {
+        None = 0,
+        QuoteAsset = 1,
+        BaseAsset = 2,
+    };
+
+    enum class CommissionModelSource : int32_t {
+        None = 0,
+        ImputedQuote = 1,
+        ImputedBuyBase = 2,
     };
 
     // --- Policies (P2.1) ---
@@ -214,6 +245,10 @@ public:
     bool is_hedge_mode() const;
     void set_strict_binance_mode(bool enable);
     bool is_strict_binance_mode() const;
+    void set_strict_symbol_registration_mode(bool enable);
+    bool is_strict_symbol_registration_mode() const;
+    void set_merge_positions_enabled(bool enable);
+    bool is_merge_positions_enabled() const;
 
     // Legacy top-level APIs kept for compatibility.
     // New call sites should prefer `account.perp.set_symbol_leverage(...)`
@@ -319,6 +354,8 @@ public:
         double size_ratio_weight,
         double volatility_weight,
         double penetration_weight);
+    void set_spot_commission_mode(SpotCommissionMode mode);
+    SpotCommissionMode spot_commission_mode() const;
 
     void set_enable_console_output(bool enable);
     bool is_console_output_enabled() const;
@@ -333,6 +370,8 @@ public:
         QTrading::Dto::Trading::OrderSide side{};
         QTrading::Dto::Trading::PositionSide position_side{};
         bool reduce_only{};
+        bool close_position{};
+        double quote_order_qty{ 0.0 };
         double order_qty{};
         double order_price{};
         double exec_qty{};
@@ -344,6 +383,12 @@ public:
         double impact_slippage_bps{ 0.0 };
         double fee{};
         double fee_rate{};
+        int32_t fee_asset{ static_cast<int32_t>(CommissionAsset::None) };
+        double fee_native{ 0.0 };
+        double fee_quote_equiv{ 0.0 };
+        double spot_cash_delta{ 0.0 };
+        double spot_inventory_delta{ 0.0 };
+        int32_t commission_model_source{ static_cast<int32_t>(CommissionModelSource::None) };
         int closing_position_id{};
         QTrading::Dto::Trading::InstrumentType instrument_type{ QTrading::Dto::Trading::InstrumentType::Perp };
         QTrading::Dto::Account::BalanceSnapshot balance_snapshot{};
@@ -362,6 +407,8 @@ private:
     int vip_level_;
     bool hedge_mode_;
     bool strict_binance_mode_;
+    bool strict_symbol_registration_mode_{ false };
+    bool merge_positions_enabled_{ true };
 
     std::unordered_map<std::string, double> symbol_leverage_;
 
@@ -466,6 +513,7 @@ private:
     double taker_prob_size_ratio_weight_{ 1.5 };
     double taker_prob_volatility_weight_{ 1.0 };
     double taker_prob_penetration_weight_{ 1.0 };
+    SpotCommissionMode spot_commission_mode_{ SpotCommissionMode::QuoteAsset };
 
     // Monotonic state version for O(1) change detection by exchange.
     uint64_t state_version_{ 0 };
@@ -488,7 +536,12 @@ private:
     std::tuple<double, double> get_fee_rates(QTrading::Dto::Trading::InstrumentType instrument_type) const;
     bool adjust_position_leverage(const std::string& symbol, double oldLev, double newLev);
 
-    void place_closing_order(int position_id, double quantity, double price);
+    void place_closing_order(int position_id,
+        double quantity,
+        double price,
+        const std::string& client_order_id = {},
+        SelfTradePreventionMode stp_mode = SelfTradePreventionMode::None,
+        bool close_position = false);
 
     void merge_positions();
 
@@ -545,8 +598,23 @@ private:
         const QTrading::Dto::Market::Binance::TradeKlineDto& k,
         bool base_is_taker) const;
     void close_spot_position_(const std::string& symbol, double price);
-    void close_perp_position_(const std::string& symbol, double price);
-    void close_perp_position_side_(const std::string& symbol, QTrading::Dto::Trading::PositionSide position_side, double price);
+    void close_perp_position_(const std::string& symbol,
+        double price,
+        const std::string& client_order_id = {},
+        SelfTradePreventionMode stp_mode = SelfTradePreventionMode::None,
+        bool close_position = false);
+    void close_perp_position_side_(const std::string& symbol,
+        QTrading::Dto::Trading::PositionSide position_side,
+        double price,
+        const std::string& client_order_id = {},
+        SelfTradePreventionMode stp_mode = SelfTradePreventionMode::None,
+        bool close_position = false);
+    bool place_close_position_order_(const std::string& symbol,
+        double price,
+        QTrading::Dto::Trading::OrderSide side,
+        QTrading::Dto::Trading::PositionSide position_side,
+        const std::string& client_order_id,
+        SelfTradePreventionMode stp_mode);
     bool cancel_spot_open_orders_(const std::string& symbol);
     bool cancel_perp_open_orders_(const std::string& symbol);
 
@@ -591,6 +659,7 @@ private:
         QTrading::Dto::Trading::OrderSide incoming_side,
         double incoming_price,
         QTrading::Dto::Trading::InstrumentType instrument_type);
+    bool has_explicit_instrument_symbol_(const std::string& symbol) const;
     const QTrading::Dto::Trading::InstrumentSpec& resolve_instrument_spec_(const std::string& symbol) const;
 
 public:

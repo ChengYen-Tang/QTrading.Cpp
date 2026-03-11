@@ -265,6 +265,10 @@ BinanceExchange::BinanceExchange(
     log_ctx_.ts_exchange = 0;
     log_ctx_.event_seq = 0;
 
+    if (account_engine_) {
+        account_engine_->set_strict_symbol_registration_mode(account_engine_->is_strict_binance_mode());
+    }
+
     // Load each CSV in parallel (safe: each MarketData instance is independent).
     std::vector<std::future<MarketData>> jobs;
     symbols_.reserve(datasets.size());
@@ -283,8 +287,9 @@ BinanceExchange::BinanceExchange(
 
     for (const auto& ds : datasets) {
         symbols_.push_back(ds.symbol);
-        if (account_engine_ && ds.instrument_type.has_value()) {
-            account_engine_->set_instrument_type(ds.symbol, *ds.instrument_type);
+        if (account_engine_) {
+            const auto type = ds.instrument_type.value_or(QTrading::Dto::Trading::InstrumentType::Perp);
+            account_engine_->set_instrument_type(ds.symbol, type);
         }
         jobs.emplace_back(std::async(std::launch::async, [sym = ds.symbol, csv = ds.kline_csv]() {
             return MarketData(sym, csv);
@@ -360,14 +365,22 @@ BinanceExchange::BinanceExchange(
     last_mark_by_symbol_.assign(symbols_.size(), 0.0);
     last_mark_ts_by_symbol_.assign(symbols_.size(), 0);
     has_last_mark_.assign(symbols_.size(), 0);
+    last_mark_source_by_symbol_.assign(symbols_.size(),
+        static_cast<int32_t>(ReferencePriceSource::None));
     last_index_by_symbol_.assign(symbols_.size(), 0.0);
     last_index_ts_by_symbol_.assign(symbols_.size(), 0);
     has_last_index_.assign(symbols_.size(), 0);
+    last_index_source_by_symbol_.assign(symbols_.size(),
+        static_cast<int32_t>(ReferencePriceSource::None));
     last_mark_index_basis_bps_by_symbol_.assign(symbols_.size(), 0.0);
     has_last_mark_index_basis_.assign(symbols_.size(), 0);
-    basis_warning_active_by_symbol_.assign(symbols_.size(), 0);
-    basis_stress_active_by_symbol_.assign(symbols_.size(), 0);
-    basis_stress_blocked_orders_.store(0, std::memory_order_relaxed);
+    simulator_risk_overlay_.warning_active_by_symbol.assign(symbols_.size(), 0);
+    simulator_risk_overlay_.stress_active_by_symbol.assign(symbols_.size(), 0);
+    simulator_risk_overlay_.warning_symbols = 0;
+    simulator_risk_overlay_.stress_symbols = 0;
+    simulator_risk_overlay_.stress_blocked_orders.store(0, std::memory_order_relaxed);
+    funding_applied_events_total_ = 0;
+    funding_skipped_no_mark_total_ = 0;
 
     funding_md_.resize(datasets.size());
     funding_cursor_.assign(datasets.size(), 0);
@@ -630,11 +643,11 @@ bool BinanceExchange::step()
             if (i < has_last_mark_index_basis_.size()) {
                 has_last_mark_index_basis_[i] = 0;
             }
-            if (i < basis_warning_active_by_symbol_.size()) {
-                basis_warning_active_by_symbol_[i] = 0;
+            if (i < simulator_risk_overlay_.warning_active_by_symbol.size()) {
+                simulator_risk_overlay_.warning_active_by_symbol[i] = 0;
             }
-            if (i < basis_stress_active_by_symbol_.size()) {
-                basis_stress_active_by_symbol_[i] = 0;
+            if (i < simulator_risk_overlay_.stress_active_by_symbol.size()) {
+                simulator_risk_overlay_.stress_active_by_symbol[i] = 0;
             }
             if (has_mark && has_index && std::isfinite(index) && std::abs(index) > 1e-12) {
                 const double basis_bps = ((mark - index) / index) * 10000.0;
@@ -643,24 +656,26 @@ bool BinanceExchange::step()
                     has_last_mark_index_basis_[i] = 1;
                     const double abs_basis_bps = std::abs(basis_bps);
                     max_abs_basis_bps = std::max(max_abs_basis_bps, abs_basis_bps);
-                    if (abs_basis_bps >= mark_index_stress_bps_) {
-                        if (i < basis_stress_active_by_symbol_.size()) {
-                            basis_stress_active_by_symbol_[i] = 1;
+                    if (simulator_risk_overlay_.enabled) {
+                        if (abs_basis_bps >= simulator_risk_overlay_.mark_index_stress_bps) {
+                            if (i < simulator_risk_overlay_.stress_active_by_symbol.size()) {
+                                simulator_risk_overlay_.stress_active_by_symbol[i] = 1;
+                            }
+                            ++stress_symbols;
                         }
-                        ++stress_symbols;
-                    }
-                    else if (abs_basis_bps >= mark_index_warning_bps_) {
-                        if (i < basis_warning_active_by_symbol_.size()) {
-                            basis_warning_active_by_symbol_[i] = 1;
+                        else if (abs_basis_bps >= simulator_risk_overlay_.mark_index_warning_bps) {
+                            if (i < simulator_risk_overlay_.warning_active_by_symbol.size()) {
+                                simulator_risk_overlay_.warning_active_by_symbol[i] = 1;
+                            }
+                            ++warning_symbols;
                         }
-                        ++warning_symbols;
                     }
                 }
             }
         }
         last_mark_index_max_abs_basis_bps_ = max_abs_basis_bps;
-        last_mark_index_warning_symbols_ = warning_symbols;
-        last_mark_index_stress_symbols_ = stress_symbols;
+        simulator_risk_overlay_.warning_symbols = warning_symbols;
+        simulator_risk_overlay_.stress_symbols = stress_symbols;
     };
 
     auto update_positions = [&]() {
@@ -674,7 +689,7 @@ bool BinanceExchange::step()
     };
 
     auto apply_basis_risk_guard = [&]() {
-        if (!basis_risk_guard_enabled_) {
+        if (!simulator_risk_overlay_.enabled) {
             return;
         }
         std::vector<std::pair<std::string, double>> leverage_caps;
@@ -683,15 +698,15 @@ bool BinanceExchange::step()
             leverage_caps.reserve(symbols_.size());
             for (size_t i = 0; i < symbols_.size(); ++i) {
                 double cap = 0.0;
-                if (i < basis_stress_active_by_symbol_.size() &&
-                    basis_stress_active_by_symbol_[i] &&
-                    basis_stress_leverage_cap_ >= 1.0) {
-                    cap = basis_stress_leverage_cap_;
+                if (i < simulator_risk_overlay_.stress_active_by_symbol.size() &&
+                    simulator_risk_overlay_.stress_active_by_symbol[i] &&
+                    simulator_risk_overlay_.basis_stress_leverage_cap >= 1.0) {
+                    cap = simulator_risk_overlay_.basis_stress_leverage_cap;
                 }
-                else if (i < basis_warning_active_by_symbol_.size() &&
-                    basis_warning_active_by_symbol_[i] &&
-                    basis_warning_leverage_cap_ >= 1.0) {
-                    cap = basis_warning_leverage_cap_;
+                else if (i < simulator_risk_overlay_.warning_active_by_symbol.size() &&
+                    simulator_risk_overlay_.warning_active_by_symbol[i] &&
+                    simulator_risk_overlay_.basis_warning_leverage_cap >= 1.0) {
+                    cap = simulator_risk_overlay_.basis_warning_leverage_cap;
                 }
                 if (cap > 0.0) {
                     leverage_caps.emplace_back(symbols_[i], cap);
@@ -844,6 +859,8 @@ std::pair<int, std::string> BinanceExchange::map_binance_reject_(const std::opti
     }
 
     switch (reject->code) {
+    case Code::UnknownSymbol:
+        return { -1121, "Invalid symbol." };
     case Code::InvalidQuantity:
         return { -4003, "Quantity less than zero." };
     case Code::DuplicateClientOrderId:
@@ -986,39 +1003,59 @@ void BinanceExchange::set_mark_index_basis_thresholds_bps(double warning_bps, do
     const double warning = std::max(0.0, warning_bps);
     const double stress = std::max(warning, stress_bps);
     std::lock_guard<std::mutex> lk(state_mtx_);
-    mark_index_warning_bps_ = warning;
-    mark_index_stress_bps_ = stress;
+    simulator_risk_overlay_.mark_index_warning_bps = warning;
+    simulator_risk_overlay_.mark_index_stress_bps = stress;
 }
 
 void BinanceExchange::set_basis_risk_leverage_caps(double warning_cap, double stress_cap)
 {
     std::lock_guard<std::mutex> lk(state_mtx_);
-    basis_warning_leverage_cap_ = (warning_cap >= 1.0) ? warning_cap : 0.0;
-    basis_stress_leverage_cap_ = (stress_cap >= 1.0) ? stress_cap : 0.0;
+    simulator_risk_overlay_.basis_warning_leverage_cap = (warning_cap >= 1.0) ? warning_cap : 0.0;
+    simulator_risk_overlay_.basis_stress_leverage_cap = (stress_cap >= 1.0) ? stress_cap : 0.0;
+}
+
+void BinanceExchange::set_simulator_risk_overlay_enabled(bool enabled)
+{
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    simulator_risk_overlay_.enabled = enabled;
+    if (!enabled) {
+        simulator_risk_overlay_.warning_symbols = 0;
+        simulator_risk_overlay_.stress_symbols = 0;
+        std::fill(simulator_risk_overlay_.warning_active_by_symbol.begin(),
+            simulator_risk_overlay_.warning_active_by_symbol.end(),
+            static_cast<uint8_t>(0));
+        std::fill(simulator_risk_overlay_.stress_active_by_symbol.begin(),
+            simulator_risk_overlay_.stress_active_by_symbol.end(),
+            static_cast<uint8_t>(0));
+    }
+}
+
+bool BinanceExchange::simulator_risk_overlay_enabled() const
+{
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    return simulator_risk_overlay_.enabled;
 }
 
 void BinanceExchange::set_basis_risk_guard_enabled(bool enabled)
 {
-    std::lock_guard<std::mutex> lk(state_mtx_);
-    basis_risk_guard_enabled_ = enabled;
+    set_simulator_risk_overlay_enabled(enabled);
 }
 
 bool BinanceExchange::basis_risk_guard_enabled() const
 {
-    std::lock_guard<std::mutex> lk(state_mtx_);
-    return basis_risk_guard_enabled_;
+    return simulator_risk_overlay_enabled();
 }
 
 void BinanceExchange::set_basis_stress_blocks_opening_orders(bool enabled)
 {
     std::lock_guard<std::mutex> lk(state_mtx_);
-    basis_stress_blocks_opening_orders_ = enabled;
+    simulator_risk_overlay_.basis_stress_blocks_opening_orders = enabled;
 }
 
 bool BinanceExchange::basis_stress_blocks_opening_orders() const
 {
     std::lock_guard<std::mutex> lk(state_mtx_);
-    return basis_stress_blocks_opening_orders_;
+    return simulator_risk_overlay_.basis_stress_blocks_opening_orders;
 }
 
 /// @brief Close the simulator: drain CSVs and close all channels.
@@ -1142,13 +1179,21 @@ void BinanceExchange::build_multikline(uint64_t ts,
         }
 
         double mark = 0.0;
-        if (interpolate_mark_price_(i, ts, mark)) {
+        ReferencePriceSource mark_source = ReferencePriceSource::None;
+        if (resolve_mark_price_with_source_(i, ts, mark, mark_source)) {
             out.mark_klines_by_id[i] = QTrading::Dto::Market::Binance::ReferenceKlineDto::Point(ts, mark);
+        }
+        if (i < last_mark_source_by_symbol_.size()) {
+            last_mark_source_by_symbol_[i] = static_cast<int32_t>(mark_source);
         }
 
         double index = 0.0;
-        if (interpolate_index_price_(i, ts, index)) {
+        ReferencePriceSource index_source = ReferencePriceSource::None;
+        if (resolve_index_price_with_source_(i, ts, index, index_source)) {
             out.index_klines_by_id[i] = QTrading::Dto::Market::Binance::ReferenceKlineDto::Point(ts, index);
+        }
+        if (i < last_index_source_by_symbol_.size()) {
+            last_index_source_by_symbol_[i] = static_cast<int32_t>(index_source);
         }
     }
 }
@@ -1258,12 +1303,16 @@ void BinanceExchange::log_events(QTrading::Infra::Logging::StepLogContext ctx,
             }
 
             double mark = 0.0;
-            e.has_mark_price = interpolate_mark_price_(i, ctx.ts_exchange, mark);
+            ReferencePriceSource mark_source = ReferencePriceSource::None;
+            e.has_mark_price = resolve_mark_price_with_source_(i, ctx.ts_exchange, mark, mark_source);
             e.mark_price = e.has_mark_price ? mark : 0.0;
+            e.mark_price_source = static_cast<int32_t>(mark_source);
 
             double index = 0.0;
-            e.has_index_price = interpolate_index_price_(i, ctx.ts_exchange, index);
+            ReferencePriceSource index_source = ReferencePriceSource::None;
+            e.has_index_price = resolve_index_price_with_source_(i, ctx.ts_exchange, index, index_source);
             e.index_price = e.has_index_price ? index : 0.0;
+            e.index_price_source = static_cast<int32_t>(index_source);
             market_event_buffer_.push(std::move(e));
         }
 
@@ -1307,6 +1356,12 @@ void BinanceExchange::log_events(QTrading::Infra::Logging::StepLogContext ctx,
             e.ledger = ledger_from_instrument_type(f.instrument_type);
             e.event_type = static_cast<int32_t>(AccountEventType::BalanceSnapshot);
             e.wallet_delta = perp_after.WalletBalance - last_wallet_for_fill;
+            e.fee_asset = f.fee_asset;
+            e.fee_native = f.fee_native;
+            e.fee_quote_equiv = f.fee_quote_equiv;
+            e.spot_cash_delta = f.spot_cash_delta;
+            e.spot_inventory_delta = f.spot_inventory_delta;
+            e.commission_model_source = f.commission_model_source;
             e.wallet_balance_after = perp_after.WalletBalance;
             e.margin_balance_after = perp_after.MarginBalance;
             e.available_balance_after = perp_after.AvailableBalance;
@@ -1334,6 +1389,12 @@ void BinanceExchange::log_events(QTrading::Infra::Logging::StepLogContext ctx,
         e.ledger = static_cast<int32_t>(QTrading::Log::FileLogger::FeatherV2::AccountLedger::Both);
         e.event_type = static_cast<int32_t>(AccountEventType::BalanceSnapshot);
         e.wallet_delta = perp_balance.WalletBalance - last_wallet_for_fill;
+        e.fee_asset = static_cast<int32_t>(Account::CommissionAsset::None);
+        e.fee_native = 0.0;
+        e.fee_quote_equiv = 0.0;
+        e.spot_cash_delta = 0.0;
+        e.spot_inventory_delta = 0.0;
+        e.commission_model_source = static_cast<int32_t>(Account::CommissionModelSource::None);
         e.wallet_balance_after = perp_balance.WalletBalance;
         e.margin_balance_after = perp_balance.MarginBalance;
         e.available_balance_after = perp_balance.AvailableBalance;
@@ -1486,6 +1547,8 @@ void BinanceExchange::log_events(QTrading::Infra::Logging::StepLogContext ctx,
                 e.side = static_cast<int32_t>(o.side);
                 e.position_side = static_cast<int32_t>(o.position_side);
                 e.reduce_only = o.reduce_only;
+                e.close_position = o.close_position;
+                e.quote_order_qty = o.quote_order_qty;
                 e.qty = o.quantity;
                 e.price = o.price;
                 e.exec_qty = exec_qty;
@@ -1495,6 +1558,12 @@ void BinanceExchange::log_events(QTrading::Infra::Logging::StepLogContext ctx,
                 e.is_taker = false;
                 e.fee = 0.0;
                 e.fee_rate = 0.0;
+                e.fee_asset = static_cast<int32_t>(Account::CommissionAsset::None);
+                e.fee_native = 0.0;
+                e.fee_quote_equiv = 0.0;
+                e.spot_cash_delta = 0.0;
+                e.spot_inventory_delta = 0.0;
+                e.commission_model_source = static_cast<int32_t>(Account::CommissionModelSource::None);
                 e.reject_reason = 0;
                 order_event_buffer_.push(std::move(e));
             };
@@ -1509,6 +1578,8 @@ void BinanceExchange::log_events(QTrading::Infra::Logging::StepLogContext ctx,
                 e.side = static_cast<int32_t>(f.side);
                 e.position_side = static_cast<int32_t>(f.position_side);
                 e.reduce_only = f.reduce_only;
+                e.close_position = f.close_position;
+                e.quote_order_qty = f.quote_order_qty;
                 e.qty = f.order_qty;
                 e.price = f.order_price;
                 e.exec_qty = f.exec_qty;
@@ -1518,6 +1589,12 @@ void BinanceExchange::log_events(QTrading::Infra::Logging::StepLogContext ctx,
                 e.is_taker = f.is_taker;
                 e.fee = f.fee;
                 e.fee_rate = f.fee_rate;
+                e.fee_asset = f.fee_asset;
+                e.fee_native = f.fee_native;
+                e.fee_quote_equiv = f.fee_quote_equiv;
+                e.spot_cash_delta = f.spot_cash_delta;
+                e.spot_inventory_delta = f.spot_inventory_delta;
+                e.commission_model_source = f.commission_model_source;
                 e.reject_reason = 0;
                 order_event_buffer_.push(std::move(e));
                 filled_order_ids.insert(f.order_id);
@@ -1588,17 +1665,39 @@ void BinanceExchange::collect_funding_events_unlocked_(uint64_t ts, std::vector<
 
             double price = 0.0;
             bool has_price = false;
+            ReferencePriceSource mark_source = ReferencePriceSource::None;
             if (fr.MarkPrice.has_value()) {
                 price = fr.MarkPrice.value();
                 has_price = true;
+                mark_source = ReferencePriceSource::Raw;
             }
             else if (interpolate_mark_price_(i, fr.FundingTime, price)) {
                 has_price = true;
+                mark_source = ReferencePriceSource::Interpolated;
             }
 
             std::vector<Account::FundingApplyResult> applied;
             if (has_price && account_engine_) {
                 applied = account_engine_->apply_funding(symbols_[i], fr.FundingTime, fr.Rate, price);
+            }
+            else if (!has_price) {
+                ++funding_skipped_no_mark_total_;
+                FundingEventDto skip;
+                skip.symbol = symbols_[i];
+                if (account_engine_) {
+                    skip.instrument_type = static_cast<int32_t>(account_engine_->get_instrument_spec(symbols_[i]).type);
+                }
+                skip.funding_time = fr.FundingTime;
+                skip.rate = fr.Rate;
+                skip.has_mark_price = false;
+                skip.mark_price = 0.0;
+                skip.mark_price_source = static_cast<int32_t>(ReferencePriceSource::None);
+                skip.skip_reason = 1;
+                skip.position_id = -1;
+                skip.is_long = false;
+                skip.quantity = 0.0;
+                skip.funding = 0.0;
+                out.emplace_back(std::move(skip));
             }
 
             for (const auto& r : applied) {
@@ -1611,12 +1710,15 @@ void BinanceExchange::collect_funding_events_unlocked_(uint64_t ts, std::vector<
                 e.rate = fr.Rate;
                 e.has_mark_price = has_price;
                 e.mark_price = has_price ? price : 0.0;
+                e.mark_price_source = static_cast<int32_t>(mark_source);
+                e.skip_reason = 0;
                 e.position_id = static_cast<int64_t>(r.position_id);
                 e.is_long = r.is_long;
                 e.quantity = r.quantity;
                 e.funding = r.funding;
                 out.emplace_back(std::move(e));
             }
+            funding_applied_events_total_ += applied.size();
 
             ++cur;
         }
@@ -1691,6 +1793,32 @@ bool interpolate_close_price_from_market_data_(const MarketData& data,
     return false;
 }
 
+bool exact_close_price_from_market_data_(const MarketData& data, uint64_t ts, double& out_price)
+{
+    const size_t n = data.get_klines_count();
+    if (n == 0) {
+        return false;
+    }
+
+    size_t lo = 0;
+    size_t hi = n;
+    while (lo < hi) {
+        const size_t mid = lo + (hi - lo) / 2;
+        if (data.get_kline(mid).Timestamp < ts) {
+            lo = mid + 1;
+        }
+        else {
+            hi = mid;
+        }
+    }
+    if (lo >= n || data.get_kline(lo).Timestamp != ts) {
+        return false;
+    }
+
+    out_price = data.get_kline(lo).ClosePrice;
+    return std::isfinite(out_price) && out_price > 0.0;
+}
+
 } // namespace
 
 bool BinanceExchange::interpolate_mark_price_(size_t sym_id, uint64_t ts, double& out_price) const
@@ -1723,6 +1851,56 @@ bool BinanceExchange::interpolate_index_price_(size_t sym_id, uint64_t ts, doubl
     return interpolate_close_price_from_market_data_(*index_md_[sym_id], ts, 0, out_price);
 }
 
+bool BinanceExchange::resolve_mark_price_with_source_(size_t sym_id,
+    uint64_t ts,
+    double& out_price,
+    ReferencePriceSource& out_source) const
+{
+    out_source = ReferencePriceSource::None;
+    out_price = 0.0;
+    if (sym_id >= mark_md_.size() ||
+        sym_id >= has_mark_md_.size() ||
+        !has_mark_md_[sym_id] ||
+        !mark_md_[sym_id]) {
+        return false;
+    }
+
+    if (exact_close_price_from_market_data_(*mark_md_[sym_id], ts, out_price)) {
+        out_source = ReferencePriceSource::Raw;
+        return true;
+    }
+    if (interpolate_mark_price_(sym_id, ts, out_price)) {
+        out_source = ReferencePriceSource::Interpolated;
+        return true;
+    }
+    return false;
+}
+
+bool BinanceExchange::resolve_index_price_with_source_(size_t sym_id,
+    uint64_t ts,
+    double& out_price,
+    ReferencePriceSource& out_source) const
+{
+    out_source = ReferencePriceSource::None;
+    out_price = 0.0;
+    if (sym_id >= index_md_.size() ||
+        sym_id >= has_index_md_.size() ||
+        !has_index_md_[sym_id] ||
+        !index_md_[sym_id]) {
+        return false;
+    }
+
+    if (exact_close_price_from_market_data_(*index_md_[sym_id], ts, out_price)) {
+        out_source = ReferencePriceSource::Raw;
+        return true;
+    }
+    if (interpolate_index_price_(sym_id, ts, out_price)) {
+        out_source = ReferencePriceSource::Interpolated;
+        return true;
+    }
+    return false;
+}
+
 bool BinanceExchange::perp_opening_blocked_by_basis_stress_account_locked_(
     Account& acc,
     const std::string& symbol,
@@ -1740,16 +1918,16 @@ bool BinanceExchange::perp_opening_blocked_by_basis_stress_account_locked_(
     bool blocks_opening = false;
     {
         std::lock_guard<std::mutex> state_lk(state_mtx_);
-        guard_enabled = basis_risk_guard_enabled_;
-        blocks_opening = basis_stress_blocks_opening_orders_;
+        guard_enabled = simulator_risk_overlay_.enabled;
+        blocks_opening = simulator_risk_overlay_.basis_stress_blocks_opening_orders;
         for (size_t i = 0; i < symbols_.size(); ++i) {
             if (symbols_[i] == symbol) {
                 sym_id = i;
                 break;
             }
         }
-        if (sym_id < basis_stress_active_by_symbol_.size()) {
-            stress_active = basis_stress_active_by_symbol_[sym_id] != 0;
+        if (sym_id < simulator_risk_overlay_.stress_active_by_symbol.size()) {
+            stress_active = simulator_risk_overlay_.stress_active_by_symbol[sym_id] != 0;
         }
     }
 
@@ -1855,8 +2033,8 @@ void BinanceExchange::FillStatusSnapshot(StatusSnapshot& out) const
         mark_index_diag_bps = std::max(0.0, last_mark_index_max_abs_basis_bps_);
         out.ts_exchange = last_step_ts_;
         out.progress_pct = progress_pct_unlocked_();
-        out.basis_warning_symbols = last_mark_index_warning_symbols_;
-        out.basis_stress_symbols = last_mark_index_stress_symbols_;
+        out.basis_warning_symbols = simulator_risk_overlay_.warning_symbols;
+        out.basis_stress_symbols = simulator_risk_overlay_.stress_symbols;
         out.prices.clear();
         out.prices.reserve(symbols_.size());
         for (size_t i = 0; i < symbols_.size(); ++i) {
@@ -1868,12 +2046,20 @@ void BinanceExchange::FillStatusSnapshot(StatusSnapshot& out) const
             snap.has_price = snap.has_trade_price;
             snap.mark_price = (i < last_mark_by_symbol_.size()) ? last_mark_by_symbol_[i] : 0.0;
             snap.has_mark_price = (i < has_last_mark_.size()) && (has_last_mark_[i] != 0);
+            snap.mark_price_source = (i < last_mark_source_by_symbol_.size())
+                ? last_mark_source_by_symbol_[i]
+                : static_cast<int32_t>(ReferencePriceSource::None);
             snap.index_price = (i < last_index_by_symbol_.size()) ? last_index_by_symbol_[i] : 0.0;
             snap.has_index_price = (i < has_last_index_.size()) && (has_last_index_[i] != 0);
+            snap.index_price_source = (i < last_index_source_by_symbol_.size())
+                ? last_index_source_by_symbol_[i]
+                : static_cast<int32_t>(ReferencePriceSource::None);
             out.prices.emplace_back(std::move(snap));
         }
+        out.funding_applied_events = funding_applied_events_total_;
+        out.funding_skipped_no_mark = funding_skipped_no_mark_total_;
     }
-    out.basis_stress_blocked_orders = basis_stress_blocked_orders_.load(std::memory_order_relaxed);
+    out.basis_stress_blocked_orders = simulator_risk_overlay_.stress_blocked_orders.load(std::memory_order_relaxed);
     out.uncertainty_band_bps = std::max(0.0, uncertainty_bps) + std::max(0.0, mark_index_diag_bps);
     const double total_band = out.uncertainty_band_bps / 10000.0;
     out.total_ledger_value_conservative = out.total_ledger_value_base * (1.0 - total_band);
@@ -1955,6 +2141,8 @@ static bool order_equal(const dto::Order& x, const dto::Order& y)
         x.side == y.side &&
         x.position_side == y.position_side &&
         x.reduce_only == y.reduce_only &&
+        x.close_position == y.close_position &&
+        std::abs(x.quote_order_qty - y.quote_order_qty) <= 1e-12 &&
         x.closing_position_id == y.closing_position_id &&
         x.instrument_type == y.instrument_type &&
         x.client_order_id == y.client_order_id &&

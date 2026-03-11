@@ -61,43 +61,24 @@ bool Account::handleOneWayReverseOrder(const std::string& symbol,
         return true;
     }
 
-    // order_qty > pos_qty: first close the existing position, then open a new reverse position.
+    // order_qty > pos_qty: keep a single reverse order and transition close->open during fill lifecycle.
     {
         const int oid = generate_order_id();
-        Order closingOrd{
+        Order reverseOrd{
             oid,
             symbol,
-            pos_qty,
+            order_qty,
             price,
             closeSide,
             PositionSide::Both,
             false,
             pos.id
         };
-        closingOrd.instrument_type = symbol_type;
-        closingOrd.client_order_id = client_order_id.empty() ? std::string{} : (client_order_id + ":close");
-        closingOrd.stp_mode = static_cast<int>(stp_mode);
-        append_open_order_(std::move(closingOrd));
-    }
-
-    const double newOpenQty = order_qty - pos_qty;
-    const OrderSide openSide = side;
-    {
-        const int openOid = generate_order_id();
-        Order newOpen{
-            openOid,
-            symbol,
-            newOpenQty,
-            price,
-            openSide,
-            PositionSide::Both,
-            false,
-            -1
-        };
-        newOpen.instrument_type = symbol_type;
-        newOpen.client_order_id = client_order_id.empty() ? std::string{} : (client_order_id + ":open");
-        newOpen.stp_mode = static_cast<int>(stp_mode);
-        append_open_order_(std::move(newOpen));
+        reverseOrd.instrument_type = symbol_type;
+        reverseOrd.client_order_id = client_order_id;
+        reverseOrd.stp_mode = static_cast<int>(stp_mode);
+        reverseOrd.one_way_reverse = true;
+        append_open_order_(std::move(reverseOrd));
     }
     mark_open_orders_dirty_();
     return true;
@@ -107,7 +88,12 @@ bool Account::handleOneWayReverseOrder(const std::string& symbol,
 /// @param position_id  ID of the position to close.
 /// @param quantity     Amount to close.
 /// @param price        Close price (<=0 = market).
-void Account::place_closing_order(int position_id, double quantity, double price) {
+void Account::place_closing_order(int position_id,
+    double quantity,
+    double price,
+    const std::string& client_order_id,
+    SelfTradePreventionMode stp_mode,
+    bool close_position) {
     auto it = position_index_by_id_.find(position_id);
     if (it != position_index_by_id_.end()) {
         const Position& pos = positions_[it->second];
@@ -124,6 +110,9 @@ void Account::place_closing_order(int position_id, double quantity, double price
             position_id
         };
         closingOrd.instrument_type = pos.instrument_type;
+        closingOrd.close_position = close_position;
+        closingOrd.client_order_id = client_order_id;
+        closingOrd.stp_mode = static_cast<int>(stp_mode);
         append_open_order_(std::move(closingOrd));
         mark_open_orders_dirty_();
         return;

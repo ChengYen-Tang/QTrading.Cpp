@@ -32,7 +32,8 @@ bool Account::processSpotOpeningOrder(Order& ord, double fill_qty, double fill_p
         return false;
     }
 
-    const double required_cash = notional + fee;
+    const bool quote_fee_mode = (spot_commission_mode_ == SpotCommissionMode::QuoteAsset);
+    const double required_cash = quote_fee_mode ? (notional + fee) : notional;
     if (spot_ledger_.cash_balance() + 1e-12 < required_cash) {
         if (enable_console_output_) {
             std::cerr << "[processNormalOpeningOrder] Not enough spot cash for order id=" << ord.id << "\n";
@@ -45,7 +46,22 @@ bool Account::processSpotOpeningOrder(Order& ord, double fill_qty, double fill_p
     const double init_margin = notional;
     const double maint_margin = 0.0;
     spot_ledger_.debit_cash(required_cash);
-    applyOpeningFillToPosition(ord, fill_qty, fill_price, notional, init_margin, maint_margin, fee, lev, feeRate, true);
+
+    double position_fill_qty = fill_qty;
+    if (!quote_fee_mode && ord.side == OrderSide::Buy) {
+        const double fee_in_base = fill_qty * std::max(0.0, feeRate);
+        position_fill_qty = std::max(0.0, fill_qty - fee_in_base);
+    }
+    if (position_fill_qty <= 1e-12) {
+        if (enable_console_output_) {
+            std::cerr << "[processNormalOpeningOrder] Spot opening fill collapsed to zero after base-fee deduction. id=" << ord.id << "\n";
+        }
+        leftover.push_back(ord);
+        spot_ledger_.credit_cash(required_cash);
+        return false;
+    }
+
+    applyOpeningFillToPosition(ord, position_fill_qty, fill_price, notional, init_margin, maint_margin, fee, lev, feeRate, true);
     mark_balance_dirty_();
 
     const double leftover_qty = ord.quantity - fill_qty;

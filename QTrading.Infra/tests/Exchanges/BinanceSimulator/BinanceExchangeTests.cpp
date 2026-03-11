@@ -699,8 +699,10 @@ TEST_F(BinanceExchangeFixture, StatusSnapshotPriceIncludesTradeMarkAndIndex)
     EXPECT_NEAR(p.trade_price, 100.0, 1e-12);
     EXPECT_TRUE(p.has_mark_price);
     EXPECT_NEAR(p.mark_price, 123.0, 1e-12);
+    EXPECT_EQ(p.mark_price_source, static_cast<int32_t>(BinanceExchange::ReferencePriceSource::Raw));
     EXPECT_TRUE(p.has_index_price);
     EXPECT_NEAR(p.index_price, 123.0, 1e-12);
+    EXPECT_EQ(p.index_price_source, static_cast<int32_t>(BinanceExchange::ReferencePriceSource::Raw));
 }
 
 TEST_F(BinanceExchangeFixture, MarkIndexDivergenceAddsUncertaintyBand)
@@ -776,6 +778,41 @@ TEST_F(BinanceExchangeFixture, MarkIndexStressBlocksNewPerpOpeningOrders)
     ex.FillStatusSnapshot(snap);
     EXPECT_EQ(snap.basis_stress_symbols, 1u);
     EXPECT_EQ(snap.basis_stress_blocked_orders, 1u);
+}
+
+TEST_F(BinanceExchangeFixture, DisabledSimulatorRiskOverlayKeepsDiagnosticsButDoesNotBlockOrders)
+{
+    writeCsv("btc.csv", {
+        {      0, 100,100,100,100,1000, 30000,100,1,0,0 }
+        });
+    writeCompactCsv("btc_mark.csv", {
+        {      0, 120,120,120,120, 30000 }
+        });
+    writeCompactCsv("btc_index.csv", {
+        {      0, 100,100,100,100, 30000 }
+        });
+
+    BinanceExchange ex(
+        { BinanceExchange::SymbolDataset{
+            "BTCUSDT",
+            (tmpDir / "btc.csv").string(),
+            std::nullopt,
+            (tmpDir / "btc_mark.csv").string(),
+            (tmpDir / "btc_index.csv").string()} },
+        logger,
+        /*balance*/ 1000.0);
+    ex.set_simulator_risk_overlay_enabled(false);
+    ASSERT_TRUE(ex.step());
+
+    using QTrading::Dto::Trading::OrderSide;
+    EXPECT_TRUE(ex.perp.place_order("BTCUSDT", 1.0, OrderSide::Buy));
+
+    BinanceExchange::StatusSnapshot snap{};
+    ex.FillStatusSnapshot(snap);
+    EXPECT_EQ(snap.basis_warning_symbols, 0u);
+    EXPECT_EQ(snap.basis_stress_symbols, 0u);
+    EXPECT_EQ(snap.basis_stress_blocked_orders, 0u);
+    EXPECT_GT(snap.uncertainty_band_bps, 0.0);
 }
 
 TEST_F(BinanceExchangeFixture, MarkIndexStressAllowsReduceOnlyPerpClose)
@@ -1050,6 +1087,8 @@ TEST_F(BinanceExchangeFixture, FundingWithoutMarkSourceIsSkipped)
     const double after_funding_ts = snap.wallet_balance;
 
     EXPECT_NEAR(after_funding_ts, after_entry, 1e-8);
+    EXPECT_GE(snap.funding_skipped_no_mark, 1u);
+    EXPECT_EQ(snap.funding_applied_events, 0u);
 }
 
 TEST_F(BinanceExchangeFixture, NoFundingPathKeepsBalance)
@@ -1191,6 +1230,58 @@ TEST_F(BinanceExchangeFixture, StatusSnapshotOutputsUncertaintyBands)
     EXPECT_NEAR(snap.total_ledger_value_base, snap.total_ledger_value, 1e-12);
     EXPECT_NEAR(snap.total_ledger_value_conservative, snap.total_ledger_value * 0.98, 1e-9);
     EXPECT_NEAR(snap.total_ledger_value_optimistic, snap.total_ledger_value * 1.02, 1e-9);
+}
+
+TEST_F(BinanceExchangeFixture, StrictModeAllowsDatasetSymbolWithoutExplicitInstrumentType)
+{
+    writeCsv("btc.csv", {
+        {      0, 100,100,100,100,1000, 30000,100,1,0,0 }
+        });
+
+    Account::AccountInitConfig cfg;
+    cfg.perp_initial_wallet = 1000.0;
+    cfg.strict_binance_mode = true;
+
+    BinanceExchange ex(
+        { BinanceExchange::SymbolDataset{ "BTCUSDT", (tmpDir / "btc.csv").string(), std::nullopt } },
+        logger,
+        cfg);
+
+    using QTrading::Dto::Trading::OrderSide;
+    EXPECT_TRUE(ex.perp.place_order("BTCUSDT", 1.0, 100.0, OrderSide::Buy));
+}
+
+TEST_F(BinanceExchangeFixture, StrictModeRejectsOrdersForUnknownDatasetSymbol)
+{
+    writeCsv("btc.csv", {
+        {      0, 100,100,100,100,1000, 30000,100,1,0,0 },
+        {  60000, 101,101,101,101,1000, 90000,100,1,0,0 }
+        });
+
+    Account::AccountInitConfig cfg;
+    cfg.perp_initial_wallet = 1000.0;
+    cfg.strict_binance_mode = true;
+
+    BinanceExchange ex({ {"BTCUSDT",(tmpDir / "btc.csv").string()} }, logger, cfg);
+    using QTrading::Dto::Trading::OrderSide;
+
+    EXPECT_FALSE(ex.perp.place_order("ETHUSDT", 1.0, 100.0, OrderSide::Buy));
+
+    ex.set_order_latency_bars(1);
+    EXPECT_TRUE(ex.perp.place_order("ETHUSDT", 1.0, 100.0, OrderSide::Buy));
+    auto pending = ex.drain_async_order_acks();
+    ASSERT_EQ(pending.size(), 1u);
+    EXPECT_EQ(pending[0].status, BinanceExchange::AsyncOrderAck::Status::Pending);
+
+    auto mCh = ex.get_market_channel();
+    ASSERT_TRUE(ex.step());
+    mCh->Receive();
+
+    auto resolved = ex.drain_async_order_acks();
+    ASSERT_EQ(resolved.size(), 1u);
+    EXPECT_EQ(resolved[0].status, BinanceExchange::AsyncOrderAck::Status::Rejected);
+    EXPECT_EQ(resolved[0].reject_code, Account::OrderRejectInfo::Code::UnknownSymbol);
+    EXPECT_EQ(resolved[0].binance_error_code, -1121);
 }
 
 
