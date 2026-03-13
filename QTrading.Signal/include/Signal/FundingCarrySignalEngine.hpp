@@ -173,6 +173,14 @@ public:
         /// @brief If true, pre-settlement emergency exit only applies when funding gate is enabled.
         ///        This prevents accidental churn in always-on (no funding gate) configurations.
         bool pre_settlement_negative_exit_require_funding_gate = true;
+        /// @brief Mark-index basis soft-derisk start threshold (bps). <=0 disables soft derisk.
+        double mark_index_soft_derisk_start_bps = 0.0;
+        /// @brief Mark-index basis soft-derisk full threshold (bps). Must be >= start threshold.
+        double mark_index_soft_derisk_full_bps = 0.0;
+        /// @brief Minimum confidence multiplier under full soft-derisk pressure (0..1].
+        double mark_index_soft_derisk_min_confidence_scale = 0.30;
+        /// @brief Mark-index basis hard-exit threshold (bps). <=0 disables hard guard.
+        double mark_index_hard_exit_bps = 0.0;
     };
 
     explicit FundingCarrySignalEngine(Config cfg);

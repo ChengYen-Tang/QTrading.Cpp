@@ -1,13 +1,16 @@
 #include "Risk/SimpleRiskEngine.hpp"
 
 #include <gtest/gtest.h>
+#include <optional>
 
 namespace {
 
 std::shared_ptr<QTrading::Dto::Market::Binance::MultiKlineDto> MakeTwoLegMarket(
     unsigned long long ts,
     double spot_close,
-    double perp_close)
+    double perp_close,
+    std::optional<double> perp_mark = std::nullopt,
+    std::optional<double> perp_index = std::nullopt)
 {
     auto dto = std::make_shared<QTrading::Dto::Market::Binance::MultiKlineDto>();
     dto->Timestamp = ts;
@@ -16,8 +19,16 @@ std::shared_ptr<QTrading::Dto::Market::Binance::MultiKlineDto> MakeTwoLegMarket(
     symbols->push_back("BTCUSDT_PERP");
     dto->symbols = symbols;
     dto->trade_klines_by_id.resize(2);
+    dto->mark_klines_by_id.resize(2);
+    dto->index_klines_by_id.resize(2);
     dto->trade_klines_by_id[0] = QTrading::Dto::Market::Binance::KlineDto(ts, 0, 0, 0, spot_close, 0, ts, 0, 0, 0, 0);
     dto->trade_klines_by_id[1] = QTrading::Dto::Market::Binance::KlineDto(ts, 0, 0, 0, perp_close, 0, ts, 0, 0, 0, 0);
+    if (perp_mark.has_value()) {
+        dto->mark_klines_by_id[1] = QTrading::Dto::Market::Binance::ReferenceKlineDto::Point(ts, *perp_mark);
+    }
+    if (perp_index.has_value()) {
+        dto->index_klines_by_id[1] = QTrading::Dto::Market::Binance::ReferenceKlineDto::Point(ts, *perp_index);
+    }
     return dto;
 }
 
@@ -210,6 +221,63 @@ TEST(SimpleRiskEngineTests, BasisArbitrageEnforcesTwoLegNotionalParity)
     EXPECT_NEAR(out.target_positions["BTCUSDT_PERP"], -1000.0, 1e-9);
     EXPECT_EQ(out.leverage["BTCUSDT_SPOT"], 1.0);
     EXPECT_EQ(out.leverage["BTCUSDT_PERP"], 2.0);
+}
+
+TEST(SimpleRiskEngineTests, MarkIndexSoftDeriskScalesCarryTargetNotional)
+{
+    QTrading::Risk::SimpleRiskEngine::Config cfg;
+    cfg.notional_usdt = 1000.0;
+    cfg.leverage = 2.0;
+    cfg.max_leverage = 3.0;
+    cfg.mark_index_soft_derisk_start_bps = 50.0;
+    cfg.mark_index_soft_derisk_full_bps = 150.0;
+    cfg.mark_index_soft_derisk_min_scale = 0.4;
+    ApplyDefaultSpotPerpTypes(cfg);
+    QTrading::Risk::SimpleRiskEngine engine(cfg);
+
+    QTrading::Intent::TradeIntent intent;
+    intent.strategy = "basis_arbitrage";
+    intent.structure = "delta_neutral_carry";
+    intent.ts_ms = 1;
+    intent.legs.push_back({ "BTCUSDT_SPOT", QTrading::Intent::TradeSide::Long });
+    intent.legs.push_back({ "BTCUSDT_PERP", QTrading::Intent::TradeSide::Short });
+
+    QTrading::Risk::AccountState account;
+    auto calm_market = MakeTwoLegMarket(1, 100.0, 101.0, 100.1, 100.0);     // 10 bps
+    auto stressed_market = MakeTwoLegMarket(2, 100.0, 101.0, 101.5, 100.0); // 150 bps
+
+    const auto calm = engine.position(intent, account, calm_market);
+    intent.ts_ms = 2;
+    const auto stressed = engine.position(intent, account, stressed_market);
+
+    EXPECT_NEAR(calm.target_positions.at("BTCUSDT_SPOT"), 1000.0, 1e-9);
+    EXPECT_NEAR(stressed.target_positions.at("BTCUSDT_SPOT"), 400.0, 1e-9);
+    EXPECT_NEAR(stressed.target_positions.at("BTCUSDT_PERP"), -400.0, 1e-9);
+}
+
+TEST(SimpleRiskEngineTests, MarkIndexHardGuardFlattensCarryTargets)
+{
+    QTrading::Risk::SimpleRiskEngine::Config cfg;
+    cfg.notional_usdt = 1000.0;
+    cfg.leverage = 2.0;
+    cfg.max_leverage = 3.0;
+    cfg.mark_index_hard_guard_bps = 120.0;
+    ApplyDefaultSpotPerpTypes(cfg);
+    QTrading::Risk::SimpleRiskEngine engine(cfg);
+
+    QTrading::Intent::TradeIntent intent;
+    intent.strategy = "basis_arbitrage";
+    intent.structure = "delta_neutral_carry";
+    intent.ts_ms = 1;
+    intent.legs.push_back({ "BTCUSDT_SPOT", QTrading::Intent::TradeSide::Long });
+    intent.legs.push_back({ "BTCUSDT_PERP", QTrading::Intent::TradeSide::Short });
+
+    QTrading::Risk::AccountState account;
+    auto hard_market = MakeTwoLegMarket(1, 100.0, 101.0, 101.3, 100.0); // 130 bps
+    const auto out = engine.position(intent, account, hard_market);
+
+    EXPECT_NEAR(out.target_positions.at("BTCUSDT_SPOT"), 0.0, 1e-9);
+    EXPECT_NEAR(out.target_positions.at("BTCUSDT_PERP"), 0.0, 1e-9);
 }
 
 TEST(SimpleRiskEngineTests, BasisAlphaOverlayScalesBasisArbitrageNotionalByDirectionalBasis)

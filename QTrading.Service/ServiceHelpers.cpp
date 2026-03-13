@@ -86,6 +86,126 @@ void ApplyNumber(const rapidjson::Value* obj, const char* key, T& out)
     }
 }
 
+void ParseStrategyConfigDocument(
+    const std::filesystem::path& config_path,
+    const char* strategy_name,
+    rapidjson::Document& out_doc)
+{
+    std::ifstream in(config_path, std::ios::in | std::ios::binary);
+    if (!in) {
+        throw std::runtime_error(
+            std::string("Failed to open ") + strategy_name + " config: " + config_path.string());
+    }
+
+    const std::string json((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    out_doc.Parse(json.c_str());
+    if (out_doc.HasParseError() || !out_doc.IsObject()) {
+        throw std::runtime_error(
+            std::string("Invalid ") + strategy_name + " config json: " + config_path.string());
+    }
+}
+
+void ApplySharedStrategyConfigSections(
+    const rapidjson::Document& doc,
+    QTrading::Signal::FundingCarrySignalEngine::Config& signal_cfg,
+    QTrading::Intent::FundingCarryIntentBuilder::Config& intent_cfg,
+    QTrading::Risk::SimpleRiskEngine::Config& risk_cfg,
+    QTrading::Execution::MarketExecutionEngine::Config& execution_cfg,
+    QTrading::Monitoring::SimpleMonitoring::Config& monitoring_cfg)
+{
+    const rapidjson::Value* signal = FindObject(doc, "signal");
+    ApplyString(signal, "spot_symbol", signal_cfg.spot_symbol);
+    ApplyString(signal, "perp_symbol", signal_cfg.perp_symbol);
+    ApplyNumber(signal, "entry_min_funding_rate", signal_cfg.entry_min_funding_rate);
+    ApplyNumber(signal, "exit_min_funding_rate", signal_cfg.exit_min_funding_rate);
+    ApplyNumber(signal, "hard_negative_funding_rate", signal_cfg.hard_negative_funding_rate);
+    ApplyNumber(signal, "entry_max_basis_pct", signal_cfg.entry_max_basis_pct);
+    ApplyNumber(signal, "exit_max_basis_pct", signal_cfg.exit_max_basis_pct);
+    ApplyNumber(signal, "cooldown_ms", signal_cfg.cooldown_ms);
+    ApplyNumber(signal, "min_hold_ms", signal_cfg.min_hold_ms);
+    ApplyNumber(signal, "entry_persistence_settlements", signal_cfg.entry_persistence_settlements);
+    ApplyNumber(signal, "exit_persistence_settlements", signal_cfg.exit_persistence_settlements);
+    ApplyBool(signal, "adaptive_confidence_enabled", signal_cfg.adaptive_confidence_enabled);
+    ApplyBool(signal, "adaptive_structure_enabled", signal_cfg.adaptive_structure_enabled);
+    ApplyBool(signal, "funding_nowcast_enabled", signal_cfg.funding_nowcast_enabled);
+    ApplyNumber(signal, "funding_nowcast_interval_ms", signal_cfg.funding_nowcast_interval_ms);
+    ApplyBool(signal, "funding_nowcast_use_for_gates", signal_cfg.funding_nowcast_use_for_gates);
+    ApplyBool(signal, "funding_nowcast_use_for_entry_gate", signal_cfg.funding_nowcast_use_for_entry_gate);
+    ApplyBool(signal, "funding_nowcast_use_for_exit_gate", signal_cfg.funding_nowcast_use_for_exit_gate);
+    ApplyBool(signal, "funding_nowcast_use_for_confidence", signal_cfg.funding_nowcast_use_for_confidence);
+    ApplyNumber(signal, "funding_nowcast_gate_sample_ms", signal_cfg.funding_nowcast_gate_sample_ms);
+    ApplyBool(signal, "pre_settlement_negative_exit_enabled", signal_cfg.pre_settlement_negative_exit_enabled);
+    ApplyNumber(signal, "pre_settlement_negative_exit_threshold", signal_cfg.pre_settlement_negative_exit_threshold);
+    ApplyNumber(signal, "pre_settlement_negative_exit_lookahead_ms", signal_cfg.pre_settlement_negative_exit_lookahead_ms);
+    ApplyNumber(signal, "pre_settlement_negative_exit_reentry_buffer_ms", signal_cfg.pre_settlement_negative_exit_reentry_buffer_ms);
+    ApplyBool(signal, "pre_settlement_negative_exit_require_funding_gate", signal_cfg.pre_settlement_negative_exit_require_funding_gate);
+
+    const rapidjson::Value* intent = FindObject(doc, "intent");
+    ApplyString(intent, "spot_symbol", intent_cfg.spot_symbol);
+    ApplyString(intent, "perp_symbol", intent_cfg.perp_symbol);
+    ApplyBool(intent, "receive_funding", intent_cfg.receive_funding);
+
+    const rapidjson::Value* risk = FindObject(doc, "risk");
+    ApplyNumber(risk, "notional_usdt", risk_cfg.notional_usdt);
+    ApplyNumber(risk, "leverage", risk_cfg.leverage);
+    ApplyNumber(risk, "max_leverage", risk_cfg.max_leverage);
+    ApplyNumber(risk, "rebalance_threshold_ratio", risk_cfg.rebalance_threshold_ratio);
+    ApplyNumber(risk, "dual_ledger_auto_notional_ratio", risk_cfg.dual_ledger_auto_notional_ratio);
+    ApplyBool(risk, "carry_allocator_leverage_model_enabled", risk_cfg.carry_allocator_leverage_model_enabled);
+    ApplyNumber(risk, "carry_allocator_spot_cash_per_notional", risk_cfg.carry_allocator_spot_cash_per_notional);
+    ApplyNumber(risk, "carry_allocator_perp_margin_buffer_ratio", risk_cfg.carry_allocator_perp_margin_buffer_ratio);
+    ApplyNumber(risk, "carry_allocator_perp_leverage", risk_cfg.carry_allocator_perp_leverage);
+    ApplyNumber(risk, "perp_liq_buffer_floor_ratio", risk_cfg.perp_liq_buffer_floor_ratio);
+    ApplyNumber(risk, "perp_liq_buffer_ceiling_ratio", risk_cfg.perp_liq_buffer_ceiling_ratio);
+    ApplyNumber(risk, "perp_liq_min_notional_scale", risk_cfg.perp_liq_min_notional_scale);
+    ApplyBool(risk, "carry_core_overlay_enabled", risk_cfg.carry_core_overlay_enabled);
+    ApplyNumber(risk, "carry_core_notional_ratio", risk_cfg.carry_core_notional_ratio);
+    ApplyNumber(risk, "carry_overlay_notional_ratio", risk_cfg.carry_overlay_notional_ratio);
+    ApplyNumber(risk, "carry_overlay_confidence_power", risk_cfg.carry_overlay_confidence_power);
+    ApplyBool(risk, "carry_confidence_boost_enabled", risk_cfg.carry_confidence_boost_enabled);
+    ApplyNumber(risk, "carry_confidence_boost_reference", risk_cfg.carry_confidence_boost_reference);
+    ApplyNumber(risk, "carry_confidence_boost_max_scale", risk_cfg.carry_confidence_boost_max_scale);
+    ApplyNumber(risk, "carry_confidence_boost_power", risk_cfg.carry_confidence_boost_power);
+    ApplyBool(risk, "basis_alpha_overlay_enabled", risk_cfg.basis_alpha_overlay_enabled);
+    ApplyNumber(risk, "basis_alpha_overlay_center_pct", risk_cfg.basis_alpha_overlay_center_pct);
+    ApplyNumber(risk, "basis_alpha_overlay_band_pct", risk_cfg.basis_alpha_overlay_band_pct);
+    ApplyNumber(risk, "basis_alpha_overlay_upscale_cap", risk_cfg.basis_alpha_overlay_upscale_cap);
+    ApplyNumber(risk, "basis_alpha_overlay_downscale_floor", risk_cfg.basis_alpha_overlay_downscale_floor);
+
+    const rapidjson::Value* execution = FindObject(doc, "execution");
+    ApplyNumber(execution, "min_notional", execution_cfg.min_notional);
+    ApplyNumber(execution, "carry_rebalance_cooldown_ms", execution_cfg.carry_rebalance_cooldown_ms);
+    ApplyNumber(execution, "carry_max_rebalance_step_ratio", execution_cfg.carry_max_rebalance_step_ratio);
+    ApplyNumber(execution, "carry_max_participation_rate", execution_cfg.carry_max_participation_rate);
+    ApplyBool(execution, "carry_maker_first_enabled", execution_cfg.carry_maker_first_enabled);
+    ApplyNumber(execution, "carry_maker_limit_offset_bps", execution_cfg.carry_maker_limit_offset_bps);
+    ApplyNumber(execution, "carry_maker_catchup_gap_ratio", execution_cfg.carry_maker_catchup_gap_ratio);
+    ApplyBool(execution, "carry_target_anchor_enabled", execution_cfg.carry_target_anchor_enabled);
+    ApplyNumber(execution, "carry_target_anchor_update_ratio", execution_cfg.carry_target_anchor_update_ratio);
+    ApplyBool(execution, "carry_confidence_adaptive_enabled", execution_cfg.carry_confidence_adaptive_enabled);
+
+    const rapidjson::Value* monitoring = FindObject(doc, "monitoring");
+    ApplyNumber(monitoring, "max_open_orders_per_symbol", monitoring_cfg.max_open_orders_per_symbol);
+}
+
+void ApplyBasisArbitrageSpecificConfigSections(
+    const rapidjson::Document& doc,
+    QTrading::Signal::FundingCarrySignalEngine::Config& signal_cfg,
+    QTrading::Risk::SimpleRiskEngine::Config& risk_cfg)
+{
+    const rapidjson::Value* signal = FindObject(doc, "signal");
+    ApplyNumber(signal, "mark_index_soft_derisk_start_bps", signal_cfg.mark_index_soft_derisk_start_bps);
+    ApplyNumber(signal, "mark_index_soft_derisk_full_bps", signal_cfg.mark_index_soft_derisk_full_bps);
+    ApplyNumber(signal, "mark_index_soft_derisk_min_confidence_scale", signal_cfg.mark_index_soft_derisk_min_confidence_scale);
+    ApplyNumber(signal, "mark_index_hard_exit_bps", signal_cfg.mark_index_hard_exit_bps);
+
+    const rapidjson::Value* risk = FindObject(doc, "risk");
+    ApplyNumber(risk, "mark_index_soft_derisk_start_bps", risk_cfg.mark_index_soft_derisk_start_bps);
+    ApplyNumber(risk, "mark_index_soft_derisk_full_bps", risk_cfg.mark_index_soft_derisk_full_bps);
+    ApplyNumber(risk, "mark_index_soft_derisk_min_scale", risk_cfg.mark_index_soft_derisk_min_scale);
+    ApplyNumber(risk, "mark_index_hard_guard_bps", risk_cfg.mark_index_hard_guard_bps);
+}
+
 } // namespace
 
 std::string JsonEscape(const std::string& input)
@@ -189,91 +309,35 @@ void LoadFundingCarryConfig(
     QTrading::Execution::MarketExecutionEngine::Config& execution_cfg,
     QTrading::Monitoring::SimpleMonitoring::Config& monitoring_cfg)
 {
-    std::ifstream in(config_path, std::ios::in | std::ios::binary);
-    if (!in) {
-        throw std::runtime_error("Failed to open funding-carry config: " + config_path.string());
-    }
-    const std::string json((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-
     rapidjson::Document doc;
-    doc.Parse(json.c_str());
-    if (doc.HasParseError() || !doc.IsObject()) {
-        throw std::runtime_error("Invalid funding-carry config json: " + config_path.string());
-    }
+    ParseStrategyConfigDocument(config_path, "funding-carry", doc);
+    ApplySharedStrategyConfigSections(
+        doc,
+        signal_cfg,
+        intent_cfg,
+        risk_cfg,
+        execution_cfg,
+        monitoring_cfg);
+}
 
-    const rapidjson::Value* signal = FindObject(doc, "signal");
-    ApplyString(signal, "spot_symbol", signal_cfg.spot_symbol);
-    ApplyString(signal, "perp_symbol", signal_cfg.perp_symbol);
-    ApplyNumber(signal, "entry_min_funding_rate", signal_cfg.entry_min_funding_rate);
-    ApplyNumber(signal, "exit_min_funding_rate", signal_cfg.exit_min_funding_rate);
-    ApplyNumber(signal, "hard_negative_funding_rate", signal_cfg.hard_negative_funding_rate);
-    ApplyNumber(signal, "entry_max_basis_pct", signal_cfg.entry_max_basis_pct);
-    ApplyNumber(signal, "exit_max_basis_pct", signal_cfg.exit_max_basis_pct);
-    ApplyNumber(signal, "cooldown_ms", signal_cfg.cooldown_ms);
-    ApplyNumber(signal, "min_hold_ms", signal_cfg.min_hold_ms);
-    ApplyNumber(signal, "entry_persistence_settlements", signal_cfg.entry_persistence_settlements);
-    ApplyNumber(signal, "exit_persistence_settlements", signal_cfg.exit_persistence_settlements);
-    ApplyBool(signal, "adaptive_confidence_enabled", signal_cfg.adaptive_confidence_enabled);
-    ApplyBool(signal, "adaptive_structure_enabled", signal_cfg.adaptive_structure_enabled);
-    ApplyBool(signal, "funding_nowcast_enabled", signal_cfg.funding_nowcast_enabled);
-    ApplyNumber(signal, "funding_nowcast_interval_ms", signal_cfg.funding_nowcast_interval_ms);
-    ApplyBool(signal, "funding_nowcast_use_for_gates", signal_cfg.funding_nowcast_use_for_gates);
-    ApplyBool(signal, "funding_nowcast_use_for_entry_gate", signal_cfg.funding_nowcast_use_for_entry_gate);
-    ApplyBool(signal, "funding_nowcast_use_for_exit_gate", signal_cfg.funding_nowcast_use_for_exit_gate);
-    ApplyBool(signal, "funding_nowcast_use_for_confidence", signal_cfg.funding_nowcast_use_for_confidence);
-    ApplyNumber(signal, "funding_nowcast_gate_sample_ms", signal_cfg.funding_nowcast_gate_sample_ms);
-    ApplyBool(signal, "pre_settlement_negative_exit_enabled", signal_cfg.pre_settlement_negative_exit_enabled);
-    ApplyNumber(signal, "pre_settlement_negative_exit_threshold", signal_cfg.pre_settlement_negative_exit_threshold);
-    ApplyNumber(signal, "pre_settlement_negative_exit_lookahead_ms", signal_cfg.pre_settlement_negative_exit_lookahead_ms);
-    ApplyNumber(signal, "pre_settlement_negative_exit_reentry_buffer_ms", signal_cfg.pre_settlement_negative_exit_reentry_buffer_ms);
-    ApplyBool(signal, "pre_settlement_negative_exit_require_funding_gate", signal_cfg.pre_settlement_negative_exit_require_funding_gate);
-
-    const rapidjson::Value* intent = FindObject(doc, "intent");
-    ApplyString(intent, "spot_symbol", intent_cfg.spot_symbol);
-    ApplyString(intent, "perp_symbol", intent_cfg.perp_symbol);
-    ApplyBool(intent, "receive_funding", intent_cfg.receive_funding);
-
-    const rapidjson::Value* risk = FindObject(doc, "risk");
-    ApplyNumber(risk, "notional_usdt", risk_cfg.notional_usdt);
-    ApplyNumber(risk, "leverage", risk_cfg.leverage);
-    ApplyNumber(risk, "max_leverage", risk_cfg.max_leverage);
-    ApplyNumber(risk, "rebalance_threshold_ratio", risk_cfg.rebalance_threshold_ratio);
-    ApplyNumber(risk, "dual_ledger_auto_notional_ratio", risk_cfg.dual_ledger_auto_notional_ratio);
-    ApplyBool(risk, "carry_allocator_leverage_model_enabled", risk_cfg.carry_allocator_leverage_model_enabled);
-    ApplyNumber(risk, "carry_allocator_spot_cash_per_notional", risk_cfg.carry_allocator_spot_cash_per_notional);
-    ApplyNumber(risk, "carry_allocator_perp_margin_buffer_ratio", risk_cfg.carry_allocator_perp_margin_buffer_ratio);
-    ApplyNumber(risk, "carry_allocator_perp_leverage", risk_cfg.carry_allocator_perp_leverage);
-    ApplyNumber(risk, "perp_liq_buffer_floor_ratio", risk_cfg.perp_liq_buffer_floor_ratio);
-    ApplyNumber(risk, "perp_liq_buffer_ceiling_ratio", risk_cfg.perp_liq_buffer_ceiling_ratio);
-    ApplyNumber(risk, "perp_liq_min_notional_scale", risk_cfg.perp_liq_min_notional_scale);
-    ApplyBool(risk, "carry_core_overlay_enabled", risk_cfg.carry_core_overlay_enabled);
-    ApplyNumber(risk, "carry_core_notional_ratio", risk_cfg.carry_core_notional_ratio);
-    ApplyNumber(risk, "carry_overlay_notional_ratio", risk_cfg.carry_overlay_notional_ratio);
-    ApplyNumber(risk, "carry_overlay_confidence_power", risk_cfg.carry_overlay_confidence_power);
-    ApplyBool(risk, "carry_confidence_boost_enabled", risk_cfg.carry_confidence_boost_enabled);
-    ApplyNumber(risk, "carry_confidence_boost_reference", risk_cfg.carry_confidence_boost_reference);
-    ApplyNumber(risk, "carry_confidence_boost_max_scale", risk_cfg.carry_confidence_boost_max_scale);
-    ApplyNumber(risk, "carry_confidence_boost_power", risk_cfg.carry_confidence_boost_power);
-    ApplyBool(risk, "basis_alpha_overlay_enabled", risk_cfg.basis_alpha_overlay_enabled);
-    ApplyNumber(risk, "basis_alpha_overlay_center_pct", risk_cfg.basis_alpha_overlay_center_pct);
-    ApplyNumber(risk, "basis_alpha_overlay_band_pct", risk_cfg.basis_alpha_overlay_band_pct);
-    ApplyNumber(risk, "basis_alpha_overlay_upscale_cap", risk_cfg.basis_alpha_overlay_upscale_cap);
-    ApplyNumber(risk, "basis_alpha_overlay_downscale_floor", risk_cfg.basis_alpha_overlay_downscale_floor);
-
-    const rapidjson::Value* execution = FindObject(doc, "execution");
-    ApplyNumber(execution, "min_notional", execution_cfg.min_notional);
-    ApplyNumber(execution, "carry_rebalance_cooldown_ms", execution_cfg.carry_rebalance_cooldown_ms);
-    ApplyNumber(execution, "carry_max_rebalance_step_ratio", execution_cfg.carry_max_rebalance_step_ratio);
-    ApplyNumber(execution, "carry_max_participation_rate", execution_cfg.carry_max_participation_rate);
-    ApplyBool(execution, "carry_maker_first_enabled", execution_cfg.carry_maker_first_enabled);
-    ApplyNumber(execution, "carry_maker_limit_offset_bps", execution_cfg.carry_maker_limit_offset_bps);
-    ApplyNumber(execution, "carry_maker_catchup_gap_ratio", execution_cfg.carry_maker_catchup_gap_ratio);
-    ApplyBool(execution, "carry_target_anchor_enabled", execution_cfg.carry_target_anchor_enabled);
-    ApplyNumber(execution, "carry_target_anchor_update_ratio", execution_cfg.carry_target_anchor_update_ratio);
-    ApplyBool(execution, "carry_confidence_adaptive_enabled", execution_cfg.carry_confidence_adaptive_enabled);
-
-    const rapidjson::Value* monitoring = FindObject(doc, "monitoring");
-    ApplyNumber(monitoring, "max_open_orders_per_symbol", monitoring_cfg.max_open_orders_per_symbol);
+void LoadBasisArbitrageConfig(
+    const std::filesystem::path& config_path,
+    QTrading::Signal::FundingCarrySignalEngine::Config& signal_cfg,
+    QTrading::Intent::FundingCarryIntentBuilder::Config& intent_cfg,
+    QTrading::Risk::SimpleRiskEngine::Config& risk_cfg,
+    QTrading::Execution::MarketExecutionEngine::Config& execution_cfg,
+    QTrading::Monitoring::SimpleMonitoring::Config& monitoring_cfg)
+{
+    rapidjson::Document doc;
+    ParseStrategyConfigDocument(config_path, "basis-arbitrage", doc);
+    ApplySharedStrategyConfigSections(
+        doc,
+        signal_cfg,
+        intent_cfg,
+        risk_cfg,
+        execution_cfg,
+        monitoring_cfg);
+    ApplyBasisArbitrageSpecificConfigSections(doc, signal_cfg, risk_cfg);
 }
 
 void EmitExchangeStatusLine(

@@ -52,6 +52,14 @@ double ClampPositive(double value, double fallback)
     return value;
 }
 
+double ClampUnitOpenClosed(double value, double fallback)
+{
+    if (!std::isfinite(value) || value <= 0.0) {
+        return fallback;
+    }
+    return std::min(value, 1.0);
+}
+
 std::size_t ClampMinSamples(std::size_t value)
 {
     return std::max<std::size_t>(value, 1);
@@ -293,6 +301,15 @@ FundingCarrySignalEngine::FundingCarrySignalEngine(Config cfg)
     if (!std::isfinite(cfg_.adaptive_structure_bucket_step) || cfg_.adaptive_structure_bucket_step < 0.0) {
         cfg_.adaptive_structure_bucket_step = 0.0;
     }
+    cfg_.mark_index_soft_derisk_start_bps = ClampNonNegative(cfg_.mark_index_soft_derisk_start_bps);
+    cfg_.mark_index_soft_derisk_full_bps = ClampNonNegative(cfg_.mark_index_soft_derisk_full_bps);
+    if (cfg_.mark_index_soft_derisk_full_bps < cfg_.mark_index_soft_derisk_start_bps) {
+        cfg_.mark_index_soft_derisk_full_bps = cfg_.mark_index_soft_derisk_start_bps;
+    }
+    cfg_.mark_index_soft_derisk_min_confidence_scale = ClampUnitOpenClosed(
+        cfg_.mark_index_soft_derisk_min_confidence_scale,
+        0.30);
+    cfg_.mark_index_hard_exit_bps = ClampNonNegative(cfg_.mark_index_hard_exit_bps);
     if (cfg_.funding_nowcast_interval_ms == 0) {
         cfg_.funding_nowcast_interval_ms = 8ull * 60ull * 60ull * 1000ull;
     }
@@ -387,6 +404,33 @@ SignalDecision FundingCarrySignalEngine::on_market(
         out.status = SignalStatus::Inactive;
         return out;
     }
+
+    std::optional<double> perp_mark_price;
+    std::optional<double> perp_index_price;
+    if (has_symbol_ids_ && perp_id_ < market->mark_klines_by_id.size()) {
+        const auto& mark_opt = market->mark_klines_by_id[perp_id_];
+        if (mark_opt.has_value() && std::isfinite(mark_opt->ClosePrice) && mark_opt->ClosePrice > 0.0) {
+            perp_mark_price = mark_opt->ClosePrice;
+        }
+    }
+    if (has_symbol_ids_ && perp_id_ < market->index_klines_by_id.size()) {
+        const auto& index_opt = market->index_klines_by_id[perp_id_];
+        if (index_opt.has_value() && std::isfinite(index_opt->ClosePrice) && index_opt->ClosePrice > 0.0) {
+            perp_index_price = index_opt->ClosePrice;
+        }
+    }
+    std::optional<double> mark_index_bps;
+    if (perp_mark_price.has_value() &&
+        perp_index_price.has_value() &&
+        std::abs(*perp_index_price) > kGateEpsilon)
+    {
+        mark_index_bps = ((*perp_mark_price - *perp_index_price) / *perp_index_price) * 10000.0;
+    }
+    const bool mark_index_hard_guard_enabled = cfg_.mark_index_hard_exit_bps > 0.0;
+    const bool mark_index_hard_breached =
+        mark_index_hard_guard_enabled &&
+        mark_index_bps.has_value() &&
+        std::abs(*mark_index_bps) >= cfg_.mark_index_hard_exit_bps;
 
     const double basis_pct = (*perp_close - *spot_close) / *spot_close;
     const double funding_proxy = basis_pct * kBasisToFundingScale;
@@ -898,7 +942,8 @@ SignalDecision FundingCarrySignalEngine::on_market(
         const bool catastrophic_basis =
             enable_basis_gate && (std::abs(basis_pct) > (exit_max_basis_pct * 2.0));
         const bool normal_exit = can_exit && (exit_funding || exit_basis);
-        if (normal_exit || catastrophic_basis || hard_negative_funding || pre_settlement_negative_exit) {
+        if (normal_exit || catastrophic_basis || hard_negative_funding || pre_settlement_negative_exit ||
+            mark_index_hard_breached) {
             active_ = false;
             last_exit_ts_ = out.ts_ms;
             if (pre_settlement_negative_exit && pre_settlement_reentry_block_until_ts > out.ts_ms) {
@@ -926,7 +971,11 @@ SignalDecision FundingCarrySignalEngine::on_market(
             (cfg_.inactivity_watchdog_settlements > 0) &&
             (inactive_settlement_streak_ >= cfg_.inactivity_watchdog_settlements) &&
             (funding_settlement_signal >= cfg_.inactivity_watchdog_min_rate);
-        if (cooldown_ok && pre_settlement_reentry_ok && enter_basis && (enter_funding || watchdog_allows_entry)) {
+        if (!mark_index_hard_breached &&
+            cooldown_ok &&
+            pre_settlement_reentry_ok &&
+            enter_basis &&
+            (enter_funding || watchdog_allows_entry)) {
             active_ = true;
             active_since_ts_ = out.ts_ms;
             entered_by_watchdog = watchdog_allows_entry && !enter_funding;
@@ -960,6 +1009,26 @@ SignalDecision FundingCarrySignalEngine::on_market(
         }
         if (cfg_.adaptive_structure_enabled && adaptive_structure_ready_) {
             out.confidence = Clamp01(out.confidence * adaptive_structure_multiplier_);
+        }
+        if (mark_index_bps.has_value() &&
+            cfg_.mark_index_soft_derisk_start_bps > 0.0 &&
+            cfg_.mark_index_soft_derisk_full_bps >= cfg_.mark_index_soft_derisk_start_bps)
+        {
+            const double abs_bps = std::abs(*mark_index_bps);
+            double derisk_scale = 1.0;
+            if (abs_bps > cfg_.mark_index_soft_derisk_start_bps) {
+                if (cfg_.mark_index_soft_derisk_full_bps <= cfg_.mark_index_soft_derisk_start_bps + kGateEpsilon) {
+                    derisk_scale = cfg_.mark_index_soft_derisk_min_confidence_scale;
+                }
+                else {
+                    const double progress = Clamp01(
+                        (abs_bps - cfg_.mark_index_soft_derisk_start_bps) /
+                        (cfg_.mark_index_soft_derisk_full_bps - cfg_.mark_index_soft_derisk_start_bps));
+                    derisk_scale =
+                        1.0 - progress * (1.0 - cfg_.mark_index_soft_derisk_min_confidence_scale);
+                }
+            }
+            out.confidence = Clamp01(out.confidence * derisk_scale);
         }
         if (entered_by_watchdog) {
             out.confidence = std::max(out.confidence, cfg_.inactivity_watchdog_min_confidence);

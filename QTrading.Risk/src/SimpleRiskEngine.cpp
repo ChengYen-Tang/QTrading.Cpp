@@ -35,6 +35,38 @@ std::optional<double> GetPriceBySymbol(
     return std::nullopt;
 }
 
+std::optional<double> GetReferencePriceBySymbol(
+    const std::shared_ptr<QTrading::Dto::Market::Binance::MultiKlineDto>& market,
+    const std::string& symbol,
+    bool use_mark_price)
+{
+    if (!market || !market->symbols) {
+        return std::nullopt;
+    }
+
+    const auto& symbols = *market->symbols;
+    for (std::size_t i = 0; i < symbols.size(); ++i) {
+        if (symbols[i] != symbol) {
+            continue;
+        }
+
+        const auto& refs = use_mark_price ? market->mark_klines_by_id : market->index_klines_by_id;
+        if (i >= refs.size()) {
+            return std::nullopt;
+        }
+        const auto& opt = refs[i];
+        if (!opt.has_value()) {
+            return std::nullopt;
+        }
+        if (!std::isfinite(opt->ClosePrice) || opt->ClosePrice <= 0.0) {
+            return std::nullopt;
+        }
+        return opt->ClosePrice;
+    }
+
+    return std::nullopt;
+}
+
 std::optional<double> GetFundingRateBySymbol(
     const std::shared_ptr<QTrading::Dto::Market::Binance::MultiKlineDto>& market,
     const std::string& symbol)
@@ -119,6 +151,14 @@ double ClampPositive(double value, double fallback)
         return fallback;
     }
     return value;
+}
+
+double ClampUnitOpenClosed(double value, double fallback)
+{
+    if (!std::isfinite(value) || value <= 0.0) {
+        return fallback;
+    }
+    return std::min(value, 1.0);
 }
 
 double EffectiveLegNotional(const QTrading::Risk::SimpleRiskEngine::Config& cfg)
@@ -232,6 +272,13 @@ SimpleRiskEngine::SimpleRiskEngine(Config cfg)
         cfg_.perp_liq_buffer_ceiling_ratio = cfg_.perp_liq_buffer_floor_ratio + 1.0;
     }
     cfg_.perp_liq_min_notional_scale = Clamp01(cfg_.perp_liq_min_notional_scale);
+    cfg_.mark_index_soft_derisk_start_bps = ClampNonNegative(cfg_.mark_index_soft_derisk_start_bps);
+    cfg_.mark_index_soft_derisk_full_bps = ClampNonNegative(cfg_.mark_index_soft_derisk_full_bps);
+    if (cfg_.mark_index_soft_derisk_full_bps < cfg_.mark_index_soft_derisk_start_bps) {
+        cfg_.mark_index_soft_derisk_full_bps = cfg_.mark_index_soft_derisk_start_bps;
+    }
+    cfg_.mark_index_soft_derisk_min_scale = ClampUnitOpenClosed(cfg_.mark_index_soft_derisk_min_scale, 0.30);
+    cfg_.mark_index_hard_guard_bps = ClampNonNegative(cfg_.mark_index_hard_guard_bps);
 
     for (const auto& kv : cfg_.instrument_types) {
         instrument_registry_.Set(kv.first, kv.second);
@@ -308,6 +355,8 @@ RiskTarget SimpleRiskEngine::position(const QTrading::Intent::TradeIntent& inten
         bool perp_found = false;
         std::optional<double> spot_price_snapshot;
         std::optional<double> perp_price_snapshot;
+        std::optional<double> perp_mark_snapshot;
+        std::optional<double> perp_index_snapshot;
         std::string perp_symbol;
         std::unordered_map<std::string, double> current_notional;
         current_notional.reserve(intent.legs.size());
@@ -345,6 +394,47 @@ RiskTarget SimpleRiskEngine::position(const QTrading::Intent::TradeIntent& inten
             current_notional[leg.instrument] = notional;
             gross += std::abs(notional);
             net += notional;
+        }
+
+        if (!perp_symbol.empty()) {
+            perp_mark_snapshot = GetReferencePriceBySymbol(market, perp_symbol, true);
+            perp_index_snapshot = GetReferencePriceBySymbol(market, perp_symbol, false);
+        }
+        std::optional<double> mark_index_bps;
+        if (perp_mark_snapshot.has_value() &&
+            perp_index_snapshot.has_value() &&
+            std::abs(*perp_index_snapshot) > 1e-12)
+        {
+            mark_index_bps = ((*perp_mark_snapshot - *perp_index_snapshot) / *perp_index_snapshot) * 10000.0;
+        }
+        const bool mark_index_hard_guard =
+            (cfg_.mark_index_hard_guard_bps > 0.0) &&
+            mark_index_bps.has_value() &&
+            (std::abs(*mark_index_bps) >= cfg_.mark_index_hard_guard_bps);
+        if (mark_index_hard_guard) {
+            for (const auto& leg : intent.legs) {
+                out.target_positions[leg.instrument] = 0.0;
+                out.leverage[leg.instrument] = leverage_for_instrument_(leg.instrument);
+            }
+            return out;
+        }
+
+        double mark_index_soft_derisk_scale = 1.0;
+        if (cfg_.mark_index_soft_derisk_start_bps > 0.0 &&
+            mark_index_bps.has_value() &&
+            std::abs(*mark_index_bps) > cfg_.mark_index_soft_derisk_start_bps)
+        {
+            const double abs_bps = std::abs(*mark_index_bps);
+            if (cfg_.mark_index_soft_derisk_full_bps <= cfg_.mark_index_soft_derisk_start_bps + 1e-12) {
+                mark_index_soft_derisk_scale = cfg_.mark_index_soft_derisk_min_scale;
+            }
+            else {
+                const double progress = Clamp01(
+                    (abs_bps - cfg_.mark_index_soft_derisk_start_bps) /
+                    (cfg_.mark_index_soft_derisk_full_bps - cfg_.mark_index_soft_derisk_start_bps));
+                mark_index_soft_derisk_scale =
+                    1.0 - progress * (1.0 - cfg_.mark_index_soft_derisk_min_scale);
+            }
         }
 
         if (spot_price_snapshot.has_value() && perp_price_snapshot.has_value()) {
@@ -558,6 +648,7 @@ RiskTarget SimpleRiskEngine::position(const QTrading::Intent::TradeIntent& inten
                 target_leg_notional *= boost_scale;
             }
             target_leg_notional = std::min(target_leg_notional, leg_cap);
+            target_leg_notional *= mark_index_soft_derisk_scale;
 
             dynamic_target_leg_notional = target_leg_notional;
             has_dynamic_target_leg_notional = true;

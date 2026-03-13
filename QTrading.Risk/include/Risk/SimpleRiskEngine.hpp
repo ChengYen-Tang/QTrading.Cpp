@@ -168,6 +168,14 @@ public:
         double perp_liq_min_notional_scale = 0.25;
         /// @brief Optional explicit instrument typing; when empty, fallback inference is used.
         std::unordered_map<std::string, QTrading::Dto::Trading::InstrumentType> instrument_types;
+        /// @brief Mark-index spread soft-derisk start threshold (bps). <=0 disables soft derisk.
+        double mark_index_soft_derisk_start_bps = 0.0;
+        /// @brief Mark-index spread soft-derisk full threshold (bps). Must be >= start threshold.
+        double mark_index_soft_derisk_full_bps = 0.0;
+        /// @brief Minimum notional scale under full mark-index soft-derisk pressure (0..1].
+        double mark_index_soft_derisk_min_scale = 0.30;
+        /// @brief Mark-index spread hard guard threshold (bps). <=0 disables hard guard.
+        double mark_index_hard_guard_bps = 0.0;
     };
 
     explicit SimpleRiskEngine(Config cfg);

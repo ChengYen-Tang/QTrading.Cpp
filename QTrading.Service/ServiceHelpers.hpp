@@ -41,6 +41,13 @@ void LoadFundingCarryConfig(
     QTrading::Risk::SimpleRiskEngine::Config& risk_cfg,
     QTrading::Execution::MarketExecutionEngine::Config& execution_cfg,
     QTrading::Monitoring::SimpleMonitoring::Config& monitoring_cfg);
+void LoadBasisArbitrageConfig(
+    const std::filesystem::path& config_path,
+    QTrading::Signal::FundingCarrySignalEngine::Config& signal_cfg,
+    QTrading::Intent::FundingCarryIntentBuilder::Config& intent_cfg,
+    QTrading::Risk::SimpleRiskEngine::Config& risk_cfg,
+    QTrading::Execution::MarketExecutionEngine::Config& execution_cfg,
+    QTrading::Monitoring::SimpleMonitoring::Config& monitoring_cfg);
 void EmitExchangeStatusLine(
     const std::shared_ptr<QTrading::Infra::Exchanges::BinanceSim::BinanceExchange>& exchange);
 
