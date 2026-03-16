@@ -181,6 +181,47 @@ public:
         double mark_index_soft_derisk_min_confidence_scale = 0.30;
         /// @brief Mark-index basis hard-exit threshold (bps). <=0 disables hard guard.
         double mark_index_hard_exit_bps = 0.0;
+        /// @brief Basis-mean-reversion overlay switch (used by BasisArbitrageSignalEngine only).
+        ///        When disabled, basis strategy falls back to carry-like always-on behavior.
+        bool basis_mr_enabled = false;
+        /// @brief Prefer mark-index basis for MR z-score input when available.
+        bool basis_mr_use_mark_index = true;
+        /// @brief Rolling window (bars) for basis z-score mean/std estimation.
+        std::size_t basis_mr_window_bars = 1440;
+        /// @brief Minimum samples before basis MR z-score becomes active.
+        std::size_t basis_mr_min_samples = 240;
+        /// @brief Entry threshold on |z| for basis MR activation.
+        double basis_mr_entry_z = 1.5;
+        /// @brief Exit threshold on |z| for basis MR deactivation (hysteresis).
+        double basis_mr_exit_z = 0.6;
+        /// @brief Hard stop threshold on |z| to avoid carrying extreme dislocations.
+        double basis_mr_max_abs_z = 6.0;
+        /// @brief Consecutive bars required for MR entry candidate confirmation.
+        uint32_t basis_mr_entry_persistence_bars = 1;
+        /// @brief Consecutive bars required for MR exit candidate confirmation.
+        uint32_t basis_mr_exit_persistence_bars = 1;
+        /// @brief Re-entry cooldown after MR exit (ms).
+        uint64_t basis_mr_cooldown_ms = 0;
+        /// @brief Minimum std floor for z-score denominator; avoids divide-by-near-zero.
+        double basis_mr_std_floor = 1e-6;
+        /// @brief If true, multiply confidence by z-intensity map inside MR active zone.
+        bool basis_mr_confidence_from_z = true;
+        /// @brief Lower bound for z-intensity confidence scale when MR is active.
+        double basis_mr_confidence_floor = 0.35;
+        /// @brief Basis-regime confidence overlay (size modulation only, no entry/exit gating).
+        bool basis_regime_confidence_enabled = false;
+        /// @brief Prefer mark-index basis for regime z-score input when available.
+        bool basis_regime_use_mark_index = true;
+        /// @brief Rolling window (bars) for basis-regime z-score.
+        std::size_t basis_regime_window_bars = 1440;
+        /// @brief Minimum samples before basis-regime confidence overlay activates.
+        std::size_t basis_regime_min_samples = 240;
+        /// @brief |z| below this is considered calm (no confidence penalty).
+        double basis_regime_calm_z = 1.0;
+        /// @brief |z| above this is considered stress (max confidence penalty).
+        double basis_regime_stress_z = 2.5;
+        /// @brief Minimum confidence multiplier under stress regime.
+        double basis_regime_min_confidence_scale = 0.5;
     };
 
     explicit FundingCarrySignalEngine(Config cfg);

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <string>
 #include "IIntentBuilder.hpp"
@@ -20,6 +21,12 @@ public:
         std::string spot_symbol = "BTCUSDT_SPOT";
         std::string perp_symbol = "BTCUSDT_PERP";
         bool receive_funding = true;
+        // Basis-arbitrage optional directional controls (unused by funding-carry path).
+        bool basis_directional_enabled = false;
+        bool basis_direction_use_mark_index = true;
+        double basis_direction_switch_entry_abs_pct = 0.005;
+        double basis_direction_switch_exit_abs_pct = 0.0015;
+        uint64_t basis_direction_switch_cooldown_ms = 0;
     };
 
     explicit FundingCarryIntentBuilder(Config cfg);

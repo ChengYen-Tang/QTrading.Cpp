@@ -166,6 +166,12 @@ void ApplySharedStrategyConfigSections(
     ApplyNumber(risk, "carry_confidence_boost_reference", risk_cfg.carry_confidence_boost_reference);
     ApplyNumber(risk, "carry_confidence_boost_max_scale", risk_cfg.carry_confidence_boost_max_scale);
     ApplyNumber(risk, "carry_confidence_boost_power", risk_cfg.carry_confidence_boost_power);
+    ApplyNumber(risk, "carry_size_cost_rate_per_leg", risk_cfg.carry_size_cost_rate_per_leg);
+    ApplyNumber(risk, "carry_size_expected_hold_settlements", risk_cfg.carry_size_expected_hold_settlements);
+    ApplyNumber(risk, "carry_size_min_gain_to_cost", risk_cfg.carry_size_min_gain_to_cost);
+    ApplyNumber(risk, "carry_size_min_gain_to_cost_low_confidence", risk_cfg.carry_size_min_gain_to_cost_low_confidence);
+    ApplyNumber(risk, "carry_size_min_gain_to_cost_high_confidence", risk_cfg.carry_size_min_gain_to_cost_high_confidence);
+    ApplyNumber(risk, "carry_size_gain_to_cost_confidence_power", risk_cfg.carry_size_gain_to_cost_confidence_power);
     ApplyBool(risk, "basis_alpha_overlay_enabled", risk_cfg.basis_alpha_overlay_enabled);
     ApplyNumber(risk, "basis_alpha_overlay_center_pct", risk_cfg.basis_alpha_overlay_center_pct);
     ApplyNumber(risk, "basis_alpha_overlay_band_pct", risk_cfg.basis_alpha_overlay_band_pct);
@@ -191,6 +197,7 @@ void ApplySharedStrategyConfigSections(
 void ApplyBasisArbitrageSpecificConfigSections(
     const rapidjson::Document& doc,
     QTrading::Signal::FundingCarrySignalEngine::Config& signal_cfg,
+    QTrading::Intent::FundingCarryIntentBuilder::Config& intent_cfg,
     QTrading::Risk::SimpleRiskEngine::Config& risk_cfg)
 {
     const rapidjson::Value* signal = FindObject(doc, "signal");
@@ -198,6 +205,33 @@ void ApplyBasisArbitrageSpecificConfigSections(
     ApplyNumber(signal, "mark_index_soft_derisk_full_bps", signal_cfg.mark_index_soft_derisk_full_bps);
     ApplyNumber(signal, "mark_index_soft_derisk_min_confidence_scale", signal_cfg.mark_index_soft_derisk_min_confidence_scale);
     ApplyNumber(signal, "mark_index_hard_exit_bps", signal_cfg.mark_index_hard_exit_bps);
+    ApplyBool(signal, "basis_mr_enabled", signal_cfg.basis_mr_enabled);
+    ApplyBool(signal, "basis_mr_use_mark_index", signal_cfg.basis_mr_use_mark_index);
+    ApplyNumber(signal, "basis_mr_window_bars", signal_cfg.basis_mr_window_bars);
+    ApplyNumber(signal, "basis_mr_min_samples", signal_cfg.basis_mr_min_samples);
+    ApplyNumber(signal, "basis_mr_entry_z", signal_cfg.basis_mr_entry_z);
+    ApplyNumber(signal, "basis_mr_exit_z", signal_cfg.basis_mr_exit_z);
+    ApplyNumber(signal, "basis_mr_max_abs_z", signal_cfg.basis_mr_max_abs_z);
+    ApplyNumber(signal, "basis_mr_entry_persistence_bars", signal_cfg.basis_mr_entry_persistence_bars);
+    ApplyNumber(signal, "basis_mr_exit_persistence_bars", signal_cfg.basis_mr_exit_persistence_bars);
+    ApplyNumber(signal, "basis_mr_cooldown_ms", signal_cfg.basis_mr_cooldown_ms);
+    ApplyNumber(signal, "basis_mr_std_floor", signal_cfg.basis_mr_std_floor);
+    ApplyBool(signal, "basis_mr_confidence_from_z", signal_cfg.basis_mr_confidence_from_z);
+    ApplyNumber(signal, "basis_mr_confidence_floor", signal_cfg.basis_mr_confidence_floor);
+    ApplyBool(signal, "basis_regime_confidence_enabled", signal_cfg.basis_regime_confidence_enabled);
+    ApplyBool(signal, "basis_regime_use_mark_index", signal_cfg.basis_regime_use_mark_index);
+    ApplyNumber(signal, "basis_regime_window_bars", signal_cfg.basis_regime_window_bars);
+    ApplyNumber(signal, "basis_regime_min_samples", signal_cfg.basis_regime_min_samples);
+    ApplyNumber(signal, "basis_regime_calm_z", signal_cfg.basis_regime_calm_z);
+    ApplyNumber(signal, "basis_regime_stress_z", signal_cfg.basis_regime_stress_z);
+    ApplyNumber(signal, "basis_regime_min_confidence_scale", signal_cfg.basis_regime_min_confidence_scale);
+
+    const rapidjson::Value* intent = FindObject(doc, "intent");
+    ApplyBool(intent, "basis_directional_enabled", intent_cfg.basis_directional_enabled);
+    ApplyBool(intent, "basis_direction_use_mark_index", intent_cfg.basis_direction_use_mark_index);
+    ApplyNumber(intent, "basis_direction_switch_entry_abs_pct", intent_cfg.basis_direction_switch_entry_abs_pct);
+    ApplyNumber(intent, "basis_direction_switch_exit_abs_pct", intent_cfg.basis_direction_switch_exit_abs_pct);
+    ApplyNumber(intent, "basis_direction_switch_cooldown_ms", intent_cfg.basis_direction_switch_cooldown_ms);
 
     const rapidjson::Value* risk = FindObject(doc, "risk");
     ApplyNumber(risk, "mark_index_soft_derisk_start_bps", risk_cfg.mark_index_soft_derisk_start_bps);
@@ -337,7 +371,7 @@ void LoadBasisArbitrageConfig(
         risk_cfg,
         execution_cfg,
         monitoring_cfg);
-    ApplyBasisArbitrageSpecificConfigSections(doc, signal_cfg, risk_cfg);
+    ApplyBasisArbitrageSpecificConfigSections(doc, signal_cfg, intent_cfg, risk_cfg);
 }
 
 void EmitExchangeStatusLine(
