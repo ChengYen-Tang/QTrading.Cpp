@@ -1,6 +1,5 @@
 #pragma once
 
-#include <unordered_map>
 #include <vector>
 #include <optional>
 #include <queue>
@@ -16,8 +15,8 @@
 #include <utility>
 
 #include "Exchanges/IExchange.h"
-#include "Exchanges/BinanceSimulator/DataProvider/MarketData.hpp"
-#include "Exchanges/BinanceSimulator/DataProvider/FundingRateData.hpp"
+#include "Data/Binance/MarketData.hpp"
+#include "Data/Binance/FundingRateData.hpp"
 #include "Exchanges/BinanceSimulator/Account/Account.hpp"
 #include "Dto/Market/Binance/MultiKline.hpp"
 #include "Dto/Trading/Side.hpp"
@@ -376,10 +375,23 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
         QTrading::Infra::Logging::OrderEventBuffer order_event_buffer_{ &log_event_pool_ };
         QTrading::Infra::Logging::MarketEventBuffer market_event_buffer_{ &log_event_pool_ };
         QTrading::Infra::Logging::FundingEventBuffer funding_event_buffer_{ &log_event_pool_ };
+        Account::MarketUpdateById market_update_by_id_{};
 
         struct LogTask {
+            struct DomainMarketEvent {
+                std::string symbol;
+                bool has_kline{ false };
+                QTrading::Dto::Market::Binance::TradeKlineDto kline{};
+                bool has_mark_price{ false };
+                double mark_price{ 0.0 };
+                int32_t mark_price_source{ static_cast<int32_t>(ReferencePriceSource::None) };
+                bool has_index_price{ false };
+                double index_price{ 0.0 };
+                int32_t index_price_source{ static_cast<int32_t>(ReferencePriceSource::None) };
+            };
+
             QTrading::Infra::Logging::StepLogContext ctx;
-            MultiKlinePtr market;
+            std::vector<DomainMarketEvent> market_events;
             PositionSnapshotPtr positions;
             OrderSnapshotPtr orders;
             std::vector<QTrading::Log::FileLogger::FeatherV2::FundingEventDto> funding_events;
@@ -391,11 +403,16 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
             uint64_t cur_ver{ 0 };
         };
 
-        std::mutex log_mtx_;
-        std::condition_variable log_cv_;
-        std::deque<LogTask> log_queue_;
-        std::thread log_thread_;
-        std::atomic<bool> log_stop_{ false };
+        class IEventPublisher;
+        class LegacyLogAdapter;
+        class LegacyEventPublisher;
+        class AsyncEventPublisher;
+        class NullEventPublisher;
+        class MarketReplayEngine;
+        class StatusSnapshotBuilder;
+        class SimulatorRiskOverlayEngine;
+        class ExchangeSession;
+        std::unique_ptr<IEventPublisher> event_publisher_;
 
         // Multiway merge state: next timestamp for each symbol + a min-heap.
         struct HeapItem {
@@ -417,7 +434,7 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
         uint64_t last_logged_version_{ static_cast<uint64_t>(-1) };
         uint64_t last_step_ts_{ 0 };
 
-        // P1: Reusable per-step buffer to avoid rebuilding an unordered_map each tick.
+        // P2: Reusable per-step market/reference caches.
         std::vector<size_t> kline_counts_;
         std::vector<double> last_close_by_symbol_;
         std::vector<uint64_t> last_close_ts_by_symbol_;
@@ -469,8 +486,7 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
         /// @param ts Timestamp to snapshot.
         /// @param[out] out DTO to populate with per-symbol TradeKlineDto or std::nullopt.
         void     build_multikline(uint64_t ts,
-            QTrading::Dto::Market::Binance::MultiKlineDto& out,
-            std::unordered_map<std::string, QTrading::Dto::Market::Binance::TradeKlineDto>& kline_snap_cache);
+            QTrading::Dto::Market::Binance::MultiKlineDto& out);
         /// @brief Log current account balance, positions and orders via logger.
         void log_status_snapshot(const QTrading::Dto::Account::BalanceSnapshot& perp_balance,
             const QTrading::Dto::Account::BalanceSnapshot& spot_balance,
@@ -481,7 +497,7 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
             uint64_t cur_ver);
         /// @brief Log per-step market/account/order/position events with run/step/event sequencing.
         void log_events(QTrading::Infra::Logging::StepLogContext ctx,
-            const QTrading::Dto::Market::Binance::MultiKlineDto& market,
+            const std::vector<LogTask::DomainMarketEvent>& market_events,
             const PositionSnapshotPtr& cur_positions,
             const OrderSnapshotPtr& cur_orders,
             const std::vector<QTrading::Log::FileLogger::FeatherV2::FundingEventDto>& funding_events,
@@ -491,11 +507,9 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
             double spot_inventory_value,
             std::vector<Account::FillEvent>&& fill_events,
             uint64_t cur_ver);
+        bool run_step_session_();
 
-        void start_log_thread_();
-        void stop_log_thread_();
-        void log_worker_();
-        void enqueue_log_task_(LogTask&& task);
+        void publish_log_task_(LogTask&& task);
         void enqueue_deferred_order_locked_(uint64_t due_step, std::function<void(Account&, uint64_t)> fn);
         void flush_deferred_orders_locked_(uint64_t step_seq);
         void push_async_order_ack_locked_(AsyncOrderAck ack);

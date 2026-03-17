@@ -1,4 +1,4 @@
-#include "Exchanges/BinanceSimulator/DataProvider/FundingRateData.hpp"
+#include "Data/Binance/FundingRateData.hpp"
 #include <algorithm>
 #include <charconv>
 #include <cstdint>
@@ -11,6 +11,8 @@
 #ifdef _WIN32
 #include <windows.h>
 #endif
+
+using QTrading::Dto::Market::Binance::FundingRateDto;
 
 namespace {
 

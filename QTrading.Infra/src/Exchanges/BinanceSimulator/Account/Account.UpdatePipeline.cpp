@@ -15,6 +15,7 @@
 using QTrading::Dto::Market::Binance::TradeKlineDto;
 using QTrading::Dto::Trading::InstrumentType;
 using QTrading::Dto::Trading::OrderSide;
+using QTrading::dto::Order;
 
 namespace {
 
@@ -138,6 +139,92 @@ struct FillModel {
 };
 
 } // namespace
+
+void Account::MatchingEngine::ProcessOpenOrders(Account& owner,
+    bool& dirty,
+    bool& open_orders_changed,
+    bool& positions_changed)
+{
+    owner.process_open_orders_pipeline_(dirty, open_orders_changed, positions_changed);
+}
+
+void Account::FillEventCollector::CaptureMatchedFill(Account& owner,
+    const Order& order_after_fill,
+    const MatchedFillInput& in)
+{
+    FillEvent fill{};
+    fill.order_id = order_after_fill.id;
+    fill.symbol = order_after_fill.symbol;
+    fill.side = order_after_fill.side;
+    fill.position_side = order_after_fill.position_side;
+    fill.reduce_only = order_after_fill.reduce_only;
+    fill.close_position = order_after_fill.close_position;
+    fill.quote_order_qty = order_after_fill.quote_order_qty;
+    fill.order_qty = in.order_qty;
+    fill.order_price = in.order_price;
+    fill.exec_qty = in.fill_qty;
+    fill.exec_price = in.fill_price;
+    fill.remaining_qty = in.remaining_qty;
+    fill.is_taker = in.is_taker;
+    fill.taker_probability = in.taker_probability;
+    fill.fill_probability = in.fill_probability;
+    fill.impact_slippage_bps = in.impact_slippage_bps;
+    fill.fee = in.fee;
+    fill.fee_rate = in.fee_rate;
+    fill.fee_quote_equiv = in.fee;
+    fill.fee_native = in.fee;
+    fill.fee_asset = static_cast<int32_t>(CommissionAsset::None);
+    fill.commission_model_source = static_cast<int32_t>(CommissionModelSource::None);
+    fill.spot_cash_delta = 0.0;
+    fill.spot_inventory_delta = 0.0;
+
+    const bool is_spot = (order_after_fill.instrument_type == InstrumentType::Spot);
+    const bool is_buy = (order_after_fill.side == OrderSide::Buy);
+    if (is_spot) {
+        if (is_buy && order_after_fill.closing_position_id < 0 && !order_after_fill.reduce_only) {
+            if (in.quote_fee_mode) {
+                fill.fee_asset = static_cast<int32_t>(CommissionAsset::QuoteAsset);
+                fill.fee_native = in.fee;
+                fill.commission_model_source = static_cast<int32_t>(CommissionModelSource::ImputedQuote);
+                fill.spot_cash_delta = -(in.notional + in.fee);
+                fill.spot_inventory_delta = in.fill_qty;
+            }
+            else {
+                fill.fee_asset = static_cast<int32_t>(CommissionAsset::BaseAsset);
+                fill.fee_native = in.fee_native_base;
+                fill.commission_model_source = static_cast<int32_t>(CommissionModelSource::ImputedBuyBase);
+                fill.spot_cash_delta = -in.notional;
+                fill.spot_inventory_delta = std::max(0.0, in.fill_qty - in.fee_native_base);
+            }
+        }
+        else {
+            fill.fee_asset = static_cast<int32_t>(CommissionAsset::QuoteAsset);
+            fill.fee_native = in.fee;
+            fill.commission_model_source = static_cast<int32_t>(CommissionModelSource::ImputedQuote);
+            fill.spot_cash_delta = in.notional - in.fee;
+            fill.spot_inventory_delta = -in.fill_qty;
+        }
+    }
+
+    fill.closing_position_id = order_after_fill.closing_position_id;
+    fill.instrument_type = order_after_fill.instrument_type;
+    if (fill.instrument_type == InstrumentType::Perp) {
+        const double mark = owner.get_last_mark_price_(fill.symbol);
+        if (mark > 0.0) {
+            RiskEngine::UpdateUnrealizedForSymbol(owner, fill.symbol, mark);
+        }
+    }
+    else if (in.trade_kline && in.close_price > 0.0) {
+        RiskEngine::UpdateUnrealizedForSymbol(owner, fill.symbol, in.close_price);
+    }
+    owner.mark_balance_dirty_();
+    fill.perp_balance_snapshot = owner.get_perp_balance();
+    fill.spot_balance_snapshot = owner.get_spot_balance();
+    fill.total_cash_balance_snapshot = owner.get_total_cash_balance();
+    fill.balance_snapshot = fill.perp_balance_snapshot;
+    fill.positions_snapshot = owner.positions_;
+    owner.fill_events_.push_back(std::move(fill));
+}
 
 std::pair<bool, bool> Account::evaluate_can_fill_and_taker_(const Order& ord,
     const TradeKlineDto& k,
@@ -726,74 +813,24 @@ void Account::process_open_orders_pipeline_(bool& dirty, bool& open_orders_chang
                 }
             }
 
-            FillEvent fill{};
-            fill.order_id = ord.id;
-            fill.symbol = ord.symbol;
-            fill.side = ord.side;
-            fill.position_side = ord.position_side;
-            fill.reduce_only = ord.reduce_only;
-            fill.close_position = ord.close_position;
-            fill.quote_order_qty = ord.quote_order_qty;
-            fill.order_qty = order_qty;
-            fill.order_price = order_price;
-            fill.exec_qty = fill_qty;
-            fill.exec_price = fill_price;
-            fill.remaining_qty = remaining_qty;
-            fill.is_taker = is_taker;
-            fill.taker_probability = taker_probability;
-            fill.fill_probability = fill_probability;
-            fill.impact_slippage_bps = impact_slippage_bps;
-            fill.fee = fee;
-            fill.fee_rate = fee_rate;
-            fill.fee_quote_equiv = fee;
-            fill.fee_native = fee;
-            fill.fee_asset = static_cast<int32_t>(CommissionAsset::None);
-            fill.commission_model_source = static_cast<int32_t>(CommissionModelSource::None);
-            fill.spot_cash_delta = 0.0;
-            fill.spot_inventory_delta = 0.0;
-            if (is_spot) {
-                if (is_buy && ord.closing_position_id < 0 && !ord.reduce_only) {
-                    if (quote_fee_mode) {
-                        fill.fee_asset = static_cast<int32_t>(CommissionAsset::QuoteAsset);
-                        fill.fee_native = fee;
-                        fill.commission_model_source = static_cast<int32_t>(CommissionModelSource::ImputedQuote);
-                        fill.spot_cash_delta = -(notional + fee);
-                        fill.spot_inventory_delta = fill_qty;
-                    }
-                    else {
-                        fill.fee_asset = static_cast<int32_t>(CommissionAsset::BaseAsset);
-                        fill.fee_native = fee_native_base;
-                        fill.commission_model_source = static_cast<int32_t>(CommissionModelSource::ImputedBuyBase);
-                        fill.spot_cash_delta = -notional;
-                        fill.spot_inventory_delta = std::max(0.0, fill_qty - fee_native_base);
-                    }
-                }
-                else {
-                    fill.fee_asset = static_cast<int32_t>(CommissionAsset::QuoteAsset);
-                    fill.fee_native = fee;
-                    fill.commission_model_source = static_cast<int32_t>(CommissionModelSource::ImputedQuote);
-                    fill.spot_cash_delta = notional - fee;
-                    fill.spot_inventory_delta = -fill_qty;
-                }
-            }
-            fill.closing_position_id = ord.closing_position_id;
-            fill.instrument_type = ord.instrument_type;
-            if (fill.instrument_type == InstrumentType::Perp) {
-                const double mark = get_last_mark_price_(fill.symbol);
-                if (mark > 0.0) {
-                    update_unrealized_for_symbol_(fill.symbol, mark);
-                }
-            }
-            else if (kptr && close_price > 0.0) {
-                update_unrealized_for_symbol_(fill.symbol, close_price);
-            }
-            mark_balance_dirty_();
-            fill.perp_balance_snapshot = get_perp_balance();
-            fill.spot_balance_snapshot = get_spot_balance();
-            fill.total_cash_balance_snapshot = get_total_cash_balance();
-            fill.balance_snapshot = fill.perp_balance_snapshot;
-            fill.positions_snapshot = positions_;
-            fill_events_.push_back(std::move(fill));
+            FillEventCollector::MatchedFillInput fill_in{};
+            fill_in.order_qty = order_qty;
+            fill_in.order_price = order_price;
+            fill_in.fill_qty = fill_qty;
+            fill_in.fill_price = fill_price;
+            fill_in.remaining_qty = remaining_qty;
+            fill_in.is_taker = is_taker;
+            fill_in.taker_probability = taker_probability;
+            fill_in.fill_probability = fill_probability;
+            fill_in.impact_slippage_bps = impact_slippage_bps;
+            fill_in.fee = fee;
+            fill_in.fee_rate = fee_rate;
+            fill_in.notional = notional;
+            fill_in.quote_fee_mode = quote_fee_mode;
+            fill_in.fee_native_base = fee_native_base;
+            fill_in.trade_kline = kptr;
+            fill_in.close_price = close_price;
+            FillEventCollector::CaptureMatchedFill(*this, ord, fill_in);
         }
     }
 

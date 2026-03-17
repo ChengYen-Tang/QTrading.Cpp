@@ -43,6 +43,30 @@ size_t Account::get_symbol_id_(const std::string& symbol)
     return id;
 }
 
+void Account::ensure_market_symbol_id_mapping_(
+    const std::shared_ptr<const std::vector<std::string>>& symbols,
+    size_t by_id_count)
+{
+    const bool symbols_changed = (symbols != market_symbols_by_id_);
+    const bool size_changed = (internal_symbol_id_by_market_id_.size() != by_id_count);
+    if (!symbols_changed && !size_changed) {
+        return;
+    }
+
+    market_symbols_by_id_ = symbols;
+    internal_symbol_id_by_market_id_.assign(by_id_count, 0);
+    for (size_t market_id = 0; market_id < by_id_count; ++market_id) {
+        size_t internal_id = market_id;
+        if (symbols && market_id < symbols->size()) {
+            internal_id = get_symbol_id_((*symbols)[market_id]);
+        }
+        else {
+            ensure_symbol_capacity_(internal_id);
+        }
+        internal_symbol_id_by_market_id_[market_id] = internal_id;
+    }
+}
+
 void Account::rebuild_open_order_index_()
 {
     open_order_index_by_id_.clear();

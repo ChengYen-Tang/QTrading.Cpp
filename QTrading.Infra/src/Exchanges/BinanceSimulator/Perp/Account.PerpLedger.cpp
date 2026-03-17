@@ -5,6 +5,8 @@
 
 using QTrading::Dto::Trading::InstrumentType;
 using QTrading::Dto::Trading::PositionSide;
+using QTrading::dto::Order;
+using QTrading::dto::Position;
 
 namespace {
 

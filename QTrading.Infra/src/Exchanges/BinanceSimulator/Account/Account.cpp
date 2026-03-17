@@ -12,6 +12,8 @@ using QTrading::Dto::Market::Binance::TradeKlineDto;
 using QTrading::Dto::Trading::InstrumentType;
 using QTrading::Dto::Trading::OrderSide;
 using QTrading::Dto::Trading::PositionSide;
+using QTrading::dto::Order;
+using QTrading::dto::Position;
 
 namespace {
 
@@ -148,7 +150,185 @@ static bool is_multiple_of_step(double value, double step)
     return std::abs(units - nearest) <= 1e-8;
 }
 
+Account::MarketUpdateById build_by_id_update_from_string_maps_(
+    const std::unordered_map<std::string, TradeKlineDto>& symbol_kline,
+    const std::unordered_map<std::string, double>& symbol_mark_price,
+    const std::unordered_map<std::string, double>& symbol_index_price)
+{
+    Account::MarketUpdateById update;
+    auto symbols = std::make_shared<std::vector<std::string>>();
+    symbols->reserve(symbol_kline.size() + symbol_mark_price.size() + symbol_index_price.size());
+
+    std::unordered_map<std::string, size_t> market_id_by_symbol;
+    market_id_by_symbol.reserve(symbol_kline.size() + symbol_mark_price.size() + symbol_index_price.size());
+    auto ensure_market_id = [&](const std::string& symbol) {
+        auto it = market_id_by_symbol.find(symbol);
+        if (it != market_id_by_symbol.end()) {
+            return it->second;
+        }
+        const size_t id = symbols->size();
+        symbols->push_back(symbol);
+        market_id_by_symbol.emplace(symbol, id);
+        return id;
+        };
+
+    for (const auto& kv : symbol_kline) {
+        ensure_market_id(kv.first);
+    }
+    for (const auto& kv : symbol_mark_price) {
+        ensure_market_id(kv.first);
+    }
+    for (const auto& kv : symbol_index_price) {
+        ensure_market_id(kv.first);
+    }
+
+    const size_t n = symbols->size();
+    update.market.symbols = symbols;
+    update.market.trade_klines_by_id.assign(n, nullptr);
+    update.reference.mark_price_by_id.assign(n, 0.0);
+    update.reference.has_mark_price_by_id.assign(n, 0);
+    update.reference.mark_price_source_by_id.assign(n, 0);
+    update.reference.index_price_by_id.assign(n, 0.0);
+    update.reference.has_index_price_by_id.assign(n, 0);
+    update.reference.index_price_source_by_id.assign(n, 0);
+    update.funding.funding_rate_by_id.assign(n, 0.0);
+    update.funding.funding_time_by_id.assign(n, 0);
+    update.funding.has_funding_by_id.assign(n, 0);
+
+    for (const auto& kv : symbol_kline) {
+        const size_t market_id = market_id_by_symbol.at(kv.first);
+        update.market.trade_klines_by_id[market_id] = &kv.second;
+        update.market.ts_exchange = kv.second.Timestamp;
+    }
+    for (const auto& kv : symbol_mark_price) {
+        if (!(std::isfinite(kv.second) && kv.second > 0.0)) {
+            continue;
+        }
+        const size_t market_id = market_id_by_symbol.at(kv.first);
+        update.reference.has_mark_price_by_id[market_id] = 1;
+        update.reference.mark_price_by_id[market_id] = kv.second;
+    }
+    for (const auto& kv : symbol_index_price) {
+        if (!(std::isfinite(kv.second) && kv.second > 0.0)) {
+            continue;
+        }
+        const size_t market_id = market_id_by_symbol.at(kv.first);
+        update.reference.has_index_price_by_id[market_id] = 1;
+        update.reference.index_price_by_id[market_id] = kv.second;
+    }
+
+    return update;
+}
+
 } // namespace
+
+Account::AccountState::UpdateTickContext Account::AccountState::BeginUpdateTick(Account& owner)
+{
+    UpdateTickContext ctx{};
+    ctx.prev_perp_balance = owner.get_perp_balance();
+    ctx.prev_spot_balance = owner.get_spot_balance();
+    ctx.prev_total_cash_balance = owner.get_total_cash_balance();
+
+    // Reset per-tick scratch allocator before building fill buffers.
+    owner.tick_memory_.release();
+    owner.fill_events_.clear();
+    if (owner.fill_events_.capacity() < owner.open_orders_.size()) {
+        owner.fill_events_.reserve(owner.open_orders_.size());
+    }
+    return ctx;
+}
+
+void Account::AccountState::FinalizeUpdateTick(Account& owner, UpdateTickContext& ctx)
+{
+    auto balance_snapshot_equal = [](const QTrading::Dto::Account::BalanceSnapshot& a,
+        const QTrading::Dto::Account::BalanceSnapshot& b) {
+            return a.WalletBalance == b.WalletBalance &&
+                a.UnrealizedPnl == b.UnrealizedPnl &&
+                a.MarginBalance == b.MarginBalance &&
+                a.PositionInitialMargin == b.PositionInitialMargin &&
+                a.OpenOrderInitialMargin == b.OpenOrderInitialMargin &&
+                a.AvailableBalance == b.AvailableBalance &&
+                a.MaintenanceMargin == b.MaintenanceMargin &&
+                a.Equity == b.Equity;
+        };
+
+    const auto cur_perp_balance = owner.get_perp_balance();
+    const auto cur_spot_balance = owner.get_spot_balance();
+    const double cur_total_cash_balance = owner.get_total_cash_balance();
+    const bool balance_changed =
+        !balance_snapshot_equal(ctx.prev_perp_balance, cur_perp_balance) ||
+        !balance_snapshot_equal(ctx.prev_spot_balance, cur_spot_balance) ||
+        (ctx.prev_total_cash_balance != cur_total_cash_balance);
+
+    ctx.dirty = ctx.dirty || ctx.open_orders_changed || ctx.positions_changed || balance_changed;
+    if (ctx.dirty) {
+        ++owner.state_version_;
+    }
+}
+
+bool Account::OrderEntryService::PlaceOrder(Account& owner,
+    const std::string& symbol,
+    double quantity,
+    double price,
+    OrderSide side,
+    PositionSide position_side,
+    bool reduce_only,
+    const std::string& client_order_id,
+    SelfTradePreventionMode stp_mode)
+{
+    owner.clear_last_order_reject_info_();
+    if (quantity <= 0) {
+        if (owner.enable_console_output_) {
+            std::cerr << "[place_order] Invalid quantity <= 0\n";
+        }
+        return owner.reject_order_(OrderRejectInfo::Code::InvalidQuantity, "Invalid quantity <= 0");
+    }
+    if (owner.strict_symbol_registration_mode_ && !owner.has_explicit_instrument_symbol_(symbol)) {
+        if (owner.enable_console_output_) {
+            std::cerr << "[place_order] Unknown symbol rejected in strict Binance mode.\n";
+        }
+        return owner.reject_order_(OrderRejectInfo::Code::UnknownSymbol, "Unknown symbol in strict symbol-registration mode");
+    }
+
+    const auto& instrument_spec = owner.resolve_instrument_spec_(symbol);
+    if (!owner.validate_order_filters_(symbol, quantity, price, side, instrument_spec)) {
+        return false;
+    }
+    if (!client_order_id.empty() && owner.has_open_order_with_client_id_(client_order_id)) {
+        if (owner.enable_console_output_) {
+            std::cerr << "[place_order] duplicate clientOrderId among open orders.\n";
+        }
+        return owner.reject_order_(OrderRejectInfo::Code::DuplicateClientOrderId, "duplicate clientOrderId among open orders");
+    }
+
+    size_t stp_conflicts = 0;
+    if (stp_mode == SelfTradePreventionMode::ExpireMaker ||
+        stp_mode == SelfTradePreventionMode::ExpireBoth) {
+        stp_conflicts = owner.cancel_stp_conflicting_orders_(symbol, side, price, instrument_spec.type);
+        if (stp_conflicts > 0) {
+            owner.mark_open_orders_dirty_();
+            ++owner.state_version_;
+        }
+    }
+    else if (stp_mode == SelfTradePreventionMode::ExpireTaker) {
+        stp_conflicts = owner.count_stp_conflicting_orders_(symbol, side, price, instrument_spec.type);
+    }
+
+    if (stp_conflicts > 0) {
+        if (stp_mode == SelfTradePreventionMode::ExpireTaker) {
+            return owner.reject_order_(OrderRejectInfo::Code::StpExpiredTaker, "STP expired taker order");
+        }
+        if (stp_mode == SelfTradePreventionMode::ExpireBoth) {
+            return owner.reject_order_(OrderRejectInfo::Code::StpExpiredBoth, "STP expired both sides");
+        }
+    }
+
+    if (instrument_spec.type == InstrumentType::Spot) {
+        return owner.place_spot_order(symbol, quantity, price, side, position_side, reduce_only, client_order_id, stp_mode, instrument_spec);
+    }
+
+    return owner.place_perp_order(symbol, quantity, price, side, position_side, reduce_only, client_order_id, stp_mode, instrument_spec);
+}
 
 /// @brief Simulated Binance Futures Account implementation.
 /// @details Supports one-way and hedge modes, order matching, margin, fees, and auto-liquidation.
@@ -555,58 +735,16 @@ bool Account::place_order(const std::string& symbol,
     const std::string& client_order_id,
     SelfTradePreventionMode stp_mode)
 {
-    clear_last_order_reject_info_();
-    if (quantity <= 0) {
-        if (enable_console_output_) {
-            std::cerr << "[place_order] Invalid quantity <= 0\n";
-        }
-        return reject_order_(OrderRejectInfo::Code::InvalidQuantity, "Invalid quantity <= 0");
-    }
-    if (strict_symbol_registration_mode_ && !has_explicit_instrument_symbol_(symbol)) {
-        if (enable_console_output_) {
-            std::cerr << "[place_order] Unknown symbol rejected in strict Binance mode.\n";
-        }
-        return reject_order_(OrderRejectInfo::Code::UnknownSymbol, "Unknown symbol in strict symbol-registration mode");
-    }
-
-    const auto& instrument_spec = resolve_instrument_spec_(symbol);
-    if (!validate_order_filters_(symbol, quantity, price, side, instrument_spec)) {
-        return false;
-    }
-    if (!client_order_id.empty() && has_open_order_with_client_id_(client_order_id)) {
-        if (enable_console_output_) {
-            std::cerr << "[place_order] duplicate clientOrderId among open orders.\n";
-        }
-        return reject_order_(OrderRejectInfo::Code::DuplicateClientOrderId, "duplicate clientOrderId among open orders");
-    }
-
-    size_t stp_conflicts = 0;
-    if (stp_mode == SelfTradePreventionMode::ExpireMaker ||
-        stp_mode == SelfTradePreventionMode::ExpireBoth) {
-        stp_conflicts = cancel_stp_conflicting_orders_(symbol, side, price, instrument_spec.type);
-        if (stp_conflicts > 0) {
-            mark_open_orders_dirty_();
-            ++state_version_;
-        }
-    }
-    else if (stp_mode == SelfTradePreventionMode::ExpireTaker) {
-        stp_conflicts = count_stp_conflicting_orders_(symbol, side, price, instrument_spec.type);
-    }
-
-    if (stp_conflicts > 0) {
-        if (stp_mode == SelfTradePreventionMode::ExpireTaker) {
-            return reject_order_(OrderRejectInfo::Code::StpExpiredTaker, "STP expired taker order");
-        }
-        if (stp_mode == SelfTradePreventionMode::ExpireBoth) {
-            return reject_order_(OrderRejectInfo::Code::StpExpiredBoth, "STP expired both sides");
-        }
-    }
-
-    if (instrument_spec.type == InstrumentType::Spot) {
-        return place_spot_order(symbol, quantity, price, side, position_side, reduce_only, client_order_id, stp_mode, instrument_spec);
-    }
-
-    return place_perp_order(symbol, quantity, price, side, position_side, reduce_only, client_order_id, stp_mode, instrument_spec);
+    return OrderEntryService::PlaceOrder(
+        *this,
+        symbol,
+        quantity,
+        price,
+        side,
+        position_side,
+        reduce_only,
+        client_order_id,
+        stp_mode);
 }
 
 bool Account::has_reducible_position_for_order_(const Order& ord) const
@@ -843,19 +981,18 @@ void Account::update_positions(const std::unordered_map<std::string, TradeKlineD
 
 void Account::update_positions(const std::unordered_map<std::string, TradeKlineDto>& symbol_kline,
     const std::unordered_map<std::string, double>& symbol_mark_price,
-    const std::unordered_map<std::string, double>& symbol_index_price) {
-    bool dirty = false;
-    bool open_orders_changed = false;
-    bool positions_changed = false;
-    const auto prev_perp_balance = get_perp_balance();
-    const auto prev_spot_balance = get_spot_balance();
-    const double prev_total_cash_balance = get_total_cash_balance();
-    // Reset per-tick scratch allocator before building fill buffers.
-    tick_memory_.release();
-    fill_events_.clear();
-    if (fill_events_.capacity() < open_orders_.size()) {
-        fill_events_.reserve(open_orders_.size());
-    }
+    const std::unordered_map<std::string, double>& symbol_index_price)
+{
+    auto update = build_by_id_update_from_string_maps_(symbol_kline, symbol_mark_price, symbol_index_price);
+    update_positions_by_id(update);
+}
+
+void Account::update_positions_by_id(const MarketUpdateById& update)
+{
+    const auto& market = update.market;
+    const auto& reference = update.reference;
+
+    auto tick_ctx = AccountState::BeginUpdateTick(*this);
 
     bool mark_dirty = false;
 
@@ -866,78 +1003,77 @@ void Account::update_positions(const std::unordered_map<std::string, TradeKlineD
         std::fill(kline_by_id_.begin(), kline_by_id_.end(), nullptr);
     }
 
-    const bool has_open_orders = !open_orders_.empty();
-    for (const auto& kv : symbol_kline) {
-        const size_t sym_id = get_symbol_id_(kv.first);
-        const auto& k = kv.second;
-        kline_by_id_[sym_id] = &k;
-        remaining_vol_[sym_id] = k.Volume;
-        last_trade_price_by_id_[sym_id] = k.ClosePrice;
+    size_t by_id_count = market.trade_klines_by_id.size();
+    by_id_count = std::max(by_id_count, reference.mark_price_by_id.size());
+    by_id_count = std::max(by_id_count, reference.has_mark_price_by_id.size());
+    by_id_count = std::max(by_id_count, reference.index_price_by_id.size());
+    by_id_count = std::max(by_id_count, reference.has_index_price_by_id.size());
+    if (market.symbols) {
+        by_id_count = std::max(by_id_count, market.symbols->size());
+    }
+    ensure_market_symbol_id_mapping_(market.symbols, by_id_count);
 
-        auto it_mark = symbol_mark_price.find(kv.first);
-        if (it_mark != symbol_mark_price.end() && std::isfinite(it_mark->second) && it_mark->second > 0.0) {
-            last_mark_price_by_id_[sym_id] = it_mark->second;
+    const bool has_open_orders = !open_orders_.empty();
+    for (size_t market_id = 0; market_id < by_id_count; ++market_id) {
+        const size_t sym_id = internal_symbol_id_by_market_id_[market_id];
+        const TradeKlineDto* k = (market_id < market.trade_klines_by_id.size())
+            ? market.trade_klines_by_id[market_id]
+            : nullptr;
+        if (k != nullptr) {
+            kline_by_id_[sym_id] = k;
+            remaining_vol_[sym_id] = k->Volume;
+            last_trade_price_by_id_[sym_id] = k->ClosePrice;
+        }
+
+        const bool has_mark =
+            market_id < reference.has_mark_price_by_id.size() &&
+            reference.has_mark_price_by_id[market_id] != 0 &&
+            market_id < reference.mark_price_by_id.size() &&
+            std::isfinite(reference.mark_price_by_id[market_id]) &&
+            reference.mark_price_by_id[market_id] > 0.0;
+        if (has_mark) {
+            const double mark = reference.mark_price_by_id[market_id];
+            last_mark_price_by_id_[sym_id] = mark;
             auto& mk = mark_kline_point_by_id_[sym_id];
-            mk.Timestamp = k.Timestamp;
-            mk.OpenPrice = it_mark->second;
-            mk.HighPrice = it_mark->second;
-            mk.LowPrice = it_mark->second;
-            mk.ClosePrice = it_mark->second;
+            mk.Timestamp = (k != nullptr) ? k->Timestamp : market.ts_exchange;
+            mk.OpenPrice = mark;
+            mk.HighPrice = mark;
+            mk.LowPrice = mark;
+            mk.ClosePrice = mark;
             mk.Volume = 0.0;
-            mk.CloseTime = k.CloseTime;
+            mk.CloseTime = (k != nullptr) ? k->CloseTime : market.ts_exchange;
             mark_dirty = true;
         }
 
-        auto it_index = symbol_index_price.find(kv.first);
-        if (it_index != symbol_index_price.end() && std::isfinite(it_index->second) && it_index->second > 0.0) {
-            last_index_price_by_id_[sym_id] = it_index->second;
+        const bool has_index =
+            market_id < reference.has_index_price_by_id.size() &&
+            reference.has_index_price_by_id[market_id] != 0 &&
+            market_id < reference.index_price_by_id.size() &&
+            std::isfinite(reference.index_price_by_id[market_id]) &&
+            reference.index_price_by_id[market_id] > 0.0;
+        if (has_index) {
+            const double index = reference.index_price_by_id[market_id];
+            last_index_price_by_id_[sym_id] = index;
             auto& ik = index_kline_point_by_id_[sym_id];
-            ik.Timestamp = k.Timestamp;
-            ik.OpenPrice = it_index->second;
-            ik.HighPrice = it_index->second;
-            ik.LowPrice = it_index->second;
-            ik.ClosePrice = it_index->second;
+            ik.Timestamp = (k != nullptr) ? k->Timestamp : market.ts_exchange;
+            ik.OpenPrice = index;
+            ik.HighPrice = index;
+            ik.LowPrice = index;
+            ik.ClosePrice = index;
             ik.Volume = 0.0;
-            ik.CloseTime = k.CloseTime;
+            ik.CloseTime = (k != nullptr) ? k->CloseTime : market.ts_exchange;
         }
 
-        if (!has_open_orders) {
+        if (!has_open_orders || k == nullptr) {
             has_dir_liq_[sym_id] = 0;
             continue;
         }
         const auto market_ctx = build_symbol_market_context_(sym_id);
         const auto [has, liq] = policies_.directional_liquidity_ctx
             ? policies_.directional_liquidity_ctx(kline_volume_split_mode_, market_ctx)
-            : fill_model.build_directional_liquidity(k);
+            : fill_model.build_directional_liquidity(*k);
         has_dir_liq_[sym_id] = has ? 1 : 0;
         remaining_liq_[sym_id] = liq;
-    }
-    for (const auto& kv : symbol_mark_price) {
-        if (!(std::isfinite(kv.second) && kv.second > 0.0)) {
-            continue;
-        }
-        const size_t sym_id = get_symbol_id_(kv.first);
-        last_mark_price_by_id_[sym_id] = kv.second;
-        auto& mk = mark_kline_point_by_id_[sym_id];
-        mk.OpenPrice = kv.second;
-        mk.HighPrice = kv.second;
-        mk.LowPrice = kv.second;
-        mk.ClosePrice = kv.second;
-        mk.Volume = 0.0;
-        mark_dirty = true;
-    }
-    for (const auto& kv : symbol_index_price) {
-        if (!(std::isfinite(kv.second) && kv.second > 0.0)) {
-            continue;
-        }
-        const size_t sym_id = get_symbol_id_(kv.first);
-        last_index_price_by_id_[sym_id] = kv.second;
-        auto& ik = index_kline_point_by_id_[sym_id];
-        ik.OpenPrice = kv.second;
-        ik.HighPrice = kv.second;
-        ik.LowPrice = kv.second;
-        ik.ClosePrice = kv.second;
-        ik.Volume = 0.0;
     }
     if (mark_dirty) {
         mark_balance_dirty_();
@@ -955,7 +1091,7 @@ void Account::update_positions(const std::unordered_map<std::string, TradeKlineD
     }
 
     if (has_open_orders) {
-        process_open_orders_pipeline_(dirty, open_orders_changed, positions_changed);
+        MatchingEngine::ProcessOpenOrders(*this, tick_ctx.dirty, tick_ctx.open_orders_changed, tick_ctx.positions_changed);
     }
 
     // Remove positions with negligible quantity.
@@ -967,75 +1103,38 @@ void Account::update_positions(const std::unordered_map<std::string, TradeKlineD
     );
     if (positions_.size() != positions_before) {
         mark_balance_dirty_();
-        positions_changed = true;
+        tick_ctx.positions_changed = true;
     }
 
-    if (positions_changed) {
+    if (tick_ctx.positions_changed) {
         merge_positions();
         rebuild_position_index_();
     }
 
-    // Recalculate unrealized PnL using mark price.
-    for (auto& pos : positions_) {
-        const double mark = get_last_mark_price_(pos.symbol);
-        if (mark <= 0.0) {
-            continue;
-        }
-        pos.unrealized_pnl = (mark - pos.entry_price) * pos.quantity * (pos.is_long ? 1.0 : -1.0);
-    }
-
-    apply_perp_liquidation_(perp_fee_model.taker_fee, open_orders_changed, positions_changed);
-
-    for (auto& p : positions_) {
-        const double mark = get_last_mark_price_(p.symbol);
-        if (mark <= 0.0) {
-            continue;
-        }
-        p.notional = std::abs(p.quantity * mark);
-        const auto& instrument_spec = resolve_instrument_spec_(p.symbol);
-        if (!instrument_spec.maintenance_margin_enabled) {
-            p.maintenance_margin = 0.0;
-            continue;
-        }
-        p.maintenance_margin = maintenance_margin_for_notional_(p.notional);
-    }
+    RiskEngine::RevalueAllUnrealized(*this);
+    RiskEngine::ApplyPerpLiquidation(*this, perp_fee_model.taker_fee, tick_ctx.open_orders_changed, tick_ctx.positions_changed);
+    RiskEngine::RefreshMaintenanceMargins(*this);
 
     auto snapshot = get_perp_balance();
     if (enable_console_output_) {
         std::cout << "[update_positions] marginBalance=" << snapshot.MarginBalance
             << ", maintenanceMargin=" << snapshot.MaintenanceMargin
             << ", walletBalance=" << snapshot.WalletBalance;
-        for (const auto& kv : symbol_kline) {
-            std::cout << ", " << kv.first << "=" << kv.second.ClosePrice;
+        for (size_t market_id = 0; market_id < market.trade_klines_by_id.size(); ++market_id) {
+            const TradeKlineDto* k = market.trade_klines_by_id[market_id];
+            if (k == nullptr) {
+                continue;
+            }
+            std::string symbol = std::to_string(market_id);
+            if (market.symbols && market_id < market.symbols->size()) {
+                symbol = (*market.symbols)[market_id];
+            }
+            std::cout << ", " << symbol << "=" << k->ClosePrice;
         }
         std::cout << std::endl;
     }
 
-    auto balance_snapshot_equal = [](const QTrading::Dto::Account::BalanceSnapshot& a,
-        const QTrading::Dto::Account::BalanceSnapshot& b) {
-            return a.WalletBalance == b.WalletBalance &&
-                a.UnrealizedPnl == b.UnrealizedPnl &&
-                a.MarginBalance == b.MarginBalance &&
-                a.PositionInitialMargin == b.PositionInitialMargin &&
-                a.OpenOrderInitialMargin == b.OpenOrderInitialMargin &&
-                a.AvailableBalance == b.AvailableBalance &&
-                a.MaintenanceMargin == b.MaintenanceMargin &&
-                a.Equity == b.Equity;
-        };
-
-    const auto cur_perp_balance = get_perp_balance();
-    const auto cur_spot_balance = get_spot_balance();
-    const double cur_total_cash_balance = get_total_cash_balance();
-    const bool balance_changed =
-        !balance_snapshot_equal(prev_perp_balance, cur_perp_balance) ||
-        !balance_snapshot_equal(prev_spot_balance, cur_spot_balance) ||
-        (prev_total_cash_balance != cur_total_cash_balance);
-
-    dirty = dirty || open_orders_changed || positions_changed || balance_changed;
-
-    if (dirty) {
-        ++state_version_;
-    }
+    AccountState::FinalizeUpdateTick(*this, tick_ctx);
 }
 
 std::vector<Account::FillEvent> Account::drain_fill_events()

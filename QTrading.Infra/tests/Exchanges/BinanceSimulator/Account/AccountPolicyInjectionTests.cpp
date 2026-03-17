@@ -6,6 +6,7 @@
 using QTrading::Dto::Market::Binance::KlineDto;
 using QTrading::Dto::Trading::OrderSide;
 using QTrading::Dto::Trading::PositionSide;
+using QTrading::dto::Order;
 
 namespace {
 

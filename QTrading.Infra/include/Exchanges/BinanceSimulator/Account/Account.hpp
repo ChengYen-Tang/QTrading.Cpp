@@ -16,13 +16,15 @@
 #include "Exchanges/BinanceSimulator/Perp/PerpLedgerEngine.hpp"
 #include <optional>
 #include <functional>
-
-using namespace QTrading::dto;
+#include <memory>
 
 /// @brief Simulated Binance Futures account supporting one-way and hedge modes.
 ///        Manages balance, margin, orders, and positions.
 class Account {
 public:
+    using Order = QTrading::dto::Order;
+    using Position = QTrading::dto::Position;
+
     struct FundingApplyResult;
     enum class SelfTradePreventionMode {
         None = 0,
@@ -287,6 +289,36 @@ public:
         const std::unordered_map<std::string, double>& symbol_mark_price,
         const std::unordered_map<std::string, double>& symbol_index_price);
 
+    // P2 by-id market update path. New hot-path call sites should prefer this API.
+    struct MarketFrameById {
+        std::shared_ptr<const std::vector<std::string>> symbols;
+        uint64_t ts_exchange{ 0 };
+        std::vector<const QTrading::Dto::Market::Binance::TradeKlineDto*> trade_klines_by_id;
+    };
+
+    struct ReferencePriceFrameById {
+        std::vector<double> mark_price_by_id;
+        std::vector<uint8_t> has_mark_price_by_id;
+        std::vector<int32_t> mark_price_source_by_id;
+        std::vector<double> index_price_by_id;
+        std::vector<uint8_t> has_index_price_by_id;
+        std::vector<int32_t> index_price_source_by_id;
+    };
+
+    struct FundingFrameById {
+        std::vector<double> funding_rate_by_id;
+        std::vector<uint64_t> funding_time_by_id;
+        std::vector<uint8_t> has_funding_by_id;
+    };
+
+    struct MarketUpdateById {
+        MarketFrameById market;
+        ReferencePriceFrameById reference;
+        FundingFrameById funding;
+    };
+
+    void update_positions_by_id(const MarketUpdateById& update);
+
     struct FundingApplyResult {
         int position_id{};
         bool is_long{};
@@ -401,6 +433,79 @@ public:
     std::vector<FillEvent> drain_fill_events();
 
 private:
+    class AccountState final {
+    public:
+        struct UpdateTickContext {
+            bool dirty{ false };
+            bool open_orders_changed{ false };
+            bool positions_changed{ false };
+            QTrading::Dto::Account::BalanceSnapshot prev_perp_balance{};
+            QTrading::Dto::Account::BalanceSnapshot prev_spot_balance{};
+            double prev_total_cash_balance{ 0.0 };
+        };
+
+        static UpdateTickContext BeginUpdateTick(Account& owner);
+        static void FinalizeUpdateTick(Account& owner, UpdateTickContext& ctx);
+    };
+
+    class OrderEntryService final {
+    public:
+        static bool PlaceOrder(Account& owner,
+            const std::string& symbol,
+            double quantity,
+            double price,
+            QTrading::Dto::Trading::OrderSide side,
+            QTrading::Dto::Trading::PositionSide position_side,
+            bool reduce_only,
+            const std::string& client_order_id,
+            SelfTradePreventionMode stp_mode);
+    };
+
+    class MatchingEngine final {
+    public:
+        static void ProcessOpenOrders(Account& owner, bool& dirty, bool& open_orders_changed, bool& positions_changed);
+    };
+
+    class RiskEngine final {
+    public:
+        static void RevalueAllUnrealized(Account& owner);
+        static void RefreshMaintenanceMargins(Account& owner);
+        static void UpdateUnrealizedForSymbol(Account& owner, const std::string& symbol, double mark_price);
+        static void ApplyPerpLiquidation(Account& owner, double taker_fee, bool& open_orders_changed, bool& positions_changed);
+    };
+
+    class FillEventCollector final {
+    public:
+        struct MatchedFillInput {
+            double order_qty{ 0.0 };
+            double order_price{ 0.0 };
+            double fill_qty{ 0.0 };
+            double fill_price{ 0.0 };
+            double remaining_qty{ 0.0 };
+            bool is_taker{ false };
+            double taker_probability{ 0.0 };
+            double fill_probability{ 1.0 };
+            double impact_slippage_bps{ 0.0 };
+            double fee{ 0.0 };
+            double fee_rate{ 0.0 };
+            double notional{ 0.0 };
+            bool quote_fee_mode{ true };
+            double fee_native_base{ 0.0 };
+            const QTrading::Dto::Market::Binance::TradeKlineDto* trade_kline{ nullptr };
+            double close_price{ 0.0 };
+        };
+
+        struct LiquidationFillInput {
+            double close_qty{ 0.0 };
+            double liq_price{ 0.0 };
+            double fee{ 0.0 };
+            double fee_rate{ 0.0 };
+        };
+
+        static void CaptureMatchedFill(Account& owner, const Order& order_after_fill, const MatchedFillInput& in);
+        static void CaptureLiquidationFill(Account& owner, const Order& liq_order, const LiquidationFillInput& in);
+    };
+
     SpotLedgerEngine spot_ledger_{};
     PerpLedgerEngine perp_ledger_{};
 
@@ -475,6 +580,8 @@ private:
     std::vector<double> last_trade_price_by_id_;
     // Last known index/reference price per symbol id.
     std::vector<double> last_index_price_by_id_;
+    std::shared_ptr<const std::vector<std::string>> market_symbols_by_id_;
+    std::vector<size_t> internal_symbol_id_by_market_id_;
 
     // For market orders, notional is estimated as qty * mark * (1 + buffer).
     double market_slippage_buffer_{ 0.005 };
@@ -651,6 +758,8 @@ private:
     double spot_open_buy_reserved_cash_() const;
     double pending_close_sell_qty_for_symbol_(const std::string& symbol) const;
     size_t get_symbol_id_(const std::string& symbol);
+    void ensure_market_symbol_id_mapping_(const std::shared_ptr<const std::vector<std::string>>& symbols,
+        size_t by_id_count);
     void ensure_symbol_capacity_(size_t id);
     void mark_open_orders_dirty_();
     void mark_balance_dirty_();

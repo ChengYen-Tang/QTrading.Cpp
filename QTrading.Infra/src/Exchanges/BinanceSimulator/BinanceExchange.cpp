@@ -189,6 +189,171 @@ size_t lower_bound_funding_ts(const FundingRateData& data, uint64_t ts)
 
 } // namespace
 
+class BinanceExchange::IEventPublisher {
+public:
+    virtual ~IEventPublisher() = default;
+    virtual void publish(LogTask&& task) = 0;
+};
+
+class BinanceExchange::NullEventPublisher final : public BinanceExchange::IEventPublisher {
+public:
+    void publish(LogTask&&) override {}
+};
+
+class BinanceExchange::LegacyLogAdapter final {
+public:
+    explicit LegacyLogAdapter(BinanceExchange& owner)
+        : owner_(owner) {}
+
+    void publish(LogTask&& task)
+    {
+        owner_.log_status_snapshot(
+            task.perp_balance,
+            task.spot_balance,
+            task.total_cash_balance,
+            task.spot_inventory_value,
+            task.positions,
+            task.orders,
+            task.cur_ver);
+        owner_.log_events(task.ctx,
+            task.market_events,
+            task.positions,
+            task.orders,
+            task.funding_events,
+            task.perp_balance,
+            task.spot_balance,
+            task.total_cash_balance,
+            task.spot_inventory_value,
+            std::move(task.fill_events),
+            task.cur_ver);
+    }
+
+private:
+    BinanceExchange& owner_;
+};
+
+class BinanceExchange::LegacyEventPublisher final : public BinanceExchange::IEventPublisher {
+public:
+    explicit LegacyEventPublisher(BinanceExchange& owner)
+        : adapter_(owner) {}
+
+    void publish(LogTask&& task) override
+    {
+        adapter_.publish(std::move(task));
+    }
+
+private:
+    LegacyLogAdapter adapter_;
+};
+
+class BinanceExchange::AsyncEventPublisher final : public BinanceExchange::IEventPublisher {
+public:
+    explicit AsyncEventPublisher(std::unique_ptr<BinanceExchange::IEventPublisher> downstream)
+        : downstream_(std::move(downstream))
+    {
+        worker_thread_ = std::thread([this]() { worker_(); });
+    }
+
+    ~AsyncEventPublisher() override
+    {
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            stop_.store(true, std::memory_order_release);
+        }
+        cv_.notify_all();
+        if (worker_thread_.joinable()) {
+            worker_thread_.join();
+        }
+    }
+
+    void publish(LogTask&& task) override
+    {
+        if (!downstream_) {
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            queue_.emplace_back(std::move(task));
+        }
+        cv_.notify_one();
+    }
+
+private:
+    void worker_()
+    {
+        while (true) {
+            LogTask task;
+            {
+                std::unique_lock<std::mutex> lk(mtx_);
+                cv_.wait(lk, [this]() {
+                    return stop_.load(std::memory_order_acquire) || !queue_.empty();
+                    });
+                if (stop_.load(std::memory_order_acquire) && queue_.empty()) {
+                    return;
+                }
+                task = std::move(queue_.front());
+                queue_.pop_front();
+            }
+            downstream_->publish(std::move(task));
+        }
+    }
+
+    std::unique_ptr<BinanceExchange::IEventPublisher> downstream_;
+    std::mutex mtx_;
+    std::condition_variable cv_;
+    std::deque<LogTask> queue_;
+    std::thread worker_thread_;
+    std::atomic<bool> stop_{ false };
+};
+
+class BinanceExchange::MarketReplayEngine final {
+public:
+    static bool NextTimestamp(BinanceExchange& owner, uint64_t& ts);
+    static void BuildMultiKline(BinanceExchange& owner, uint64_t ts, MultiKlineDto& out);
+};
+
+class BinanceExchange::SimulatorRiskOverlayEngine final {
+public:
+    static void BeginStep(BinanceExchange& owner);
+    static void ConsumeSymbolPrices(BinanceExchange& owner,
+        size_t sym_id,
+        bool has_mark,
+        double mark,
+        bool has_index,
+        double index,
+        double& max_abs_basis_bps,
+        uint32_t& warning_symbols,
+        uint32_t& stress_symbols);
+    static void FinalizeStep(BinanceExchange& owner,
+        double max_abs_basis_bps,
+        uint32_t warning_symbols,
+        uint32_t stress_symbols);
+    static void CollectLeverageCaps(const BinanceExchange& owner,
+        std::vector<std::pair<std::string, double>>& out);
+    static bool IsOpeningBlockedByStress(const BinanceExchange& owner,
+        Account& acc,
+        const std::string& symbol,
+        QTrading::Dto::Trading::OrderSide side,
+        QTrading::Dto::Trading::PositionSide position_side,
+        bool reduce_only);
+};
+
+class BinanceExchange::StatusSnapshotBuilder final {
+public:
+    static void Fill(const BinanceExchange& owner, BinanceExchange::StatusSnapshot& out);
+};
+
+class BinanceExchange::ExchangeSession final {
+public:
+    explicit ExchangeSession(BinanceExchange& owner)
+        : owner_(owner) {}
+
+    bool Run();
+
+private:
+    BinanceExchange& owner_;
+};
+
 /// @brief Simulator for Binance futures exchange.
 /// @details Reads multiple CSV files (one per symbol), publishes multi-symbol 1-minute bars,
 ///          updates positions/orders only when they change, and maintains a global timestamp.
@@ -426,13 +591,24 @@ BinanceExchange::BinanceExchange(
     order_channel = ChannelFactory::CreateUnboundedChannel<std::vector<dto::Order>>();
 
     if (logger) {
-        start_log_thread_();
+        event_publisher_ = std::make_unique<AsyncEventPublisher>(
+            std::make_unique<LegacyEventPublisher>(*this));
+    }
+    else {
+        event_publisher_ = std::make_unique<NullEventPublisher>();
     }
 }
 
 BinanceExchange::~BinanceExchange()
 {
-    stop_log_thread_();
+}
+
+void BinanceExchange::publish_log_task_(LogTask&& task)
+{
+    if (!event_publisher_) {
+        return;
+    }
+    event_publisher_->publish(std::move(task));
 }
 
 QTrading::Dto::Account::BalanceSnapshot BinanceExchange::AccountApi::get_spot_balance() const
@@ -465,91 +641,29 @@ bool BinanceExchange::AccountApi::transfer_perp_to_spot(double amount)
     return owner_.account_engine_->transfer_perp_to_spot(amount);
 }
 
-void BinanceExchange::start_log_thread_()
-{
-    if (log_thread_.joinable()) {
-        return;
-    }
-    log_stop_.store(false, std::memory_order_release);
-    log_thread_ = std::thread([this]() { log_worker_(); });
-}
-
-void BinanceExchange::stop_log_thread_()
-{
-    if (!log_thread_.joinable()) {
-        return;
-    }
-    {
-        std::lock_guard<std::mutex> lk(log_mtx_);
-        log_stop_.store(true, std::memory_order_release);
-    }
-    log_cv_.notify_all();
-    log_thread_.join();
-}
-
-void BinanceExchange::enqueue_log_task_(LogTask&& task)
-{
-    if (!logger) {
-        return;
-    }
-    {
-        std::lock_guard<std::mutex> lk(log_mtx_);
-        log_queue_.emplace_back(std::move(task));
-    }
-    log_cv_.notify_one();
-}
-
-void BinanceExchange::log_worker_()
-{
-    while (true) {
-        LogTask task;
-        {
-            std::unique_lock<std::mutex> lk(log_mtx_);
-            log_cv_.wait(lk, [this]() {
-                return log_stop_.load(std::memory_order_acquire) || !log_queue_.empty();
-                });
-            if (log_stop_.load(std::memory_order_acquire) && log_queue_.empty()) {
-                return;
-            }
-            task = std::move(log_queue_.front());
-            log_queue_.pop_front();
-        }
-
-        log_status_snapshot(
-            task.perp_balance,
-            task.spot_balance,
-            task.total_cash_balance,
-            task.spot_inventory_value,
-            task.positions,
-            task.orders,
-            task.cur_ver);
-        if (enable_event_logging_) {
-            log_events(task.ctx, *task.market, task.positions, task.orders, task.funding_events,
-                task.perp_balance,
-                task.spot_balance,
-                task.total_cash_balance,
-                task.spot_inventory_value,
-                std::move(task.fill_events),
-                task.cur_ver);
-        }
-    }
-}
-
 /// @brief Advance one bar of simulation: emit market data & debounced updates.
 /// @return true if new data was emitted; false once all CSV data is exhausted.
 bool BinanceExchange::step()
 {
     QTR_TRACE("ex", "step begin");
+    return run_step_session_();
+}
 
+bool BinanceExchange::run_step_session_()
+{
+    return ExchangeSession(*this).Run();
+}
+
+bool BinanceExchange::ExchangeSession::Run()
+{
     uint64_t ts;
-    /// @details Find the next minimum timestamp among all symbols.
     {
-        std::lock_guard<std::mutex> state_lk(state_mtx_);
-        if (!next_timestamp(ts)) {
+        std::lock_guard<std::mutex> state_lk(owner_.state_mtx_);
+        if (!owner_.next_timestamp(ts)) {
             QTR_TRACE("ex", "no next timestamp -> close channels");
-            market_channel->Close();
-            position_channel->Close();
-            order_channel->Close();
+            owner_.market_channel->Close();
+            owner_.position_channel->Close();
+            owner_.order_channel->Close();
             return false;
         }
     }
@@ -566,171 +680,174 @@ bool BinanceExchange::step()
     FundingApplyTiming apply_timing = FundingApplyTiming::BeforeMatching;
     QTrading::Infra::Logging::StepLogContext step_log_ctx{};
     MultiKlinePtr dto;
-    std::unordered_map<std::string, TradeKlineDto> kline_snap_cache;
-    kline_snap_cache.reserve(md_.size());
-    std::unordered_map<std::string, double> mark_price_snap_cache;
-    mark_price_snap_cache.reserve(md_.size());
-    std::unordered_map<std::string, double> index_price_snap_cache;
-    index_price_snap_cache.reserve(md_.size());
+    std::vector<LogTask::DomainMarketEvent> market_events;
+    bool has_trade_kline_for_update = false;
 
     {
-        std::lock_guard<std::mutex> lk(account_mtx_);
-        const uint64_t next_step = processed_steps_ + 1;
-        flush_deferred_orders_locked_(next_step);
-        processed_steps_ = next_step;
-        set_global_timestamp(ts);
-        apply_timing = funding_apply_timing_;
+        std::lock_guard<std::mutex> lk(owner_.account_mtx_);
+        const uint64_t next_step = owner_.processed_steps_ + 1;
+        owner_.flush_deferred_orders_locked_(next_step);
+        owner_.processed_steps_ = next_step;
+        owner_.set_global_timestamp(ts);
+        apply_timing = owner_.funding_apply_timing_;
 
-        const auto initial_perp_balance = account_engine_->get_perp_balance();
-        const auto initial_spot_balance = account_engine_->get_spot_balance();
-        const bool no_positions = account_engine_->get_all_positions().empty();
-        const bool no_orders = account_engine_->get_all_open_orders().empty();
-
-        // Terminate simulation only when both ledgers are depleted and account is inactive.
+        const auto initial_perp_balance = owner_.account_engine_->get_perp_balance();
+        const auto initial_spot_balance = owner_.account_engine_->get_spot_balance();
+        const bool no_positions = owner_.account_engine_->get_all_positions().empty();
+        const bool no_orders = owner_.account_engine_->get_all_open_orders().empty();
         if (initial_perp_balance.WalletBalance <= 0.0 &&
             initial_spot_balance.WalletBalance <= 0.0 &&
             no_positions &&
             no_orders) {
             QTR_TRACE("ex", "balance depleted -> close channels");
-            market_channel->Close();
-            position_channel->Close();
-            order_channel->Close();
+            owner_.market_channel->Close();
+            owner_.position_channel->Close();
+            owner_.order_channel->Close();
             return false;
         }
     }
 
     {
-        std::lock_guard<std::mutex> state_lk(state_mtx_);
-        last_step_ts_ = ts;
-        log_ctx_.ts_exchange = ts;
-        log_ctx_.step_seq += 1;
-        log_ctx_.event_seq = 0;
-        step_log_ctx = log_ctx_;
+        std::lock_guard<std::mutex> state_lk(owner_.state_mtx_);
+        owner_.last_step_ts_ = ts;
+        owner_.log_ctx_.ts_exchange = ts;
+        owner_.log_ctx_.step_seq += 1;
+        owner_.log_ctx_.event_seq = 0;
+        step_log_ctx = owner_.log_ctx_;
     }
     dto = make_pooled<MultiKlineDto>();
 
     auto build_market = [&]() {
-        std::lock_guard<std::mutex> state_lk(state_mtx_);
-        build_multikline(ts, *dto, kline_snap_cache);
-        mark_price_snap_cache.clear();
-        mark_price_snap_cache.reserve(symbols_.size());
-        index_price_snap_cache.clear();
-        index_price_snap_cache.reserve(symbols_.size());
+        std::lock_guard<std::mutex> state_lk(owner_.state_mtx_);
+        owner_.build_multikline(ts, *dto);
+
+        owner_.market_update_by_id_.market.symbols = owner_.symbols_shared_;
+        owner_.market_update_by_id_.market.ts_exchange = ts;
+        owner_.market_update_by_id_.market.trade_klines_by_id.clear();
+        owner_.market_update_by_id_.market.trade_klines_by_id.resize(owner_.symbols_.size(), nullptr);
+        owner_.market_update_by_id_.reference.mark_price_by_id.clear();
+        owner_.market_update_by_id_.reference.mark_price_by_id.resize(owner_.symbols_.size(), 0.0);
+        owner_.market_update_by_id_.reference.has_mark_price_by_id.clear();
+        owner_.market_update_by_id_.reference.has_mark_price_by_id.resize(owner_.symbols_.size(), 0);
+        owner_.market_update_by_id_.reference.mark_price_source_by_id.clear();
+        owner_.market_update_by_id_.reference.mark_price_source_by_id.resize(
+            owner_.symbols_.size(), static_cast<int32_t>(ReferencePriceSource::None));
+        owner_.market_update_by_id_.reference.index_price_by_id.clear();
+        owner_.market_update_by_id_.reference.index_price_by_id.resize(owner_.symbols_.size(), 0.0);
+        owner_.market_update_by_id_.reference.has_index_price_by_id.clear();
+        owner_.market_update_by_id_.reference.has_index_price_by_id.resize(owner_.symbols_.size(), 0);
+        owner_.market_update_by_id_.reference.index_price_source_by_id.clear();
+        owner_.market_update_by_id_.reference.index_price_source_by_id.resize(
+            owner_.symbols_.size(), static_cast<int32_t>(ReferencePriceSource::None));
+        owner_.market_update_by_id_.funding.funding_rate_by_id.clear();
+        owner_.market_update_by_id_.funding.funding_rate_by_id.resize(owner_.symbols_.size(), 0.0);
+        owner_.market_update_by_id_.funding.funding_time_by_id.clear();
+        owner_.market_update_by_id_.funding.funding_time_by_id.resize(owner_.symbols_.size(), 0);
+        owner_.market_update_by_id_.funding.has_funding_by_id.clear();
+        owner_.market_update_by_id_.funding.has_funding_by_id.resize(owner_.symbols_.size(), 0);
+
+        has_trade_kline_for_update = false;
+        market_events.clear();
+        market_events.reserve(owner_.symbols_.size());
         double max_abs_basis_bps = 0.0;
         uint32_t warning_symbols = 0;
         uint32_t stress_symbols = 0;
-        for (size_t i = 0; i < symbols_.size(); ++i) {
+        SimulatorRiskOverlayEngine::BeginStep(owner_);
+        for (size_t i = 0; i < owner_.symbols_.size(); ++i) {
+            LogTask::DomainMarketEvent market_event;
+            market_event.symbol = owner_.symbols_[i];
+            if (i < dto->trade_klines_by_id.size() && dto->trade_klines_by_id[i].has_value()) {
+                market_event.has_kline = true;
+                market_event.kline = dto->trade_klines_by_id[i].value();
+                owner_.market_update_by_id_.market.trade_klines_by_id[i] = &dto->trade_klines_by_id[i].value();
+                has_trade_kline_for_update = true;
+            }
+
             double mark = 0.0;
             const bool has_mark = (i < dto->mark_klines_by_id.size() && dto->mark_klines_by_id[i].has_value());
             if (has_mark) {
                 mark = dto->mark_klines_by_id[i]->ClosePrice;
-                mark_price_snap_cache.emplace(symbols_[i], mark);
-                last_mark_by_symbol_[i] = mark;
-                last_mark_ts_by_symbol_[i] = ts;
-                has_last_mark_[i] = 1;
+                owner_.last_mark_by_symbol_[i] = mark;
+                owner_.last_mark_ts_by_symbol_[i] = ts;
+                owner_.has_last_mark_[i] = 1;
+                owner_.market_update_by_id_.reference.has_mark_price_by_id[i] = 1;
+                owner_.market_update_by_id_.reference.mark_price_by_id[i] = mark;
+            }
+            market_event.has_mark_price = has_mark;
+            market_event.mark_price = has_mark ? mark : 0.0;
+            if (i < owner_.last_mark_source_by_symbol_.size()) {
+                market_event.mark_price_source = owner_.last_mark_source_by_symbol_[i];
+                owner_.market_update_by_id_.reference.mark_price_source_by_id[i] = owner_.last_mark_source_by_symbol_[i];
             }
 
             double index = 0.0;
             const bool has_index = (i < dto->index_klines_by_id.size() && dto->index_klines_by_id[i].has_value());
             if (has_index) {
                 index = dto->index_klines_by_id[i]->ClosePrice;
-                index_price_snap_cache.emplace(symbols_[i], index);
-                last_index_by_symbol_[i] = index;
-                last_index_ts_by_symbol_[i] = ts;
-                has_last_index_[i] = 1;
+                owner_.last_index_by_symbol_[i] = index;
+                owner_.last_index_ts_by_symbol_[i] = ts;
+                owner_.has_last_index_[i] = 1;
+                owner_.market_update_by_id_.reference.has_index_price_by_id[i] = 1;
+                owner_.market_update_by_id_.reference.index_price_by_id[i] = index;
+            }
+            market_event.has_index_price = has_index;
+            market_event.index_price = has_index ? index : 0.0;
+            if (i < owner_.last_index_source_by_symbol_.size()) {
+                market_event.index_price_source = owner_.last_index_source_by_symbol_[i];
+                owner_.market_update_by_id_.reference.index_price_source_by_id[i] = owner_.last_index_source_by_symbol_[i];
             }
 
-            if (i < has_last_mark_index_basis_.size()) {
-                has_last_mark_index_basis_[i] = 0;
+            if (i < dto->funding_by_id.size() && dto->funding_by_id[i].has_value()) {
+                owner_.market_update_by_id_.funding.has_funding_by_id[i] = 1;
+                owner_.market_update_by_id_.funding.funding_rate_by_id[i] = dto->funding_by_id[i]->Rate;
+                owner_.market_update_by_id_.funding.funding_time_by_id[i] = dto->funding_by_id[i]->FundingTime;
             }
-            if (i < simulator_risk_overlay_.warning_active_by_symbol.size()) {
-                simulator_risk_overlay_.warning_active_by_symbol[i] = 0;
-            }
-            if (i < simulator_risk_overlay_.stress_active_by_symbol.size()) {
-                simulator_risk_overlay_.stress_active_by_symbol[i] = 0;
-            }
-            if (has_mark && has_index && std::isfinite(index) && std::abs(index) > 1e-12) {
-                const double basis_bps = ((mark - index) / index) * 10000.0;
-                if (std::isfinite(basis_bps)) {
-                    last_mark_index_basis_bps_by_symbol_[i] = basis_bps;
-                    has_last_mark_index_basis_[i] = 1;
-                    const double abs_basis_bps = std::abs(basis_bps);
-                    max_abs_basis_bps = std::max(max_abs_basis_bps, abs_basis_bps);
-                    if (simulator_risk_overlay_.enabled) {
-                        if (abs_basis_bps >= simulator_risk_overlay_.mark_index_stress_bps) {
-                            if (i < simulator_risk_overlay_.stress_active_by_symbol.size()) {
-                                simulator_risk_overlay_.stress_active_by_symbol[i] = 1;
-                            }
-                            ++stress_symbols;
-                        }
-                        else if (abs_basis_bps >= simulator_risk_overlay_.mark_index_warning_bps) {
-                            if (i < simulator_risk_overlay_.warning_active_by_symbol.size()) {
-                                simulator_risk_overlay_.warning_active_by_symbol[i] = 1;
-                            }
-                            ++warning_symbols;
-                        }
-                    }
-                }
-            }
+
+            SimulatorRiskOverlayEngine::ConsumeSymbolPrices(owner_,
+                i,
+                has_mark,
+                mark,
+                has_index,
+                index,
+                max_abs_basis_bps,
+                warning_symbols,
+                stress_symbols);
+            market_events.emplace_back(std::move(market_event));
         }
-        last_mark_index_max_abs_basis_bps_ = max_abs_basis_bps;
-        simulator_risk_overlay_.warning_symbols = warning_symbols;
-        simulator_risk_overlay_.stress_symbols = stress_symbols;
+        SimulatorRiskOverlayEngine::FinalizeStep(owner_, max_abs_basis_bps, warning_symbols, stress_symbols);
     };
 
     auto update_positions = [&]() {
-        if (kline_snap_cache.empty()) {
+        if (!has_trade_kline_for_update) {
             return;
         }
-        std::lock_guard<std::mutex> lk(account_mtx_);
-        if (account_engine_) {
-            account_engine_->update_positions(kline_snap_cache, mark_price_snap_cache, index_price_snap_cache);
+        std::lock_guard<std::mutex> lk(owner_.account_mtx_);
+        if (owner_.account_engine_) {
+            owner_.account_engine_->update_positions_by_id(owner_.market_update_by_id_);
         }
     };
 
     auto apply_basis_risk_guard = [&]() {
-        if (!simulator_risk_overlay_.enabled) {
-            return;
-        }
         std::vector<std::pair<std::string, double>> leverage_caps;
-        {
-            std::lock_guard<std::mutex> state_lk(state_mtx_);
-            leverage_caps.reserve(symbols_.size());
-            for (size_t i = 0; i < symbols_.size(); ++i) {
-                double cap = 0.0;
-                if (i < simulator_risk_overlay_.stress_active_by_symbol.size() &&
-                    simulator_risk_overlay_.stress_active_by_symbol[i] &&
-                    simulator_risk_overlay_.basis_stress_leverage_cap >= 1.0) {
-                    cap = simulator_risk_overlay_.basis_stress_leverage_cap;
-                }
-                else if (i < simulator_risk_overlay_.warning_active_by_symbol.size() &&
-                    simulator_risk_overlay_.warning_active_by_symbol[i] &&
-                    simulator_risk_overlay_.basis_warning_leverage_cap >= 1.0) {
-                    cap = simulator_risk_overlay_.basis_warning_leverage_cap;
-                }
-                if (cap > 0.0) {
-                    leverage_caps.emplace_back(symbols_[i], cap);
-                }
-            }
-        }
+        SimulatorRiskOverlayEngine::CollectLeverageCaps(owner_, leverage_caps);
         if (leverage_caps.empty()) {
             return;
         }
-        std::lock_guard<std::mutex> lk(account_mtx_);
-        if (!account_engine_) {
+        std::lock_guard<std::mutex> lk(owner_.account_mtx_);
+        if (!owner_.account_engine_) {
             return;
         }
         for (const auto& [symbol, cap] : leverage_caps) {
-            const double current = account_engine_->perp.get_symbol_leverage(symbol);
+            const double current = owner_.account_engine_->perp.get_symbol_leverage(symbol);
             if (std::isfinite(current) && current > cap) {
-                account_engine_->perp.set_symbol_leverage(symbol, cap);
+                owner_.account_engine_->perp.set_symbol_leverage(symbol, cap);
             }
         }
     };
 
     auto apply_funding = [&]() {
-        std::scoped_lock<std::mutex, std::mutex> lk(account_mtx_, state_mtx_);
-        collect_funding_events_unlocked_(ts, funding_events);
+        std::scoped_lock<std::mutex, std::mutex> lk(owner_.account_mtx_, owner_.state_mtx_);
+        owner_.collect_funding_events_unlocked_(ts, funding_events);
     };
 
     if (apply_timing == FundingApplyTiming::BeforeMatching) {
@@ -747,52 +864,50 @@ bool BinanceExchange::step()
     }
 
     {
-        std::lock_guard<std::mutex> lk(account_mtx_);
-        cur_ver = account_engine_->get_state_version();
-        curP = make_pooled<std::vector<dto::Position>>(account_engine_->get_all_positions());
-        curO = make_pooled<std::vector<dto::Order>>(account_engine_->get_all_open_orders());
-        perp_balance = account_engine_->get_perp_balance();
-        spot_balance = account_engine_->get_spot_balance();
-        total_cash_balance = account_engine_->get_total_cash_balance();
+        std::lock_guard<std::mutex> lk(owner_.account_mtx_);
+        cur_ver = owner_.account_engine_->get_state_version();
+        curP = make_pooled<std::vector<dto::Position>>(owner_.account_engine_->get_all_positions());
+        curO = make_pooled<std::vector<dto::Order>>(owner_.account_engine_->get_all_open_orders());
+        perp_balance = owner_.account_engine_->get_perp_balance();
+        spot_balance = owner_.account_engine_->get_spot_balance();
+        total_cash_balance = owner_.account_engine_->get_total_cash_balance();
         spot_inventory_value = curP ? spot_inventory_value_from_positions(*curP) : 0.0;
-        fill_events = account_engine_->drain_fill_events();
+        fill_events = owner_.account_engine_->drain_fill_events();
     }
 
     step_log_ctx.ts_local = now_ms();
 
     QTR_TRACE("ex", "market_channel Send begin");
-    market_channel->Send(dto);
+    owner_.market_channel->Send(dto);
     QTR_TRACE("ex", "market_channel Send end");
 
     bool pos_changed = false;
     bool ord_changed = false;
-
-    // Only consider sending snapshots when account reported a state transition.
-    if (cur_ver != last_account_version_ && curP && curO) {
-        const bool pos_unchanged = last_pos_snapshot_
-            ? vec_equal(*curP, *last_pos_snapshot_)
+    if (cur_ver != owner_.last_account_version_ && curP && curO) {
+        const bool pos_unchanged = owner_.last_pos_snapshot_
+            ? BinanceExchange::vec_equal(*curP, *owner_.last_pos_snapshot_)
             : curP->empty();
-        const bool ord_unchanged = last_ord_snapshot_
-            ? vec_equal(*curO, *last_ord_snapshot_)
+        const bool ord_unchanged = owner_.last_ord_snapshot_
+            ? BinanceExchange::vec_equal(*curO, *owner_.last_ord_snapshot_)
             : curO->empty();
 
         if (!pos_unchanged) {
             QTR_TRACE("ex", "position_channel Send");
-            position_channel->Send(*curP);
+            owner_.position_channel->Send(*curP);
             pos_changed = true;
         }
 
         if (!ord_unchanged) {
             QTR_TRACE("ex", "order_channel Send");
-            order_channel->Send(*curO);
+            owner_.order_channel->Send(*curO);
             ord_changed = true;
         }
     }
 
-    if (logger) {
+    if (owner_.logger) {
         LogTask task;
         task.ctx = step_log_ctx;
-        task.market = dto;
+        task.market_events = std::move(market_events);
         task.positions = curP;
         task.orders = curO;
         task.funding_events = std::move(funding_events);
@@ -802,17 +917,17 @@ bool BinanceExchange::step()
         task.spot_inventory_value = spot_inventory_value;
         task.fill_events = std::move(fill_events);
         task.cur_ver = cur_ver;
-        enqueue_log_task_(std::move(task));
+        owner_.publish_log_task_(std::move(task));
     }
 
-    if (cur_ver != last_account_version_) {
+    if (cur_ver != owner_.last_account_version_) {
         if (pos_changed) {
-            last_pos_snapshot_ = curP;
+            owner_.last_pos_snapshot_ = curP;
         }
         if (ord_changed) {
-            last_ord_snapshot_ = curO;
+            owner_.last_ord_snapshot_ = curO;
         }
-        last_account_version_ = cur_ver;
+        owner_.last_account_version_ = cur_ver;
     }
 
     QTR_TRACE("ex", "step end");
@@ -1073,37 +1188,36 @@ void BinanceExchange::close()
 	IExchange<MultiKlinePtr>::close();
 }
 
-/// @brief Determine the next global timestamp to emit.
-/// @param[out] ts  The minimum upcoming timestamp among all symbols.
-/// @return true if at least one symbol has data remaining.
-bool BinanceExchange::next_timestamp(uint64_t& ts)
+bool BinanceExchange::MarketReplayEngine::NextTimestamp(BinanceExchange& owner, uint64_t& ts)
 {
     uint64_t next_kline_ts = std::numeric_limits<uint64_t>::max();
     bool has_next_kline = false;
 
     // Pop stale heap entries until top matches current per-symbol next_ts.
-    while (!next_ts_heap_.empty()) {
-        const auto top = next_ts_heap_.top();
-        if (top.sym_id < next_ts_by_symbol_.size() &&
-            has_next_ts_[top.sym_id] &&
-            next_ts_by_symbol_[top.sym_id] == top.ts) {
+    while (!owner.next_ts_heap_.empty()) {
+        const auto top = owner.next_ts_heap_.top();
+        if (top.sym_id < owner.next_ts_by_symbol_.size() &&
+            owner.has_next_ts_[top.sym_id] &&
+            owner.next_ts_by_symbol_[top.sym_id] == top.ts) {
             next_kline_ts = top.ts;
             has_next_kline = true;
             break;
         }
-        next_ts_heap_.pop();
+        owner.next_ts_heap_.pop();
     }
 
     uint64_t next_funding_ts = std::numeric_limits<uint64_t>::max();
     bool has_next_funding = false;
-    const size_t funding_count = std::min(funding_md_.size(), funding_cursor_.size());
+    const size_t funding_count = std::min(owner.funding_md_.size(), owner.funding_cursor_.size());
     for (size_t i = 0; i < funding_count; ++i) {
-        if (!has_funding_[i] || !funding_md_[i]) {
+        if (!owner.has_funding_[i] || !owner.funding_md_[i]) {
             continue;
         }
-        const auto& data = *funding_md_[i];
-        const size_t cur = funding_cursor_[i];
-        const size_t end_idx = (i < funding_window_end_idx_.size()) ? funding_window_end_idx_[i] : data.get_count();
+        const auto& data = *owner.funding_md_[i];
+        const size_t cur = owner.funding_cursor_[i];
+        const size_t end_idx = (i < owner.funding_window_end_idx_.size())
+            ? owner.funding_window_end_idx_[i]
+            : data.get_count();
         if (cur >= end_idx) {
             continue;
         }
@@ -1123,79 +1237,90 @@ bool BinanceExchange::next_timestamp(uint64_t& ts)
     return true;
 }
 
-/// @brief Build and send a MultiKlineDto for timestamp `ts`.
-/// @param ts   Global timestamp to align on.
-/// @param out  DTO to populate with per-symbol optional TradeKlineDto.
-void BinanceExchange::build_multikline(uint64_t ts,
-    MultiKlineDto& out,
-    std::unordered_map<std::string, TradeKlineDto>& kline_snap_cache)
+void BinanceExchange::MarketReplayEngine::BuildMultiKline(BinanceExchange& owner,
+    uint64_t ts,
+    MultiKlineDto& out)
 {
     out.Timestamp = ts;
-    out.symbols = symbols_shared_;
+    out.symbols = owner.symbols_shared_;
     out.trade_klines_by_id.clear();
-    out.trade_klines_by_id.resize(symbols_.size());
+    out.trade_klines_by_id.resize(owner.symbols_.size());
     out.mark_klines_by_id.clear();
-    out.mark_klines_by_id.resize(symbols_.size());
+    out.mark_klines_by_id.resize(owner.symbols_.size());
     out.index_klines_by_id.clear();
-    out.index_klines_by_id.resize(symbols_.size());
+    out.index_klines_by_id.resize(owner.symbols_.size());
     out.funding_by_id.clear();
-    out.funding_by_id.resize(symbols_.size());
+    out.funding_by_id.resize(owner.symbols_.size());
 
-    kline_snap_cache.clear();
-    kline_snap_cache.reserve(md_.size());
-
-    for (size_t i = 0; i < md_.size(); ++i) {
-        const auto& sym = symbols_[i];
-        auto& data = md_[i];
-        size_t idx = cursor_[i];
-        const size_t end_idx = (i < kline_window_end_idx_.size()) ? kline_window_end_idx_[i] : data.get_klines_count();
+    for (size_t i = 0; i < owner.md_.size(); ++i) {
+        auto& data = owner.md_[i];
+        size_t idx = owner.cursor_[i];
+        const size_t end_idx = (i < owner.kline_window_end_idx_.size())
+            ? owner.kline_window_end_idx_[i]
+            : data.get_klines_count();
         if (idx < end_idx &&
             data.get_kline(idx).Timestamp == ts)
         {
             const auto& k = data.get_kline(idx);
             out.trade_klines_by_id[i] = k;
-            kline_snap_cache.emplace(sym, k);
-            last_close_by_symbol_[i] = k.ClosePrice;
-            last_close_ts_by_symbol_[i] = k.Timestamp;
-            has_last_close_[i] = 1;
-            ++cursor_[i];
+            owner.last_close_by_symbol_[i] = k.ClosePrice;
+            owner.last_close_ts_by_symbol_[i] = k.Timestamp;
+            owner.has_last_close_[i] = 1;
+            ++owner.cursor_[i];
 
             // Advance this symbol in the multiway merge heap.
-            if (cursor_[i] < end_idx) {
-                const uint64_t next_ts = data.get_kline(cursor_[i]).Timestamp;
-                next_ts_by_symbol_[i] = next_ts;
-                has_next_ts_[i] = 1;
-                next_ts_heap_.push(HeapItem{ next_ts, i });
+            if (owner.cursor_[i] < end_idx) {
+                const uint64_t next_ts = data.get_kline(owner.cursor_[i]).Timestamp;
+                owner.next_ts_by_symbol_[i] = next_ts;
+                owner.has_next_ts_[i] = 1;
+                owner.next_ts_heap_.push(HeapItem{ next_ts, i });
             }
             else {
-                has_next_ts_[i] = 0;
+                owner.has_next_ts_[i] = 0;
             }
         }
 
-        if (i < has_last_funding_.size() && has_last_funding_[i]) {
+        if (i < owner.has_last_funding_.size() && owner.has_last_funding_[i]) {
             out.funding_by_id[i] = FundingRateDto(
-                last_funding_time_by_symbol_[i],
-                last_funding_rate_by_symbol_[i]);
+                owner.last_funding_time_by_symbol_[i],
+                owner.last_funding_rate_by_symbol_[i]);
         }
 
         double mark = 0.0;
         ReferencePriceSource mark_source = ReferencePriceSource::None;
-        if (resolve_mark_price_with_source_(i, ts, mark, mark_source)) {
+        if (owner.resolve_mark_price_with_source_(i, ts, mark, mark_source)) {
             out.mark_klines_by_id[i] = QTrading::Dto::Market::Binance::ReferenceKlineDto::Point(ts, mark);
         }
-        if (i < last_mark_source_by_symbol_.size()) {
-            last_mark_source_by_symbol_[i] = static_cast<int32_t>(mark_source);
+        if (i < owner.last_mark_source_by_symbol_.size()) {
+            owner.last_mark_source_by_symbol_[i] = static_cast<int32_t>(mark_source);
         }
 
         double index = 0.0;
         ReferencePriceSource index_source = ReferencePriceSource::None;
-        if (resolve_index_price_with_source_(i, ts, index, index_source)) {
+        if (owner.resolve_index_price_with_source_(i, ts, index, index_source)) {
             out.index_klines_by_id[i] = QTrading::Dto::Market::Binance::ReferenceKlineDto::Point(ts, index);
         }
-        if (i < last_index_source_by_symbol_.size()) {
-            last_index_source_by_symbol_[i] = static_cast<int32_t>(index_source);
+        if (i < owner.last_index_source_by_symbol_.size()) {
+            owner.last_index_source_by_symbol_[i] = static_cast<int32_t>(index_source);
         }
     }
+}
+
+/// @brief Determine the next global timestamp to emit.
+/// @param[out] ts  The minimum upcoming timestamp among all symbols.
+/// @return true if at least one symbol has data remaining.
+bool BinanceExchange::next_timestamp(uint64_t& ts)
+{
+    return MarketReplayEngine::NextTimestamp(*this, ts);
+}
+
+/// @brief Build and send a MultiKlineDto for timestamp `ts`.
+/// @param ts   Global timestamp to align on.
+/// @param out  DTO to populate with per-symbol optional TradeKlineDto.
+void BinanceExchange::build_multikline(uint64_t ts,
+    MultiKlineDto& out)
+{
+    MarketReplayEngine::BuildMultiKline(*this, ts, out);
 }
 
 /// @brief Log account balance, positions, and orders via the Logger.
@@ -1224,8 +1349,8 @@ void BinanceExchange::log_status_snapshot(const QTrading::Dto::Account::BalanceS
     if (account_module_id_ != Logger::kInvalidModuleId) {
         const double spot_ledger_value = spot_balance.WalletBalance + spot_inventory_value;
         const double total_ledger_value = perp_balance.Equity + spot_ledger_value;
-        logger->Log(account_module_id_, make_log_payload<AccountLog>(
-            AccountLog{
+        logger->Log(account_module_id_, make_log_payload<dto::AccountLog>(
+            dto::AccountLog{
                 perp_balance.WalletBalance,
                 perp_balance.UnrealizedPnl,
                 perp_balance.Equity,
@@ -1251,7 +1376,7 @@ void BinanceExchange::log_status_snapshot(const QTrading::Dto::Account::BalanceS
 }
 
 void BinanceExchange::log_events(QTrading::Infra::Logging::StepLogContext ctx,
-    const MultiKlineDto& market,
+    const std::vector<LogTask::DomainMarketEvent>& market_events,
     const PositionSnapshotPtr& cur_positions,
     const OrderSnapshotPtr& cur_orders,
     const std::vector<FundingEventDto>& funding_events,
@@ -1283,13 +1408,12 @@ void BinanceExchange::log_events(QTrading::Infra::Logging::StepLogContext ctx,
     funding_event_buffer_.reset(ctx);
 
     if (market_event_module_id_ != Logger::kInvalidModuleId) {
-        market_event_buffer_.reserve(symbols_.size());
-        for (size_t i = 0; i < symbols_.size(); ++i) {
-            const auto& sym = symbols_[i];
+        market_event_buffer_.reserve(market_events.size());
+        for (const auto& captured : market_events) {
             MarketEventDto e;
-            e.symbol = sym;
-            if (i < market.trade_klines_by_id.size() && market.trade_klines_by_id[i].has_value()) {
-                const auto& k = market.trade_klines_by_id[i].value();
+            e.symbol = captured.symbol;
+            if (captured.has_kline) {
+                const auto& k = captured.kline;
                 e.has_kline = true;
                 e.open = k.OpenPrice;
                 e.high = k.HighPrice;
@@ -1301,18 +1425,12 @@ void BinanceExchange::log_events(QTrading::Infra::Logging::StepLogContext ctx,
             else {
                 e.has_kline = false;
             }
-
-            double mark = 0.0;
-            ReferencePriceSource mark_source = ReferencePriceSource::None;
-            e.has_mark_price = resolve_mark_price_with_source_(i, ctx.ts_exchange, mark, mark_source);
-            e.mark_price = e.has_mark_price ? mark : 0.0;
-            e.mark_price_source = static_cast<int32_t>(mark_source);
-
-            double index = 0.0;
-            ReferencePriceSource index_source = ReferencePriceSource::None;
-            e.has_index_price = resolve_index_price_with_source_(i, ctx.ts_exchange, index, index_source);
-            e.index_price = e.has_index_price ? index : 0.0;
-            e.index_price_source = static_cast<int32_t>(index_source);
+            e.has_mark_price = captured.has_mark_price;
+            e.mark_price = captured.mark_price;
+            e.mark_price_source = captured.mark_price_source;
+            e.has_index_price = captured.has_index_price;
+            e.index_price = captured.index_price;
+            e.index_price_source = captured.index_price_source;
             market_event_buffer_.push(std::move(e));
         }
 
@@ -1901,33 +2019,134 @@ bool BinanceExchange::resolve_index_price_with_source_(size_t sym_id,
     return false;
 }
 
-bool BinanceExchange::perp_opening_blocked_by_basis_stress_account_locked_(
+void BinanceExchange::SimulatorRiskOverlayEngine::BeginStep(BinanceExchange& owner)
+{
+    for (size_t i = 0; i < owner.symbols_.size(); ++i) {
+        if (i < owner.has_last_mark_index_basis_.size()) {
+            owner.has_last_mark_index_basis_[i] = 0;
+        }
+        if (i < owner.simulator_risk_overlay_.warning_active_by_symbol.size()) {
+            owner.simulator_risk_overlay_.warning_active_by_symbol[i] = 0;
+        }
+        if (i < owner.simulator_risk_overlay_.stress_active_by_symbol.size()) {
+            owner.simulator_risk_overlay_.stress_active_by_symbol[i] = 0;
+        }
+    }
+}
+
+void BinanceExchange::SimulatorRiskOverlayEngine::ConsumeSymbolPrices(
+    BinanceExchange& owner,
+    size_t sym_id,
+    bool has_mark,
+    double mark,
+    bool has_index,
+    double index,
+    double& max_abs_basis_bps,
+    uint32_t& warning_symbols,
+    uint32_t& stress_symbols)
+{
+    if (!has_mark || !has_index || !std::isfinite(index) || std::abs(index) <= 1e-12) {
+        return;
+    }
+
+    const double basis_bps = ((mark - index) / index) * 10000.0;
+    if (!std::isfinite(basis_bps)) {
+        return;
+    }
+
+    if (sym_id < owner.last_mark_index_basis_bps_by_symbol_.size()) {
+        owner.last_mark_index_basis_bps_by_symbol_[sym_id] = basis_bps;
+    }
+    if (sym_id < owner.has_last_mark_index_basis_.size()) {
+        owner.has_last_mark_index_basis_[sym_id] = 1;
+    }
+
+    const double abs_basis_bps = std::abs(basis_bps);
+    max_abs_basis_bps = std::max(max_abs_basis_bps, abs_basis_bps);
+    if (!owner.simulator_risk_overlay_.enabled) {
+        return;
+    }
+
+    if (abs_basis_bps >= owner.simulator_risk_overlay_.mark_index_stress_bps) {
+        if (sym_id < owner.simulator_risk_overlay_.stress_active_by_symbol.size()) {
+            owner.simulator_risk_overlay_.stress_active_by_symbol[sym_id] = 1;
+        }
+        ++stress_symbols;
+    }
+    else if (abs_basis_bps >= owner.simulator_risk_overlay_.mark_index_warning_bps) {
+        if (sym_id < owner.simulator_risk_overlay_.warning_active_by_symbol.size()) {
+            owner.simulator_risk_overlay_.warning_active_by_symbol[sym_id] = 1;
+        }
+        ++warning_symbols;
+    }
+}
+
+void BinanceExchange::SimulatorRiskOverlayEngine::FinalizeStep(BinanceExchange& owner,
+    double max_abs_basis_bps,
+    uint32_t warning_symbols,
+    uint32_t stress_symbols)
+{
+    owner.last_mark_index_max_abs_basis_bps_ = max_abs_basis_bps;
+    owner.simulator_risk_overlay_.warning_symbols = warning_symbols;
+    owner.simulator_risk_overlay_.stress_symbols = stress_symbols;
+}
+
+void BinanceExchange::SimulatorRiskOverlayEngine::CollectLeverageCaps(
+    const BinanceExchange& owner,
+    std::vector<std::pair<std::string, double>>& out)
+{
+    std::lock_guard<std::mutex> state_lk(owner.state_mtx_);
+    if (!owner.simulator_risk_overlay_.enabled) {
+        return;
+    }
+
+    out.reserve(owner.symbols_.size());
+    for (size_t i = 0; i < owner.symbols_.size(); ++i) {
+        double cap = 0.0;
+        if (i < owner.simulator_risk_overlay_.stress_active_by_symbol.size() &&
+            owner.simulator_risk_overlay_.stress_active_by_symbol[i] &&
+            owner.simulator_risk_overlay_.basis_stress_leverage_cap >= 1.0) {
+            cap = owner.simulator_risk_overlay_.basis_stress_leverage_cap;
+        }
+        else if (i < owner.simulator_risk_overlay_.warning_active_by_symbol.size() &&
+            owner.simulator_risk_overlay_.warning_active_by_symbol[i] &&
+            owner.simulator_risk_overlay_.basis_warning_leverage_cap >= 1.0) {
+            cap = owner.simulator_risk_overlay_.basis_warning_leverage_cap;
+        }
+        if (cap > 0.0) {
+            out.emplace_back(owner.symbols_[i], cap);
+        }
+    }
+}
+
+bool BinanceExchange::SimulatorRiskOverlayEngine::IsOpeningBlockedByStress(
+    const BinanceExchange& owner,
     Account& acc,
     const std::string& symbol,
     QTrading::Dto::Trading::OrderSide side,
     QTrading::Dto::Trading::PositionSide position_side,
-    bool reduce_only) const
+    bool reduce_only)
 {
     if (reduce_only) {
         return false;
     }
 
-    size_t sym_id = symbols_.size();
+    size_t sym_id = owner.symbols_.size();
     bool stress_active = false;
     bool guard_enabled = false;
     bool blocks_opening = false;
     {
-        std::lock_guard<std::mutex> state_lk(state_mtx_);
-        guard_enabled = simulator_risk_overlay_.enabled;
-        blocks_opening = simulator_risk_overlay_.basis_stress_blocks_opening_orders;
-        for (size_t i = 0; i < symbols_.size(); ++i) {
-            if (symbols_[i] == symbol) {
+        std::lock_guard<std::mutex> state_lk(owner.state_mtx_);
+        guard_enabled = owner.simulator_risk_overlay_.enabled;
+        blocks_opening = owner.simulator_risk_overlay_.basis_stress_blocks_opening_orders;
+        for (size_t i = 0; i < owner.symbols_.size(); ++i) {
+            if (owner.symbols_[i] == symbol) {
                 sym_id = i;
                 break;
             }
         }
-        if (sym_id < simulator_risk_overlay_.stress_active_by_symbol.size()) {
-            stress_active = simulator_risk_overlay_.stress_active_by_symbol[sym_id] != 0;
+        if (sym_id < owner.simulator_risk_overlay_.stress_active_by_symbol.size()) {
+            stress_active = owner.simulator_risk_overlay_.stress_active_by_symbol[sym_id] != 0;
         }
     }
 
@@ -1936,7 +2155,6 @@ bool BinanceExchange::perp_opening_blocked_by_basis_stress_account_locked_(
     }
 
     const auto& positions = acc.get_all_positions();
-
     if (position_side == QTrading::Dto::Trading::PositionSide::Long) {
         return side != QTrading::Dto::Trading::OrderSide::Sell;
     }
@@ -1944,7 +2162,6 @@ bool BinanceExchange::perp_opening_blocked_by_basis_stress_account_locked_(
         return side != QTrading::Dto::Trading::OrderSide::Buy;
     }
 
-    // One-way mode heuristic: allow orders likely reducing net perp exposure.
     double net_qty = 0.0;
     bool has_perp_position = false;
     for (const auto& p : positions) {
@@ -1960,39 +2177,53 @@ bool BinanceExchange::perp_opening_blocked_by_basis_stress_account_locked_(
     if (!has_perp_position) {
         return true;
     }
-
     if (net_qty > 1e-12) {
         return side != QTrading::Dto::Trading::OrderSide::Sell;
     }
     if (net_qty < -1e-12) {
         return side != QTrading::Dto::Trading::OrderSide::Buy;
     }
-
-    // Net-flat with no explicit reduce-only hint: conservatively block.
     return true;
+}
+
+bool BinanceExchange::perp_opening_blocked_by_basis_stress_account_locked_(
+    Account& acc,
+    const std::string& symbol,
+    QTrading::Dto::Trading::OrderSide side,
+    QTrading::Dto::Trading::PositionSide position_side,
+    bool reduce_only) const
+{
+    return SimulatorRiskOverlayEngine::IsOpeningBlockedByStress(
+        *this, acc, symbol, side, position_side, reduce_only);
 }
 
 void BinanceExchange::FillStatusSnapshot(StatusSnapshot& out) const
 {
+    StatusSnapshotBuilder::Fill(*this, out);
+}
+
+void BinanceExchange::StatusSnapshotBuilder::Fill(const BinanceExchange& owner,
+    BinanceExchange::StatusSnapshot& out)
+{
     double uncertainty_bps = 0.0;
     double mark_index_diag_bps = 0.0;
     {
-        std::lock_guard<std::mutex> lk(account_mtx_);
-        uncertainty_bps = uncertainty_band_bps_;
-        if (account_engine_) {
-            const auto perp_bal = account_engine_->get_perp_balance();
-            const auto spot_bal = account_engine_->get_spot_balance();
-            const auto positions = account_engine_->get_all_positions();
+        std::lock_guard<std::mutex> lk(owner.account_mtx_);
+        uncertainty_bps = owner.uncertainty_band_bps_;
+        if (owner.account_engine_) {
+            const auto perp_bal = owner.account_engine_->get_perp_balance();
+            const auto spot_bal = owner.account_engine_->get_spot_balance();
+            const auto positions = owner.account_engine_->get_all_positions();
             const double spot_inventory_value = spot_inventory_value_from_positions(positions);
             const double spot_ledger_value = spot_bal.WalletBalance + spot_inventory_value;
-            const double total_cash_balance = account_engine_->get_total_cash_balance();
+            const double total_cash_balance = owner.account_engine_->get_total_cash_balance();
             const double total_ledger_value = perp_bal.Equity + spot_ledger_value;
 
             out.wallet_balance = perp_bal.WalletBalance;
             out.margin_balance = perp_bal.MarginBalance;
             out.available_balance = perp_bal.AvailableBalance;
             out.unrealized_pnl = perp_bal.UnrealizedPnl;
-            out.total_unrealized_pnl = account_engine_->total_unrealized_pnl();
+            out.total_unrealized_pnl = owner.account_engine_->total_unrealized_pnl();
             out.perp_wallet_balance = perp_bal.WalletBalance;
             out.perp_margin_balance = perp_bal.MarginBalance;
             out.perp_available_balance = perp_bal.AvailableBalance;
@@ -2029,37 +2260,37 @@ void BinanceExchange::FillStatusSnapshot(StatusSnapshot& out) const
     }
 
     {
-        std::lock_guard<std::mutex> state_lk(state_mtx_);
-        mark_index_diag_bps = std::max(0.0, last_mark_index_max_abs_basis_bps_);
-        out.ts_exchange = last_step_ts_;
-        out.progress_pct = progress_pct_unlocked_();
-        out.basis_warning_symbols = simulator_risk_overlay_.warning_symbols;
-        out.basis_stress_symbols = simulator_risk_overlay_.stress_symbols;
+        std::lock_guard<std::mutex> state_lk(owner.state_mtx_);
+        mark_index_diag_bps = std::max(0.0, owner.last_mark_index_max_abs_basis_bps_);
+        out.ts_exchange = owner.last_step_ts_;
+        out.progress_pct = owner.progress_pct_unlocked_();
+        out.basis_warning_symbols = owner.simulator_risk_overlay_.warning_symbols;
+        out.basis_stress_symbols = owner.simulator_risk_overlay_.stress_symbols;
         out.prices.clear();
-        out.prices.reserve(symbols_.size());
-        for (size_t i = 0; i < symbols_.size(); ++i) {
+        out.prices.reserve(owner.symbols_.size());
+        for (size_t i = 0; i < owner.symbols_.size(); ++i) {
             StatusSnapshot::PriceSnapshot snap;
-            snap.symbol = symbols_[i];
-            snap.trade_price = last_close_by_symbol_[i];
-            snap.has_trade_price = has_last_close_[i] != 0;
+            snap.symbol = owner.symbols_[i];
+            snap.trade_price = owner.last_close_by_symbol_[i];
+            snap.has_trade_price = owner.has_last_close_[i] != 0;
             snap.price = snap.trade_price;
             snap.has_price = snap.has_trade_price;
-            snap.mark_price = (i < last_mark_by_symbol_.size()) ? last_mark_by_symbol_[i] : 0.0;
-            snap.has_mark_price = (i < has_last_mark_.size()) && (has_last_mark_[i] != 0);
-            snap.mark_price_source = (i < last_mark_source_by_symbol_.size())
-                ? last_mark_source_by_symbol_[i]
+            snap.mark_price = (i < owner.last_mark_by_symbol_.size()) ? owner.last_mark_by_symbol_[i] : 0.0;
+            snap.has_mark_price = (i < owner.has_last_mark_.size()) && (owner.has_last_mark_[i] != 0);
+            snap.mark_price_source = (i < owner.last_mark_source_by_symbol_.size())
+                ? owner.last_mark_source_by_symbol_[i]
                 : static_cast<int32_t>(ReferencePriceSource::None);
-            snap.index_price = (i < last_index_by_symbol_.size()) ? last_index_by_symbol_[i] : 0.0;
-            snap.has_index_price = (i < has_last_index_.size()) && (has_last_index_[i] != 0);
-            snap.index_price_source = (i < last_index_source_by_symbol_.size())
-                ? last_index_source_by_symbol_[i]
+            snap.index_price = (i < owner.last_index_by_symbol_.size()) ? owner.last_index_by_symbol_[i] : 0.0;
+            snap.has_index_price = (i < owner.has_last_index_.size()) && (owner.has_last_index_[i] != 0);
+            snap.index_price_source = (i < owner.last_index_source_by_symbol_.size())
+                ? owner.last_index_source_by_symbol_[i]
                 : static_cast<int32_t>(ReferencePriceSource::None);
             out.prices.emplace_back(std::move(snap));
         }
-        out.funding_applied_events = funding_applied_events_total_;
-        out.funding_skipped_no_mark = funding_skipped_no_mark_total_;
+        out.funding_applied_events = owner.funding_applied_events_total_;
+        out.funding_skipped_no_mark = owner.funding_skipped_no_mark_total_;
     }
-    out.basis_stress_blocked_orders = simulator_risk_overlay_.stress_blocked_orders.load(std::memory_order_relaxed);
+    out.basis_stress_blocked_orders = owner.simulator_risk_overlay_.stress_blocked_orders.load(std::memory_order_relaxed);
     out.uncertainty_band_bps = std::max(0.0, uncertainty_bps) + std::max(0.0, mark_index_diag_bps);
     const double total_band = out.uncertainty_band_bps / 10000.0;
     out.total_ledger_value_conservative = out.total_ledger_value_base * (1.0 - total_band);

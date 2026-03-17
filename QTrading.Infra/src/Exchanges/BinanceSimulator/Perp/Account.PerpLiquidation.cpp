@@ -9,6 +9,82 @@ using QTrading::Dto::Trading::InstrumentType;
 using QTrading::Dto::Trading::OrderSide;
 using QTrading::Dto::Trading::PositionSide;
 
+void Account::RiskEngine::RevalueAllUnrealized(Account& owner)
+{
+    for (auto& pos : owner.positions_) {
+        const double mark = owner.get_last_mark_price_(pos.symbol);
+        if (mark <= 0.0) {
+            continue;
+        }
+        pos.unrealized_pnl = (mark - pos.entry_price) * pos.quantity * (pos.is_long ? 1.0 : -1.0);
+    }
+}
+
+void Account::RiskEngine::RefreshMaintenanceMargins(Account& owner)
+{
+    for (auto& p : owner.positions_) {
+        const double mark = owner.get_last_mark_price_(p.symbol);
+        if (mark <= 0.0) {
+            continue;
+        }
+        p.notional = std::abs(p.quantity * mark);
+        const auto& instrument_spec = owner.resolve_instrument_spec_(p.symbol);
+        if (!instrument_spec.maintenance_margin_enabled) {
+            p.maintenance_margin = 0.0;
+            continue;
+        }
+        p.maintenance_margin = owner.maintenance_margin_for_notional_(p.notional);
+    }
+}
+
+void Account::RiskEngine::UpdateUnrealizedForSymbol(Account& owner, const std::string& symbol, double mark_price)
+{
+    owner.update_unrealized_for_symbol_(symbol, mark_price);
+}
+
+void Account::RiskEngine::ApplyPerpLiquidation(Account& owner,
+    double taker_fee,
+    bool& open_orders_changed,
+    bool& positions_changed)
+{
+    owner.apply_perp_liquidation_(taker_fee, open_orders_changed, positions_changed);
+}
+
+void Account::FillEventCollector::CaptureLiquidationFill(Account& owner,
+    const Order& liq_order,
+    const LiquidationFillInput& in)
+{
+    FillEvent fill{};
+    fill.order_id = liq_order.id;
+    fill.symbol = liq_order.symbol;
+    fill.side = liq_order.side;
+    fill.position_side = liq_order.position_side;
+    fill.reduce_only = liq_order.reduce_only;
+    fill.close_position = liq_order.close_position;
+    fill.quote_order_qty = liq_order.quote_order_qty;
+    fill.order_qty = liq_order.quantity;
+    fill.order_price = liq_order.price;
+    fill.exec_qty = in.close_qty;
+    fill.exec_price = in.liq_price;
+    fill.remaining_qty = 0.0;
+    fill.is_taker = true;
+    fill.fee = in.fee;
+    fill.fee_rate = in.fee_rate;
+    fill.closing_position_id = liq_order.closing_position_id;
+    fill.instrument_type = liq_order.instrument_type;
+    const double mark = owner.get_last_mark_price_(fill.symbol);
+    if (mark > 0.0) {
+        RiskEngine::UpdateUnrealizedForSymbol(owner, fill.symbol, mark);
+    }
+    owner.mark_balance_dirty_();
+    fill.perp_balance_snapshot = owner.get_perp_balance();
+    fill.spot_balance_snapshot = owner.get_spot_balance();
+    fill.total_cash_balance_snapshot = owner.get_total_cash_balance();
+    fill.balance_snapshot = fill.perp_balance_snapshot;
+    fill.positions_snapshot = owner.positions_;
+    owner.fill_events_.push_back(std::move(fill));
+}
+
 void Account::update_unrealized_for_symbol_(const std::string& symbol, double mark_price)
 {
     auto it_idx = position_indices_by_symbol_.find(symbol);
@@ -180,35 +256,12 @@ void Account::apply_perp_liquidation_(double taker_fee, bool& open_orders_change
         liquidation_leftover.clear();
         processClosingOrder(liq_ord, close_qty, liq_price, fee, liquidation_leftover);
 
-        FillEvent fill{};
-        fill.order_id = liq_ord.id;
-        fill.symbol = liq_ord.symbol;
-        fill.side = liq_ord.side;
-        fill.position_side = liq_ord.position_side;
-        fill.reduce_only = liq_ord.reduce_only;
-        fill.close_position = liq_ord.close_position;
-        fill.quote_order_qty = liq_ord.quote_order_qty;
-        fill.order_qty = liq_ord.quantity;
-        fill.order_price = liq_ord.price;
-        fill.exec_qty = close_qty;
-        fill.exec_price = liq_price;
-        fill.remaining_qty = 0.0;
-        fill.is_taker = true;
-        fill.fee = fee;
-        fill.fee_rate = taker_fee;
-        fill.closing_position_id = liq_ord.closing_position_id;
-        fill.instrument_type = liq_ord.instrument_type;
-        const double mark = get_last_mark_price_(fill.symbol);
-        if (mark > 0.0) {
-            update_unrealized_for_symbol_(fill.symbol, mark);
-        }
-        mark_balance_dirty_();
-        fill.perp_balance_snapshot = get_perp_balance();
-        fill.spot_balance_snapshot = get_spot_balance();
-        fill.total_cash_balance_snapshot = get_total_cash_balance();
-        fill.balance_snapshot = fill.perp_balance_snapshot;
-        fill.positions_snapshot = positions_;
-        fill_events_.push_back(std::move(fill));
+        FillEventCollector::LiquidationFillInput fill_in{};
+        fill_in.close_qty = close_qty;
+        fill_in.liq_price = liq_price;
+        fill_in.fee = fee;
+        fill_in.fee_rate = taker_fee;
+        FillEventCollector::CaptureLiquidationFill(*this, liq_ord, fill_in);
 
         bool need_fallback_tiny_cleanup = false;
         auto it_pos_idx = position_index_by_id_.find(liq_ord.closing_position_id);
