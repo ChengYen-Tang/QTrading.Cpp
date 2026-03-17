@@ -1,9 +1,12 @@
 add_executable(QTrading.Infra.Tests
+  InfraLogFeatherRoundTripTests.cpp
+  InfraLogTests.cpp
   Exchanges/BinanceSimulator/DataProvider/MarketDataTests.cpp
   Exchanges/BinanceSimulator/DataProvider/FundingRateDataTests.cpp
   Exchanges/BinanceSimulator/Account/AccountTests.cpp
   Exchanges/BinanceSimulator/Account/AccountPolicyInjectionTests.cpp
   Exchanges/BinanceSimulator/Calibration/CalibrationMetricsTests.cpp
+  Exchanges/BinanceSimulator/BinanceExchangeLogTests.cpp
   Exchanges/BinanceSimulator/BinanceExchangeTests.cpp
 )
 
@@ -11,6 +14,7 @@ target_include_directories(QTrading.Infra.Tests
   PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../include
     ${CMAKE_CURRENT_SOURCE_DIR}/../../QTrading.Logging/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../QTrading.Utils/include
 )
 
 target_link_libraries(QTrading.Infra.Tests
