@@ -590,6 +590,91 @@ TEST_F(BinanceExchangeFixture, NewCorePrimaryFallsBackToLegacyPath)
     EXPECT_FALSE(diag->reason.empty());
 }
 
+TEST_F(BinanceExchangeFixture, EventPublishModeDefaultsToLegacyDirect)
+{
+    writeCsv("btc.csv", {
+        {0,100,100,100,100,1000, 30000,100,1,0,0}
+        });
+
+    BinanceExchange ex({ {"BTCUSDT",(tmpDir / "btc.csv").string()} }, logger, /*balance*/ 1000.0);
+    EXPECT_EQ(ex.event_publish_mode(), BinanceExchange::EventPublishMode::LegacyDirect);
+    EXPECT_FALSE(ex.consume_last_event_publish_diagnostic().has_value());
+}
+
+TEST_F(BinanceExchangeFixture, InvalidEventPublishModeFallsBackToLegacyDirect)
+{
+    writeCsv("btc.csv", {
+        {0,100,100,100,100,1000, 30000,100,1,0,0}
+        });
+
+    BinanceExchange ex({ {"BTCUSDT",(tmpDir / "btc.csv").string()} }, logger, /*balance*/ 1000.0);
+    ex.set_event_publish_mode(static_cast<BinanceExchange::EventPublishMode>(99));
+    EXPECT_EQ(ex.event_publish_mode(), BinanceExchange::EventPublishMode::LegacyDirect);
+}
+
+TEST_F(BinanceExchangeFixture, EventPublishDualCompareRecordsDiagnostic)
+{
+    writeCsv("btc.csv", {
+        {0,100,100,100,100,1000, 30000,100,1,0,0}
+        });
+
+    BinanceExchange ex({ {"BTCUSDT",(tmpDir / "btc.csv").string()} }, logger, /*balance*/ 1000.0);
+    ex.set_event_publish_mode(BinanceExchange::EventPublishMode::DualPublishCompare);
+
+    ASSERT_TRUE(ex.step());
+    auto diag = ex.consume_last_event_publish_diagnostic();
+    ASSERT_TRUE(diag.has_value());
+    EXPECT_EQ(diag->mode, BinanceExchange::EventPublishMode::DualPublishCompare);
+    EXPECT_TRUE(diag->compared);
+    EXPECT_TRUE(diag->matched);
+    EXPECT_TRUE(diag->reason.empty());
+}
+
+TEST_F(BinanceExchangeFixture, DualPublishCompareDeterministicReplayProducesStableDiagnostics)
+{
+    writeCsv("btc.csv", {
+        {     0,100,101,99,100,1000, 30000,100,1,0,0},
+        { 60000,101,102,100,101,1100, 90000,110,1,0,0},
+        {120000,102,103,101,102,1200,150000,120,1,0,0}
+        });
+
+    auto run_once = [&]() {
+        BinanceExchange ex(
+            { {"BTCUSDT",(tmpDir / "btc.csv").string()} },
+            logger,
+            /*balance*/ 1000.0,
+            /*vip_level*/ 0,
+            /*run_id*/ 123456789ull);
+        ex.set_event_publish_mode(BinanceExchange::EventPublishMode::DualPublishCompare);
+
+        std::vector<uint64_t> signatures;
+        while (ex.step()) {
+            auto diag = ex.consume_last_event_publish_diagnostic();
+            EXPECT_TRUE(diag.has_value());
+            if (!diag.has_value()) {
+                break;
+            }
+            EXPECT_TRUE(diag->compared);
+            EXPECT_TRUE(diag->matched);
+            EXPECT_TRUE(diag->reason.empty());
+
+            const uint64_t sig =
+                diag->legacy.payload_fingerprint ^
+                (diag->legacy.market_event_count << 1) ^
+                (diag->legacy.funding_event_count << 9) ^
+                (diag->legacy.account_snapshot_row_count << 17) ^
+                (diag->legacy.position_snapshot_row_count << 25) ^
+                (diag->legacy.order_snapshot_row_count << 33);
+            signatures.push_back(sig);
+        }
+        return signatures;
+    };
+
+    const auto first = run_once();
+    const auto second = run_once();
+    EXPECT_EQ(first, second);
+}
+
 TEST_F(BinanceExchangeFixture, FundingAppliedAndDeduped)
 {
     writeCsv("btc.csv", {

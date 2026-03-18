@@ -119,7 +119,6 @@ int32_t ledger_from_instrument_type(QTrading::Dto::Trading::InstrumentType type)
     return static_cast<int32_t>(Ledger::Unknown);
 }
 
-
 std::vector<BinanceExchange::SymbolDataset> to_datasets(
     const std::vector<std::pair<std::string, std::string>>& symbolCsv)
 {
@@ -192,12 +191,12 @@ size_t lower_bound_funding_ts(const FundingRateData& data, uint64_t ts)
 class BinanceExchange::IEventPublisher {
 public:
     virtual ~IEventPublisher() = default;
-    virtual void publish(LogTask&& task) = 0;
+    virtual void publish(EventEnvelope&& task) = 0;
 };
 
 class BinanceExchange::NullEventPublisher final : public BinanceExchange::IEventPublisher {
 public:
-    void publish(LogTask&&) override {}
+    void publish(EventEnvelope&&) override {}
 };
 
 class BinanceExchange::LegacyLogAdapter final {
@@ -205,27 +204,9 @@ public:
     explicit LegacyLogAdapter(BinanceExchange& owner)
         : owner_(owner) {}
 
-    void publish(LogTask&& task)
+    void publish(EventEnvelope&& task)
     {
-        owner_.log_status_snapshot(
-            task.perp_balance,
-            task.spot_balance,
-            task.total_cash_balance,
-            task.spot_inventory_value,
-            task.positions,
-            task.orders,
-            task.cur_ver);
-        owner_.log_events(task.ctx,
-            task.market_events,
-            task.positions,
-            task.orders,
-            task.funding_events,
-            task.perp_balance,
-            task.spot_balance,
-            task.total_cash_balance,
-            task.spot_inventory_value,
-            std::move(task.fill_events),
-            task.cur_ver);
+        owner_.emit_legacy_rows_from_event_envelope_(std::move(task));
     }
 
 private:
@@ -237,7 +218,7 @@ public:
     explicit LegacyEventPublisher(BinanceExchange& owner)
         : adapter_(owner) {}
 
-    void publish(LogTask&& task) override
+    void publish(EventEnvelope&& task) override
     {
         adapter_.publish(std::move(task));
     }
@@ -266,7 +247,7 @@ public:
         }
     }
 
-    void publish(LogTask&& task) override
+    void publish(EventEnvelope&& task) override
     {
         if (!downstream_) {
             return;
@@ -282,7 +263,7 @@ private:
     void worker_()
     {
         while (true) {
-            LogTask task;
+            EventEnvelope task;
             {
                 std::unique_lock<std::mutex> lk(mtx_);
                 cv_.wait(lk, [this]() {
@@ -301,9 +282,45 @@ private:
     std::unique_ptr<BinanceExchange::IEventPublisher> downstream_;
     std::mutex mtx_;
     std::condition_variable cv_;
-    std::deque<LogTask> queue_;
+    std::deque<EventEnvelope> queue_;
     std::thread worker_thread_;
     std::atomic<bool> stop_{ false };
+};
+
+class BinanceExchange::EventCaptureBoundary final {
+public:
+    struct Input {
+        QTrading::Infra::Logging::StepLogContext ctx{};
+        std::vector<DomainMarketEvent> market_events;
+        std::vector<DomainFundingEvent> funding_events;
+        AccountSnapshotEvent account_snapshot{};
+        PositionSnapshotEvent position_snapshot{};
+        OrderSnapshotEvent order_snapshot{};
+        std::vector<DomainFillEvent> fill_events;
+        uint64_t cur_ver{ 0 };
+    };
+
+    static EventEnvelope Build(Input&& input)
+    {
+        EventEnvelope envelope{};
+        envelope.ctx = input.ctx;
+        envelope.market_events = std::move(input.market_events);
+        envelope.funding_events = std::move(input.funding_events);
+        envelope.account_snapshot = input.account_snapshot;
+        envelope.position_snapshot = std::move(input.position_snapshot);
+        envelope.order_snapshot = std::move(input.order_snapshot);
+        envelope.account_events.reserve(input.fill_events.size());
+        envelope.position_events.reserve(input.fill_events.size());
+        envelope.order_events.reserve(input.fill_events.size());
+        for (const auto& fill : input.fill_events) {
+            envelope.account_events.push_back(AccountDomainEvent{ fill });
+            envelope.position_events.push_back(PositionDomainEvent{ fill });
+            envelope.order_events.push_back(OrderDomainEvent{ fill });
+        }
+        envelope.fill_events = std::move(input.fill_events);
+        envelope.cur_ver = input.cur_ver;
+        return envelope;
+    }
 };
 
 class BinanceExchange::MarketReplayEngine final {
@@ -637,12 +654,49 @@ BinanceExchange::~BinanceExchange()
 {
 }
 
-void BinanceExchange::publish_log_task_(LogTask&& task)
+void BinanceExchange::publish_log_task_(EventEnvelope&& task)
 {
     if (!event_publisher_) {
         return;
     }
+    const EventPublishMode mode = event_publish_mode_.load(std::memory_order_acquire);
+    if (mode == EventPublishMode::DualPublishCompare) {
+        EventPublishCompareDiagnostic diag{};
+        diag.mode = mode;
+        diag.compared = true;
+        diag.legacy = build_event_publish_compare_snapshot_(task);
+        diag.candidate = build_event_publish_compare_snapshot_(task);
+        const auto mismatch = compare_event_publish_snapshots_(diag.legacy, diag.candidate);
+        diag.matched = !mismatch.has_value();
+        if (mismatch.has_value()) {
+            diag.reason = *mismatch;
+        }
+        record_event_publish_diagnostic_(std::move(diag));
+    }
     event_publisher_->publish(std::move(task));
+}
+
+void BinanceExchange::emit_legacy_rows_from_event_envelope_(EventEnvelope&& envelope)
+{
+    log_status_snapshot(
+        envelope.account_snapshot.perp_balance,
+        envelope.account_snapshot.spot_balance,
+        envelope.account_snapshot.total_cash_balance,
+        envelope.account_snapshot.spot_inventory_value,
+        envelope.position_snapshot.positions,
+        envelope.order_snapshot.orders,
+        envelope.cur_ver);
+    log_events(envelope.ctx,
+        envelope.market_events,
+        envelope.position_snapshot.positions,
+        envelope.order_snapshot.orders,
+        envelope.funding_events,
+        envelope.account_snapshot.perp_balance,
+        envelope.account_snapshot.spot_balance,
+        envelope.account_snapshot.total_cash_balance,
+        envelope.account_snapshot.spot_inventory_value,
+        std::move(envelope.fill_events),
+        envelope.cur_ver);
 }
 
 QTrading::Dto::Account::BalanceSnapshot BinanceExchange::AccountApi::get_spot_balance() const
@@ -710,6 +764,38 @@ std::optional<BinanceExchange::StepCompareDiagnostic> BinanceExchange::consume_l
     std::lock_guard<std::mutex> lk(compare_diag_mtx_);
     auto out = std::move(last_compare_diagnostic_);
     last_compare_diagnostic_.reset();
+    return out;
+}
+
+void BinanceExchange::set_event_publish_mode(EventPublishMode mode)
+{
+    EventPublishMode effective_mode = EventPublishMode::LegacyDirect;
+    switch (mode) {
+    case EventPublishMode::LegacyDirect:
+    case EventPublishMode::DomainEventAdapter:
+    case EventPublishMode::DualPublishCompare:
+        effective_mode = mode;
+        break;
+    default:
+        effective_mode = EventPublishMode::LegacyDirect;
+        break;
+    }
+    event_publish_mode_.store(effective_mode, std::memory_order_release);
+    std::lock_guard<std::mutex> lk(event_publish_diag_mtx_);
+    last_event_publish_diagnostic_.reset();
+}
+
+BinanceExchange::EventPublishMode BinanceExchange::event_publish_mode() const
+{
+    return event_publish_mode_.load(std::memory_order_acquire);
+}
+
+std::optional<BinanceExchange::EventPublishCompareDiagnostic>
+BinanceExchange::consume_last_event_publish_diagnostic()
+{
+    std::lock_guard<std::mutex> lk(event_publish_diag_mtx_);
+    auto out = std::move(last_event_publish_diagnostic_);
+    last_event_publish_diagnostic_.reset();
     return out;
 }
 
@@ -864,6 +950,165 @@ void BinanceExchange::record_compare_diagnostic_(StepCompareDiagnostic diag)
     last_compare_diagnostic_ = std::move(diag);
 }
 
+BinanceExchange::EventPublishCompareSnapshot
+BinanceExchange::build_event_publish_compare_snapshot_(const EventEnvelope& envelope) const
+{
+    auto hash_combine = [](uint64_t seed, uint64_t v) {
+        constexpr uint64_t kFnvPrime = 1099511628211ull;
+        seed ^= v;
+        seed *= kFnvPrime;
+        return seed;
+    };
+
+    EventPublishCompareSnapshot snapshot{};
+    snapshot.run_id = envelope.ctx.run_id;
+    snapshot.step_seq = envelope.ctx.step_seq;
+    snapshot.ts_exchange = envelope.ctx.ts_exchange;
+    snapshot.market_event_count = static_cast<uint64_t>(envelope.market_events.size());
+    snapshot.funding_event_count = static_cast<uint64_t>(envelope.funding_events.size());
+    snapshot.fill_event_count = static_cast<uint64_t>(envelope.fill_events.size());
+    snapshot.account_event_count = static_cast<uint64_t>(envelope.account_events.size());
+    snapshot.position_event_count = static_cast<uint64_t>(envelope.position_events.size());
+    snapshot.order_event_count = static_cast<uint64_t>(envelope.order_events.size());
+    snapshot.account_snapshot_row_count = 1;
+    snapshot.position_snapshot_row_count = envelope.position_snapshot.positions
+        ? static_cast<uint64_t>(envelope.position_snapshot.positions->size())
+        : 0;
+    snapshot.order_snapshot_row_count = envelope.order_snapshot.orders
+        ? static_cast<uint64_t>(envelope.order_snapshot.orders->size())
+        : 0;
+    snapshot.account_module_id = static_cast<int32_t>(account_module_id_);
+    snapshot.position_module_id = static_cast<int32_t>(position_module_id_);
+    snapshot.order_module_id = static_cast<int32_t>(order_module_id_);
+    snapshot.account_event_module_id = static_cast<int32_t>(account_event_module_id_);
+    snapshot.position_event_module_id = static_cast<int32_t>(position_event_module_id_);
+    snapshot.order_event_module_id = static_cast<int32_t>(order_event_module_id_);
+    snapshot.market_event_module_id = static_cast<int32_t>(market_event_module_id_);
+    snapshot.funding_event_module_id = static_cast<int32_t>(funding_event_module_id_);
+    snapshot.module_order = {
+        snapshot.account_module_id,
+        snapshot.position_module_id,
+        snapshot.order_module_id,
+        snapshot.market_event_module_id,
+        snapshot.funding_event_module_id,
+        snapshot.account_event_module_id,
+        snapshot.position_event_module_id,
+        snapshot.order_event_module_id,
+    };
+    snapshot.has_position_snapshot = static_cast<bool>(envelope.position_snapshot.positions);
+    snapshot.has_order_snapshot = static_cast<bool>(envelope.order_snapshot.orders);
+
+    uint64_t fp = 1469598103934665603ull;
+    fp = hash_combine(fp, snapshot.run_id);
+    fp = hash_combine(fp, snapshot.step_seq);
+    fp = hash_combine(fp, snapshot.ts_exchange);
+    fp = hash_combine(fp, snapshot.market_event_count);
+    fp = hash_combine(fp, snapshot.funding_event_count);
+    fp = hash_combine(fp, snapshot.fill_event_count);
+    fp = hash_combine(fp, snapshot.account_event_count);
+    fp = hash_combine(fp, snapshot.position_event_count);
+    fp = hash_combine(fp, snapshot.order_event_count);
+    fp = hash_combine(fp, snapshot.account_snapshot_row_count);
+    fp = hash_combine(fp, snapshot.position_snapshot_row_count);
+    fp = hash_combine(fp, snapshot.order_snapshot_row_count);
+    fp = hash_combine(fp, static_cast<uint64_t>(snapshot.has_position_snapshot ? 1 : 0));
+    fp = hash_combine(fp, static_cast<uint64_t>(snapshot.has_order_snapshot ? 1 : 0));
+    fp = hash_combine(fp, static_cast<uint64_t>(envelope.account_snapshot.perp_balance.WalletBalance * 1000000.0));
+    fp = hash_combine(fp, static_cast<uint64_t>(envelope.account_snapshot.spot_balance.WalletBalance * 1000000.0));
+    fp = hash_combine(fp, static_cast<uint64_t>(envelope.account_snapshot.total_cash_balance * 1000000.0));
+    fp = hash_combine(fp, static_cast<uint64_t>(envelope.account_snapshot.spot_inventory_value * 1000000.0));
+    snapshot.payload_fingerprint = fp;
+    return snapshot;
+}
+
+std::optional<std::string> BinanceExchange::compare_event_publish_snapshots_(
+    const EventPublishCompareSnapshot& legacy_snapshot,
+    const EventPublishCompareSnapshot& candidate_snapshot) const
+{
+    if (legacy_snapshot.run_id != candidate_snapshot.run_id) {
+        return std::string("module=Envelope index=0 reason=run_id differs");
+    }
+    if (legacy_snapshot.step_seq != candidate_snapshot.step_seq) {
+        return std::string("module=Envelope index=0 reason=step_seq differs");
+    }
+    if (legacy_snapshot.ts_exchange != candidate_snapshot.ts_exchange) {
+        return std::string("module=Envelope index=0 reason=ts_exchange differs");
+    }
+    if (legacy_snapshot.module_order != candidate_snapshot.module_order) {
+        return std::string("module=ModuleOrder index=0 reason=ordering differs");
+    }
+    if (legacy_snapshot.account_module_id != candidate_snapshot.account_module_id) {
+        return std::string("module=Account index=0 reason=module_id differs");
+    }
+    if (legacy_snapshot.position_module_id != candidate_snapshot.position_module_id) {
+        return std::string("module=Position index=0 reason=module_id differs");
+    }
+    if (legacy_snapshot.order_module_id != candidate_snapshot.order_module_id) {
+        return std::string("module=Order index=0 reason=module_id differs");
+    }
+    if (legacy_snapshot.market_event_module_id != candidate_snapshot.market_event_module_id) {
+        return std::string("module=MarketEvent index=0 reason=module_id differs");
+    }
+    if (legacy_snapshot.funding_event_module_id != candidate_snapshot.funding_event_module_id) {
+        return std::string("module=FundingEvent index=0 reason=module_id differs");
+    }
+    if (legacy_snapshot.account_event_module_id != candidate_snapshot.account_event_module_id) {
+        return std::string("module=AccountEvent index=0 reason=module_id differs");
+    }
+    if (legacy_snapshot.position_event_module_id != candidate_snapshot.position_event_module_id) {
+        return std::string("module=PositionEvent index=0 reason=module_id differs");
+    }
+    if (legacy_snapshot.order_event_module_id != candidate_snapshot.order_event_module_id) {
+        return std::string("module=OrderEvent index=0 reason=module_id differs");
+    }
+    if (legacy_snapshot.account_snapshot_row_count != candidate_snapshot.account_snapshot_row_count) {
+        return std::string("module=Account index=0 reason=row_count differs");
+    }
+    if (legacy_snapshot.position_snapshot_row_count != candidate_snapshot.position_snapshot_row_count) {
+        return std::string("module=Position index=0 reason=row_count differs");
+    }
+    if (legacy_snapshot.order_snapshot_row_count != candidate_snapshot.order_snapshot_row_count) {
+        return std::string("module=Order index=0 reason=row_count differs");
+    }
+    if (legacy_snapshot.market_event_count != candidate_snapshot.market_event_count) {
+        return std::string("module=MarketEvent index=0 reason=row_count differs");
+    }
+    if (legacy_snapshot.funding_event_count != candidate_snapshot.funding_event_count) {
+        return std::string("module=FundingEvent index=0 reason=row_count differs");
+    }
+    if (legacy_snapshot.account_event_count != candidate_snapshot.account_event_count) {
+        return std::string("module=AccountEvent index=0 reason=row_count differs");
+    }
+    if (legacy_snapshot.position_event_count != candidate_snapshot.position_event_count) {
+        return std::string("module=PositionEvent index=0 reason=row_count differs");
+    }
+    if (legacy_snapshot.order_event_count != candidate_snapshot.order_event_count) {
+        return std::string("module=OrderEvent index=0 reason=row_count differs");
+    }
+    if (legacy_snapshot.fill_event_count != candidate_snapshot.fill_event_count) {
+        return std::string("module=Fill index=0 reason=row_count differs");
+    }
+    if (legacy_snapshot.has_position_snapshot != candidate_snapshot.has_position_snapshot) {
+        return std::string("module=Position index=0 reason=has_position_snapshot differs");
+    }
+    if (legacy_snapshot.has_order_snapshot != candidate_snapshot.has_order_snapshot) {
+        return std::string("module=Order index=0 reason=has_order_snapshot differs");
+    }
+    if (legacy_snapshot.payload_fingerprint != candidate_snapshot.payload_fingerprint) {
+        return std::string("module=Payload index=0 reason=payload_fingerprint differs");
+    }
+    return std::nullopt;
+}
+
+void BinanceExchange::record_event_publish_diagnostic_(EventPublishCompareDiagnostic diag)
+{
+    if (!diag.reason.empty()) {
+        QTR_TRACE("ex", diag.reason);
+    }
+    std::lock_guard<std::mutex> lk(event_publish_diag_mtx_);
+    last_event_publish_diagnostic_ = std::move(diag);
+}
+
 bool BinanceExchange::ExchangeSession::Run()
 {
     uint64_t ts;
@@ -882,15 +1127,15 @@ bool BinanceExchange::ExchangeSession::Run()
     QTrading::Dto::Account::BalanceSnapshot spot_balance{};
     double total_cash_balance = 0.0;
     double spot_inventory_value = 0.0;
-    std::vector<Account::FillEvent> fill_events;
-    std::vector<FundingEventDto> funding_events;
+    std::vector<DomainFillEvent> fill_events;
+    std::vector<DomainFundingEvent> funding_events;
     PositionSnapshotPtr curP;
     OrderSnapshotPtr curO;
     uint64_t cur_ver = 0;
     FundingApplyTiming apply_timing = FundingApplyTiming::BeforeMatching;
     QTrading::Infra::Logging::StepLogContext step_log_ctx{};
     MultiKlinePtr dto;
-    std::vector<LogTask::DomainMarketEvent> market_events;
+    std::vector<DomainMarketEvent> market_events;
     bool has_trade_kline_for_update = false;
 
     {
@@ -964,7 +1209,7 @@ bool BinanceExchange::ExchangeSession::Run()
         uint32_t stress_symbols = 0;
         SimulatorRiskOverlayEngine::BeginStep(owner_);
         for (size_t i = 0; i < owner_.symbols_.size(); ++i) {
-            LogTask::DomainMarketEvent market_event;
+            DomainMarketEvent market_event;
             market_event.symbol = owner_.symbols_[i];
             if (i < dto->trade_klines_by_id.size() && dto->trade_klines_by_id[i].has_value()) {
                 market_event.has_kline = true;
@@ -1115,19 +1360,19 @@ bool BinanceExchange::ExchangeSession::Run()
     }
 
     if (owner_.logger) {
-        LogTask task;
-        task.ctx = step_log_ctx;
-        task.market_events = std::move(market_events);
-        task.positions = curP;
-        task.orders = curO;
-        task.funding_events = std::move(funding_events);
-        task.perp_balance = perp_balance;
-        task.spot_balance = spot_balance;
-        task.total_cash_balance = total_cash_balance;
-        task.spot_inventory_value = spot_inventory_value;
-        task.fill_events = std::move(fill_events);
-        task.cur_ver = cur_ver;
-        owner_.publish_log_task_(std::move(task));
+        EventCaptureBoundary::Input capture_input{};
+        capture_input.ctx = step_log_ctx;
+        capture_input.market_events = std::move(market_events);
+        capture_input.funding_events = std::move(funding_events);
+        capture_input.account_snapshot.perp_balance = perp_balance;
+        capture_input.account_snapshot.spot_balance = spot_balance;
+        capture_input.account_snapshot.total_cash_balance = total_cash_balance;
+        capture_input.account_snapshot.spot_inventory_value = spot_inventory_value;
+        capture_input.position_snapshot.positions = curP;
+        capture_input.order_snapshot.orders = curO;
+        capture_input.fill_events = std::move(fill_events);
+        capture_input.cur_ver = cur_ver;
+        owner_.publish_log_task_(EventCaptureBoundary::Build(std::move(capture_input)));
     }
 
     if (cur_ver != owner_.last_account_version_) {
@@ -1586,15 +1831,15 @@ void BinanceExchange::log_status_snapshot(const QTrading::Dto::Account::BalanceS
 }
 
 void BinanceExchange::log_events(QTrading::Infra::Logging::StepLogContext ctx,
-    const std::vector<LogTask::DomainMarketEvent>& market_events,
+    const std::vector<DomainMarketEvent>& market_events,
     const PositionSnapshotPtr& cur_positions,
     const OrderSnapshotPtr& cur_orders,
-    const std::vector<FundingEventDto>& funding_events,
+    const std::vector<DomainFundingEvent>& funding_events,
     const QTrading::Dto::Account::BalanceSnapshot& perp_balance,
     const QTrading::Dto::Account::BalanceSnapshot& spot_balance,
     double total_cash_balance,
     double spot_inventory_value,
-    std::vector<Account::FillEvent>&& fill_events,
+    std::vector<DomainFillEvent>&& fill_events,
     uint64_t cur_ver)
 {
     if (!logger) {
@@ -1650,7 +1895,23 @@ void BinanceExchange::log_events(QTrading::Infra::Logging::StepLogContext ctx,
     if (funding_event_module_id_ != Logger::kInvalidModuleId && !funding_events.empty()) {
         funding_event_buffer_.reserve(funding_events.size());
         for (const auto& e : funding_events) {
-            FundingEventDto ev = e;
+            FundingEventDto ev{};
+            ev.run_id = e.run_id;
+            ev.step_seq = e.step_seq;
+            ev.event_seq = e.event_seq;
+            ev.ts_local = e.ts_local;
+            ev.symbol = e.symbol;
+            ev.instrument_type = e.instrument_type;
+            ev.funding_time = e.funding_time;
+            ev.rate = e.rate;
+            ev.has_mark_price = e.has_mark_price;
+            ev.mark_price = e.mark_price;
+            ev.mark_price_source = e.mark_price_source;
+            ev.skip_reason = e.skip_reason;
+            ev.position_id = e.position_id;
+            ev.is_long = e.is_long;
+            ev.quantity = e.quantity;
+            ev.funding = e.funding;
             funding_event_buffer_.push(std::move(ev));
         }
         LogBatchPooled(logger.get(), funding_event_module_id_, funding_event_buffer_.events);
@@ -1958,10 +2219,33 @@ void BinanceExchange::log_events(QTrading::Infra::Logging::StepLogContext ctx,
 void BinanceExchange::collect_funding_events(uint64_t ts, std::vector<FundingEventDto>& out)
 {
     std::scoped_lock<std::mutex, std::mutex> lk(account_mtx_, state_mtx_);
-    collect_funding_events_unlocked_(ts, out);
+    std::vector<DomainFundingEvent> domain_events;
+    collect_funding_events_unlocked_(ts, domain_events);
+    out.clear();
+    out.reserve(domain_events.size());
+    for (const auto& e : domain_events) {
+        FundingEventDto legacy{};
+        legacy.run_id = e.run_id;
+        legacy.step_seq = e.step_seq;
+        legacy.event_seq = e.event_seq;
+        legacy.ts_local = e.ts_local;
+        legacy.symbol = e.symbol;
+        legacy.instrument_type = e.instrument_type;
+        legacy.funding_time = e.funding_time;
+        legacy.rate = e.rate;
+        legacy.has_mark_price = e.has_mark_price;
+        legacy.mark_price = e.mark_price;
+        legacy.mark_price_source = e.mark_price_source;
+        legacy.skip_reason = e.skip_reason;
+        legacy.position_id = e.position_id;
+        legacy.is_long = e.is_long;
+        legacy.quantity = e.quantity;
+        legacy.funding = e.funding;
+        out.emplace_back(std::move(legacy));
+    }
 }
 
-void BinanceExchange::collect_funding_events_unlocked_(uint64_t ts, std::vector<FundingEventDto>& out)
+void BinanceExchange::collect_funding_events_unlocked_(uint64_t ts, std::vector<DomainFundingEvent>& out)
 {
     out.clear();
     if (funding_md_.empty()) {
@@ -2010,7 +2294,7 @@ void BinanceExchange::collect_funding_events_unlocked_(uint64_t ts, std::vector<
             }
             else if (!has_price) {
                 ++funding_skipped_no_mark_total_;
-                FundingEventDto skip;
+                DomainFundingEvent skip;
                 skip.symbol = symbols_[i];
                 if (account_engine_) {
                     skip.instrument_type = static_cast<int32_t>(account_engine_->get_instrument_spec(symbols_[i]).type);
@@ -2029,7 +2313,7 @@ void BinanceExchange::collect_funding_events_unlocked_(uint64_t ts, std::vector<
             }
 
             for (const auto& r : applied) {
-                FundingEventDto e;
+                DomainFundingEvent e;
                 e.symbol = symbols_[i];
                 if (account_engine_) {
                     e.instrument_type = static_cast<int32_t>(account_engine_->get_instrument_spec(symbols_[i]).type);

@@ -13,6 +13,7 @@
 #include <atomic>
 #include <memory_resource>
 #include <utility>
+#include <array>
 
 #include "Exchanges/IExchange.h"
 #include "Data/Binance/MarketData.hpp"
@@ -232,11 +233,56 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
             StepCompareSnapshot candidate{};
         };
 
+        enum class EventPublishMode : uint8_t {
+            LegacyDirect = 0,
+            DomainEventAdapter = 1,
+            DualPublishCompare = 2,
+        };
+
+        struct EventPublishCompareSnapshot {
+            uint64_t run_id{ 0 };
+            uint64_t step_seq{ 0 };
+            uint64_t ts_exchange{ 0 };
+            uint64_t market_event_count{ 0 };
+            uint64_t funding_event_count{ 0 };
+            uint64_t fill_event_count{ 0 };
+            uint64_t account_event_count{ 0 };
+            uint64_t position_event_count{ 0 };
+            uint64_t order_event_count{ 0 };
+            uint64_t account_snapshot_row_count{ 0 };
+            uint64_t position_snapshot_row_count{ 0 };
+            uint64_t order_snapshot_row_count{ 0 };
+            int32_t account_module_id{ -1 };
+            int32_t position_module_id{ -1 };
+            int32_t order_module_id{ -1 };
+            int32_t account_event_module_id{ -1 };
+            int32_t position_event_module_id{ -1 };
+            int32_t order_event_module_id{ -1 };
+            int32_t market_event_module_id{ -1 };
+            int32_t funding_event_module_id{ -1 };
+            std::array<int32_t, 8> module_order{};
+            uint64_t payload_fingerprint{ 0 };
+            bool has_position_snapshot{ false };
+            bool has_order_snapshot{ false };
+        };
+
+        struct EventPublishCompareDiagnostic {
+            EventPublishMode mode{ EventPublishMode::LegacyDirect };
+            bool compared{ false };
+            bool matched{ false };
+            std::string reason;
+            EventPublishCompareSnapshot legacy{};
+            EventPublishCompareSnapshot candidate{};
+        };
+
         /// @copydoc IExchange::step
         bool  step() override;
         void set_core_mode(CoreMode mode);
         CoreMode core_mode() const;
         std::optional<StepCompareDiagnostic> consume_last_compare_diagnostic();
+        void set_event_publish_mode(EventPublishMode mode);
+        EventPublishMode event_publish_mode() const;
+        std::optional<EventPublishCompareDiagnostic> consume_last_event_publish_diagnostic();
 
         /// @copydoc IExchange::get_all_positions
         const std::vector<dto::Position>& get_all_positions()   const override;
@@ -412,30 +458,97 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
         QTrading::Infra::Logging::FundingEventBuffer funding_event_buffer_{ &log_event_pool_ };
         Account::MarketUpdateById market_update_by_id_{};
 
-        struct LogTask {
-            struct DomainMarketEvent {
-                std::string symbol;
-                bool has_kline{ false };
-                QTrading::Dto::Market::Binance::TradeKlineDto kline{};
-                bool has_mark_price{ false };
-                double mark_price{ 0.0 };
-                int32_t mark_price_source{ static_cast<int32_t>(ReferencePriceSource::None) };
-                bool has_index_price{ false };
-                double index_price{ 0.0 };
-                int32_t index_price_source{ static_cast<int32_t>(ReferencePriceSource::None) };
-            };
+        enum class DomainEventKind : uint8_t {
+            Market = 0,
+            Funding = 1,
+            Account = 2,
+            Position = 3,
+            Order = 4,
+            AccountSnapshot = 5,
+            PositionSnapshot = 6,
+            OrderSnapshot = 7,
+        };
 
-            QTrading::Infra::Logging::StepLogContext ctx;
-            std::vector<DomainMarketEvent> market_events;
-            PositionSnapshotPtr positions;
-            OrderSnapshotPtr orders;
-            std::vector<QTrading::Log::FileLogger::FeatherV2::FundingEventDto> funding_events;
-            QTrading::Dto::Account::BalanceSnapshot perp_balance;
-            QTrading::Dto::Account::BalanceSnapshot spot_balance;
+        struct MarketDomainEvent {
+            std::string symbol;
+            bool has_kline{ false };
+            QTrading::Dto::Market::Binance::TradeKlineDto kline{};
+            bool has_mark_price{ false };
+            double mark_price{ 0.0 };
+            int32_t mark_price_source{ static_cast<int32_t>(ReferencePriceSource::None) };
+            bool has_index_price{ false };
+            double index_price{ 0.0 };
+            int32_t index_price_source{ static_cast<int32_t>(ReferencePriceSource::None) };
+        };
+        using DomainMarketEvent = MarketDomainEvent;
+
+        struct FundingDomainEvent {
+            uint64_t run_id{ 0 };
+            uint64_t step_seq{ 0 };
+            uint64_t event_seq{ 0 };
+            uint64_t ts_local{ 0 };
+
+            std::string symbol;
+            int32_t instrument_type{ -1 };
+            uint64_t funding_time{ 0 };
+            double rate{ 0.0 };
+            bool has_mark_price{ false };
+            double mark_price{ 0.0 };
+            int32_t mark_price_source{ static_cast<int32_t>(ReferencePriceSource::None) };
+            int32_t skip_reason{ 0 };
+            int64_t position_id{ 0 };
+            bool is_long{ false };
+            double quantity{ 0.0 };
+            double funding{ 0.0 };
+        };
+        using DomainFundingEvent = FundingDomainEvent;
+
+        using DomainFillEvent = Account::FillEvent;
+        struct AccountDomainEvent {
+            DomainFillEvent fill{};
+        };
+        struct PositionDomainEvent {
+            DomainFillEvent fill{};
+        };
+        struct OrderDomainEvent {
+            DomainFillEvent fill{};
+        };
+        struct AccountSnapshotEvent {
+            QTrading::Dto::Account::BalanceSnapshot perp_balance{};
+            QTrading::Dto::Account::BalanceSnapshot spot_balance{};
             double total_cash_balance{ 0.0 };
             double spot_inventory_value{ 0.0 };
-            std::vector<Account::FillEvent> fill_events;
+        };
+        struct PositionSnapshotEvent {
+            PositionSnapshotPtr positions;
+        };
+        struct OrderSnapshotEvent {
+            OrderSnapshotPtr orders;
+        };
+
+        struct EventEnvelope {
+            QTrading::Infra::Logging::StepLogContext ctx;
+            std::vector<MarketDomainEvent> market_events;
+            std::vector<FundingDomainEvent> funding_events;
+            std::vector<AccountDomainEvent> account_events;
+            std::vector<PositionDomainEvent> position_events;
+            std::vector<OrderDomainEvent> order_events;
+            AccountSnapshotEvent account_snapshot{};
+            PositionSnapshotEvent position_snapshot{};
+            OrderSnapshotEvent order_snapshot{};
+            std::vector<DomainFillEvent> fill_events;
             uint64_t cur_ver{ 0 };
+
+            static constexpr std::array<DomainEventKind, 8> kKinds{
+                DomainEventKind::Market,
+                DomainEventKind::Funding,
+                DomainEventKind::Account,
+                DomainEventKind::Position,
+                DomainEventKind::Order,
+                DomainEventKind::AccountSnapshot,
+                DomainEventKind::PositionSnapshot,
+                DomainEventKind::OrderSnapshot,
+            };
         };
 
         class IEventPublisher;
@@ -443,6 +556,7 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
         class LegacyEventPublisher;
         class AsyncEventPublisher;
         class NullEventPublisher;
+        class EventCaptureBoundary;
         class MarketReplayEngine;
         class StatusSnapshotBuilder;
         class SimulatorRiskOverlayEngine;
@@ -474,6 +588,9 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
         std::atomic<CoreMode> core_mode_{ CoreMode::LegacyOnly };
         mutable std::mutex compare_diag_mtx_;
         std::optional<StepCompareDiagnostic> last_compare_diagnostic_;
+        std::atomic<EventPublishMode> event_publish_mode_{ EventPublishMode::LegacyDirect };
+        mutable std::mutex event_publish_diag_mtx_;
+        std::optional<EventPublishCompareDiagnostic> last_event_publish_diagnostic_;
 
         // P2: Reusable per-step market/reference caches.
         std::vector<size_t> kline_counts_;
@@ -538,15 +655,15 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
             uint64_t cur_ver);
         /// @brief Log per-step market/account/order/position events with run/step/event sequencing.
         void log_events(QTrading::Infra::Logging::StepLogContext ctx,
-            const std::vector<LogTask::DomainMarketEvent>& market_events,
+            const std::vector<DomainMarketEvent>& market_events,
             const PositionSnapshotPtr& cur_positions,
             const OrderSnapshotPtr& cur_orders,
-            const std::vector<QTrading::Log::FileLogger::FeatherV2::FundingEventDto>& funding_events,
+            const std::vector<DomainFundingEvent>& funding_events,
             const QTrading::Dto::Account::BalanceSnapshot& perp_balance,
             const QTrading::Dto::Account::BalanceSnapshot& spot_balance,
             double total_cash_balance,
             double spot_inventory_value,
-            std::vector<Account::FillEvent>&& fill_events,
+            std::vector<DomainFillEvent>&& fill_events,
             uint64_t cur_ver);
         bool run_step_session_();
         RunStepResult dispatch_step_(CoreMode mode);
@@ -555,8 +672,15 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
             const StepCompareSnapshot& legacy_snapshot,
             const StepCompareSnapshot& candidate_snapshot) const;
         void record_compare_diagnostic_(StepCompareDiagnostic diag);
+        EventPublishCompareSnapshot build_event_publish_compare_snapshot_(
+            const EventEnvelope& envelope) const;
+        std::optional<std::string> compare_event_publish_snapshots_(
+            const EventPublishCompareSnapshot& legacy_snapshot,
+            const EventPublishCompareSnapshot& candidate_snapshot) const;
+        void record_event_publish_diagnostic_(EventPublishCompareDiagnostic diag);
+        void emit_legacy_rows_from_event_envelope_(EventEnvelope&& envelope);
 
-        void publish_log_task_(LogTask&& task);
+        void publish_log_task_(EventEnvelope&& task);
         void enqueue_deferred_order_locked_(uint64_t due_step, std::function<void(Account&, uint64_t)> fn);
         void flush_deferred_orders_locked_(uint64_t step_seq);
         void push_async_order_ack_locked_(AsyncOrderAck ack);
@@ -578,7 +702,7 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
             QTrading::Dto::Trading::PositionSide position_side,
             bool reduce_only) const;
         void collect_funding_events_unlocked_(uint64_t ts,
-            std::vector<QTrading::Log::FileLogger::FeatherV2::FundingEventDto>& out);
+            std::vector<DomainFundingEvent>& out);
         double progress_pct_unlocked_() const;
 
     public:
