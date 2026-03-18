@@ -200,8 +200,43 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
         PerpApi perp;
         AccountApi account;
 
+        enum class CoreMode : uint8_t {
+            LegacyOnly = 0,
+            NewCoreShadow = 1,
+            NewCorePrimary = 2,
+        };
+
+        struct RunStepResult {
+            bool progressed{ false };
+            bool fallback_to_legacy{ false };
+            bool compare_snapshot_ready{ false };
+        };
+
+        struct StepCompareSnapshot {
+            uint64_t ts_exchange{ 0 };
+            uint64_t step_seq{ 0 };
+            bool progressed{ false };
+            uint64_t position_count{ 0 };
+            uint64_t open_order_count{ 0 };
+            double perp_wallet_balance{ 0.0 };
+            double spot_wallet_balance{ 0.0 };
+            double total_cash_balance{ 0.0 };
+        };
+
+        struct StepCompareDiagnostic {
+            CoreMode mode{ CoreMode::LegacyOnly };
+            bool compared{ false };
+            bool matched{ false };
+            std::string reason;
+            StepCompareSnapshot legacy{};
+            StepCompareSnapshot candidate{};
+        };
+
         /// @copydoc IExchange::step
         bool  step() override;
+        void set_core_mode(CoreMode mode);
+        CoreMode core_mode() const;
+        std::optional<StepCompareDiagnostic> consume_last_compare_diagnostic();
 
         /// @copydoc IExchange::get_all_positions
         const std::vector<dto::Position>& get_all_positions()   const override;
@@ -411,6 +446,9 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
         class MarketReplayEngine;
         class StatusSnapshotBuilder;
         class SimulatorRiskOverlayEngine;
+        class CoreDispatchFacade;
+        class LegacyCoreSessionAdapter;
+        class NewCoreSessionAdapter;
         class ExchangeSession;
         std::unique_ptr<IEventPublisher> event_publisher_;
 
@@ -433,6 +471,9 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
         uint64_t last_account_version_{ 0 };
         uint64_t last_logged_version_{ static_cast<uint64_t>(-1) };
         uint64_t last_step_ts_{ 0 };
+        std::atomic<CoreMode> core_mode_{ CoreMode::LegacyOnly };
+        mutable std::mutex compare_diag_mtx_;
+        std::optional<StepCompareDiagnostic> last_compare_diagnostic_;
 
         // P2: Reusable per-step market/reference caches.
         std::vector<size_t> kline_counts_;
@@ -508,6 +549,12 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
             std::vector<Account::FillEvent>&& fill_events,
             uint64_t cur_ver);
         bool run_step_session_();
+        RunStepResult dispatch_step_(CoreMode mode);
+        StepCompareSnapshot build_step_compare_snapshot_(const RunStepResult& result) const;
+        std::optional<std::string> compare_step_snapshots_(
+            const StepCompareSnapshot& legacy_snapshot,
+            const StepCompareSnapshot& candidate_snapshot) const;
+        void record_compare_diagnostic_(StepCompareDiagnostic diag);
 
         void publish_log_task_(LogTask&& task);
         void enqueue_deferred_order_locked_(uint64_t due_step, std::function<void(Account&, uint64_t)> fn);

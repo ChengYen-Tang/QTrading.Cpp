@@ -526,6 +526,70 @@ TEST_F(BinanceExchangeFixture, AccountFacadeTransfersRespectAvailability)
     EXPECT_FALSE(ex.account.transfer_spot_to_perp(300.0));
 }
 
+TEST_F(BinanceExchangeFixture, CoreModeDefaultsToLegacyOnly)
+{
+    writeCsv("btc.csv", {
+        {0,100,100,100,100,1000, 30000,100,1,0,0}
+        });
+
+    BinanceExchange ex({ {"BTCUSDT",(tmpDir / "btc.csv").string()} }, logger, /*balance*/ 1000.0);
+    EXPECT_EQ(ex.core_mode(), BinanceExchange::CoreMode::LegacyOnly);
+    EXPECT_FALSE(ex.consume_last_compare_diagnostic().has_value());
+}
+
+TEST_F(BinanceExchangeFixture, InvalidCoreModeFallsBackToLegacyOnly)
+{
+    writeCsv("btc.csv", {
+        {0,100,100,100,100,1000, 30000,100,1,0,0}
+        });
+
+    BinanceExchange ex({ {"BTCUSDT",(tmpDir / "btc.csv").string()} }, logger, /*balance*/ 1000.0);
+    ex.set_core_mode(static_cast<BinanceExchange::CoreMode>(99));
+    EXPECT_EQ(ex.core_mode(), BinanceExchange::CoreMode::LegacyOnly);
+}
+
+TEST_F(BinanceExchangeFixture, NewCoreShadowKeepsLegacyPathAndRecordsDiagnostic)
+{
+    writeCsv("btc.csv", {
+        {0,100,100,100,100,1000, 30000,100,1,0,0}
+        });
+
+    BinanceExchange ex({ {"BTCUSDT",(tmpDir / "btc.csv").string()} }, logger, /*balance*/ 1000.0);
+    ex.set_core_mode(BinanceExchange::CoreMode::NewCoreShadow);
+
+    ASSERT_TRUE(ex.step());
+    auto diag = ex.consume_last_compare_diagnostic();
+    ASSERT_TRUE(diag.has_value());
+    EXPECT_EQ(diag->mode, BinanceExchange::CoreMode::NewCoreShadow);
+    EXPECT_FALSE(diag->compared);
+    EXPECT_TRUE(diag->matched);
+    EXPECT_FALSE(diag->reason.empty());
+    EXPECT_FALSE(ex.consume_last_compare_diagnostic().has_value());
+}
+
+TEST_F(BinanceExchangeFixture, NewCorePrimaryFallsBackToLegacyPath)
+{
+    writeCsv("btc.csv", {
+        {0,100,100,100,100,1000, 30000,100,1,0,0}
+        });
+
+    BinanceExchange ex({ {"BTCUSDT",(tmpDir / "btc.csv").string()} }, logger, /*balance*/ 1000.0);
+    ex.set_core_mode(BinanceExchange::CoreMode::NewCorePrimary);
+
+    using QTrading::Dto::Trading::OrderSide;
+    ASSERT_TRUE(ex.perp.place_order("BTCUSDT", 1.0, OrderSide::Buy));
+    ASSERT_TRUE(ex.step());
+
+    const auto& positions = ex.get_all_positions();
+    ASSERT_EQ(positions.size(), 1u);
+    auto diag = ex.consume_last_compare_diagnostic();
+    ASSERT_TRUE(diag.has_value());
+    EXPECT_EQ(diag->mode, BinanceExchange::CoreMode::NewCorePrimary);
+    EXPECT_FALSE(diag->compared);
+    EXPECT_TRUE(diag->matched);
+    EXPECT_FALSE(diag->reason.empty());
+}
+
 TEST_F(BinanceExchangeFixture, FundingAppliedAndDeduped)
 {
     writeCsv("btc.csv", {

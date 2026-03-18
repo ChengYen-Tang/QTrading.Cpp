@@ -343,6 +343,32 @@ public:
     static void Fill(const BinanceExchange& owner, BinanceExchange::StatusSnapshot& out);
 };
 
+class BinanceExchange::CoreDispatchFacade final {
+public:
+    static RunStepResult RunStep(BinanceExchange& owner, CoreMode mode)
+    {
+        return owner.dispatch_step_(mode);
+    }
+};
+
+class BinanceExchange::LegacyCoreSessionAdapter final {
+public:
+    static RunStepResult Run(BinanceExchange& owner);
+};
+
+class BinanceExchange::NewCoreSessionAdapter final {
+public:
+    static RunStepResult Run(BinanceExchange&)
+    {
+        RunStepResult result{};
+        // Milestone 1 skeleton: new core path is wired but intentionally disabled.
+        result.progressed = false;
+        result.fallback_to_legacy = true;
+        result.compare_snapshot_ready = false;
+        return result;
+    }
+};
+
 class BinanceExchange::ExchangeSession final {
 public:
     explicit ExchangeSession(BinanceExchange& owner)
@@ -353,6 +379,14 @@ public:
 private:
     BinanceExchange& owner_;
 };
+
+BinanceExchange::RunStepResult BinanceExchange::LegacyCoreSessionAdapter::Run(BinanceExchange& owner)
+{
+    RunStepResult result{};
+    result.progressed = ExchangeSession(owner).Run();
+    result.compare_snapshot_ready = true;
+    return result;
+}
 
 /// @brief Simulator for Binance futures exchange.
 /// @details Reads multiple CSV files (one per symbol), publishes multi-symbol 1-minute bars,
@@ -649,9 +683,185 @@ bool BinanceExchange::step()
     return run_step_session_();
 }
 
+void BinanceExchange::set_core_mode(CoreMode mode)
+{
+    CoreMode effective_mode = CoreMode::LegacyOnly;
+    switch (mode) {
+    case CoreMode::LegacyOnly:
+    case CoreMode::NewCoreShadow:
+    case CoreMode::NewCorePrimary:
+        effective_mode = mode;
+        break;
+    default:
+        effective_mode = CoreMode::LegacyOnly;
+        break;
+    }
+
+    core_mode_.store(effective_mode, std::memory_order_release);
+}
+
+BinanceExchange::CoreMode BinanceExchange::core_mode() const
+{
+    return core_mode_.load(std::memory_order_acquire);
+}
+
+std::optional<BinanceExchange::StepCompareDiagnostic> BinanceExchange::consume_last_compare_diagnostic()
+{
+    std::lock_guard<std::mutex> lk(compare_diag_mtx_);
+    auto out = std::move(last_compare_diagnostic_);
+    last_compare_diagnostic_.reset();
+    return out;
+}
+
 bool BinanceExchange::run_step_session_()
 {
-    return ExchangeSession(*this).Run();
+    const CoreMode mode = core_mode_.load(std::memory_order_acquire);
+    return CoreDispatchFacade::RunStep(*this, mode).progressed;
+}
+
+BinanceExchange::RunStepResult BinanceExchange::dispatch_step_(CoreMode mode)
+{
+    switch (mode) {
+    case CoreMode::LegacyOnly:
+        return LegacyCoreSessionAdapter::Run(*this);
+
+    case CoreMode::NewCoreShadow:
+    {
+        auto legacy_result = LegacyCoreSessionAdapter::Run(*this);
+        StepCompareDiagnostic diagnostic{};
+        diagnostic.mode = mode;
+        diagnostic.legacy = build_step_compare_snapshot_(legacy_result);
+
+        const auto new_core_result = NewCoreSessionAdapter::Run(*this);
+        if (new_core_result.compare_snapshot_ready) {
+            diagnostic.compared = true;
+            diagnostic.candidate = build_step_compare_snapshot_(new_core_result);
+            const auto mismatch_reason =
+                compare_step_snapshots_(diagnostic.legacy, diagnostic.candidate);
+            diagnostic.matched = !mismatch_reason.has_value();
+            if (mismatch_reason.has_value()) {
+                diagnostic.reason = *mismatch_reason;
+            }
+        }
+        else {
+            diagnostic.compared = false;
+            diagnostic.matched = true;
+            diagnostic.reason = "New core compare snapshot unavailable; shadow mode kept legacy result.";
+        }
+        record_compare_diagnostic_(std::move(diagnostic));
+        return legacy_result;
+    }
+
+    case CoreMode::NewCorePrimary:
+    {
+        const auto new_core_result = NewCoreSessionAdapter::Run(*this);
+        if (new_core_result.progressed && !new_core_result.fallback_to_legacy) {
+            return new_core_result;
+        }
+
+        auto legacy_result = LegacyCoreSessionAdapter::Run(*this);
+        legacy_result.fallback_to_legacy = true;
+
+        StepCompareDiagnostic diagnostic{};
+        diagnostic.mode = mode;
+        diagnostic.legacy = build_step_compare_snapshot_(legacy_result);
+        if (new_core_result.compare_snapshot_ready) {
+            diagnostic.compared = true;
+            diagnostic.candidate = build_step_compare_snapshot_(new_core_result);
+            const auto mismatch_reason =
+                compare_step_snapshots_(diagnostic.legacy, diagnostic.candidate);
+            diagnostic.matched = !mismatch_reason.has_value();
+            if (mismatch_reason.has_value()) {
+                diagnostic.reason = *mismatch_reason;
+            }
+        }
+        else {
+            diagnostic.compared = false;
+            diagnostic.matched = true;
+            diagnostic.reason = "New core primary unavailable; fell back to legacy path.";
+        }
+        record_compare_diagnostic_(std::move(diagnostic));
+        return legacy_result;
+    }
+
+    default:
+        return LegacyCoreSessionAdapter::Run(*this);
+    }
+}
+
+BinanceExchange::StepCompareSnapshot BinanceExchange::build_step_compare_snapshot_(
+    const RunStepResult& result) const
+{
+    StepCompareSnapshot snapshot{};
+    snapshot.progressed = result.progressed;
+
+    {
+        std::lock_guard<std::mutex> lk(state_mtx_);
+        snapshot.ts_exchange = last_step_ts_;
+        snapshot.step_seq = log_ctx_.step_seq;
+    }
+
+    {
+        std::lock_guard<std::mutex> lk(account_mtx_);
+        if (account_engine_) {
+            snapshot.position_count = static_cast<uint64_t>(account_engine_->get_all_positions().size());
+            snapshot.open_order_count = static_cast<uint64_t>(account_engine_->get_all_open_orders().size());
+            const auto perp_balance = account_engine_->get_perp_balance();
+            const auto spot_balance = account_engine_->get_spot_balance();
+            snapshot.perp_wallet_balance = perp_balance.WalletBalance;
+            snapshot.spot_wallet_balance = spot_balance.WalletBalance;
+            snapshot.total_cash_balance = account_engine_->get_total_cash_balance();
+        }
+    }
+
+    return snapshot;
+}
+
+std::optional<std::string> BinanceExchange::compare_step_snapshots_(
+    const StepCompareSnapshot& legacy_snapshot,
+    const StepCompareSnapshot& candidate_snapshot) const
+{
+    if (legacy_snapshot.progressed != candidate_snapshot.progressed) {
+        return std::string("compare mismatch: progressed differs");
+    }
+    if (legacy_snapshot.ts_exchange != candidate_snapshot.ts_exchange) {
+        return std::string("compare mismatch: ts_exchange differs");
+    }
+    if (legacy_snapshot.step_seq != candidate_snapshot.step_seq) {
+        return std::string("compare mismatch: step_seq differs");
+    }
+    if (legacy_snapshot.position_count != candidate_snapshot.position_count) {
+        return std::string("compare mismatch: position_count differs");
+    }
+    if (legacy_snapshot.open_order_count != candidate_snapshot.open_order_count) {
+        return std::string("compare mismatch: open_order_count differs");
+    }
+
+    constexpr double kEpsilon = 1e-9;
+    const auto almost_equal = [](double lhs, double rhs) {
+        return std::fabs(lhs - rhs) <= kEpsilon;
+    };
+
+    if (!almost_equal(legacy_snapshot.perp_wallet_balance, candidate_snapshot.perp_wallet_balance)) {
+        return std::string("compare mismatch: perp_wallet_balance differs");
+    }
+    if (!almost_equal(legacy_snapshot.spot_wallet_balance, candidate_snapshot.spot_wallet_balance)) {
+        return std::string("compare mismatch: spot_wallet_balance differs");
+    }
+    if (!almost_equal(legacy_snapshot.total_cash_balance, candidate_snapshot.total_cash_balance)) {
+        return std::string("compare mismatch: total_cash_balance differs");
+    }
+
+    return std::nullopt;
+}
+
+void BinanceExchange::record_compare_diagnostic_(StepCompareDiagnostic diag)
+{
+    if (!diag.reason.empty()) {
+        QTR_TRACE("ex", diag.reason);
+    }
+    std::lock_guard<std::mutex> lk(compare_diag_mtx_);
+    last_compare_diagnostic_ = std::move(diag);
 }
 
 bool BinanceExchange::ExchangeSession::Run()
