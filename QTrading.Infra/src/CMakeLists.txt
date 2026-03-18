@@ -23,6 +23,12 @@ add_library(QTrading.Infra.Library STATIC
   Data/Binance/MarketData.cpp
   Data/Binance/FundingRateData.cpp
   Exchanges/BinanceSimulator/Calibration/CalibrationMetrics.cpp
+  Exchanges/BinanceSimulator/Diagnostics/Compare/BinanceCompareBridge.cpp
+  Exchanges/BinanceSimulator/Diagnostics/Compare/DiagnosticReportFormatter.cpp
+  Exchanges/BinanceSimulator/Diagnostics/Compare/DifferentialReplayRunner.cpp
+  Exchanges/BinanceSimulator/Diagnostics/Compare/LegacyLogRowCompare.cpp
+  Exchanges/BinanceSimulator/Diagnostics/Compare/ReplayCompareTestHarness.cpp
+  Exchanges/BinanceSimulator/Diagnostics/Compare/StepCompareModel.cpp
   Exchanges/BinanceSimulator/BinanceExchange.cpp
 )
 
