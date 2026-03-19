@@ -136,6 +136,11 @@ struct ReplayCompareReport {
     uint64_t compared_steps{ 0 };
     uint64_t mismatch_count{ 0 };
     std::optional<ReplayMismatch> first_mismatch{};
+    std::optional<uint64_t> first_divergent_step{};
+    std::optional<uint64_t> first_divergent_event_seq{};
+    std::optional<uint64_t> first_divergent_row{};
+    std::optional<ReplayCompareStatus> first_divergent_status{};
+    std::string first_divergent_reason;
     std::vector<ReplayMismatch> mismatches;
     std::vector<ReplayStepCompareResult> steps;
     std::vector<std::string> legacy_row_snapshot_lines;

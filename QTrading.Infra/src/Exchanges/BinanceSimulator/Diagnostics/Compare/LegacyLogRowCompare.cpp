@@ -1,8 +1,11 @@
 #include "Exchanges/BinanceSimulator/Diagnostics/Compare/LegacyLogRowCompare.hpp"
 
 #include <algorithm>
+#include <cctype>
+#include <cmath>
 #include <map>
 #include <set>
+#include <string>
 #include <string_view>
 
 namespace QTrading::Infra::Exchanges::BinanceSim::Diagnostics::Compare {
@@ -70,6 +73,58 @@ std::map<std::string, std::string> BuildPayloadMap(const LegacyLogCompareRow& ro
     return out;
 }
 
+std::string TrimCopy(const std::string& value)
+{
+    size_t begin = 0;
+    while (begin < value.size() &&
+        std::isspace(static_cast<unsigned char>(value[begin])) != 0) {
+        ++begin;
+    }
+    size_t end = value.size();
+    while (end > begin &&
+        std::isspace(static_cast<unsigned char>(value[end - 1])) != 0) {
+        --end;
+    }
+    return value.substr(begin, end - begin);
+}
+
+bool TryParseDouble(const std::string& value, double& out)
+{
+    try {
+        size_t pos = 0;
+        const double parsed = std::stod(value, &pos);
+        if (pos != value.size()) {
+            return false;
+        }
+        out = parsed;
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+bool PayloadValueEquivalent(
+    const std::string& legacy_raw,
+    const std::string& candidate_raw,
+    const LegacyLogRowCompareRules& rules)
+{
+    const std::string legacy_value = rules.trim_payload_whitespace ? TrimCopy(legacy_raw) : legacy_raw;
+    const std::string candidate_value = rules.trim_payload_whitespace ? TrimCopy(candidate_raw) : candidate_raw;
+    if (legacy_value == candidate_value) {
+        return true;
+    }
+    if (!rules.normalize_numeric_payload) {
+        return false;
+    }
+
+    double lhs = 0.0;
+    double rhs = 0.0;
+    if (!TryParseDouble(legacy_value, lhs) || !TryParseDouble(candidate_value, rhs)) {
+        return false;
+    }
+    return std::fabs(lhs - rhs) <= rules.payload_numeric_abs_tolerance;
+}
+
 std::string ToString(LegacyLogRowKind kind)
 {
     switch (kind) {
@@ -123,7 +178,8 @@ void ComparePayload(
     LegacyLogRowCompareReport& report,
     uint64_t row_index,
     const LegacyLogCompareRow& legacy_row,
-    const LegacyLogCompareRow& candidate_row)
+    const LegacyLogCompareRow& candidate_row,
+    const LegacyLogRowCompareRules& rules)
 {
     const auto legacy_payload = BuildPayloadMap(legacy_row);
     const auto candidate_payload = BuildPayloadMap(candidate_row);
@@ -163,7 +219,7 @@ void ComparePayload(
                 "payload absence mismatch");
             continue;
         }
-        if (legacy_it->second != candidate_it->second) {
+        if (!PayloadValueEquivalent(legacy_it->second, candidate_it->second, rules)) {
             AddMismatch(
                 report,
                 row_index,
@@ -293,7 +349,7 @@ void CompareRowPair(
     }
 
     if (rules.strict_payload_fields) {
-        ComparePayload(report, row_index, legacy_row, candidate_row);
+        ComparePayload(report, row_index, legacy_row, candidate_row, rules);
     }
 }
 

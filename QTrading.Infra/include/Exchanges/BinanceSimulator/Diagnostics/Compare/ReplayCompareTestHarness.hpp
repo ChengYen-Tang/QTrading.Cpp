@@ -29,6 +29,7 @@ struct ReplayCompareScenarioData {
 struct ReplayCompareTestHarnessOptions {
     ReplayCompareExecutionMode execution_mode{ ReplayCompareExecutionMode::ProductionSafe };
     ReplayCompareFeatureSet feature_set{ ReplayCompareFeatureSet::Core() };
+    bool align_step_boundary_by_common_payload{ true };
     StepCompareRules step_rules{};
     LegacyLogRowCompareRules row_rules{};
     bool generate_artifact{ false };

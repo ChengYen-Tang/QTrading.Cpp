@@ -6,6 +6,7 @@
 #include <tuple>
 #include <memory_resource>
 #include <cstdint>
+#include "Exchanges/BinanceSimulator/Account/Config.hpp"
 #include "Dto/Order.hpp"
 #include "Dto/Position.hpp"
 #include "Dto/Market/Binance/Kline.hpp"
@@ -348,6 +349,49 @@ public:
     const std::vector<Order>& get_all_open_orders() const;
     const std::vector<Position>& get_all_positions() const;
 
+    struct OrderStateView {
+        int id{ 0 };
+        std::string symbol;
+        QTrading::Dto::Trading::OrderSide side{ QTrading::Dto::Trading::OrderSide::Buy };
+        QTrading::Dto::Trading::PositionSide position_side{ QTrading::Dto::Trading::PositionSide::Both };
+        QTrading::Dto::Trading::InstrumentType instrument_type{ QTrading::Dto::Trading::InstrumentType::Perp };
+        bool reduce_only{ false };
+        bool close_position{ false };
+        double quantity{ 0.0 };
+        double price{ 0.0 };
+    };
+
+    struct PositionStateView {
+        int id{ 0 };
+        std::string symbol;
+        bool is_long{ false };
+        QTrading::Dto::Trading::InstrumentType instrument_type{ QTrading::Dto::Trading::InstrumentType::Perp };
+        double quantity{ 0.0 };
+        double entry_price{ 0.0 };
+        double notional{ 0.0 };
+        double initial_margin{ 0.0 };
+        double maintenance_margin{ 0.0 };
+        double unrealized_pnl{ 0.0 };
+        double leverage{ 1.0 };
+    };
+
+    struct AccountStateView {
+        uint64_t state_version{ 0 };
+        bool hedge_mode{ false };
+        bool strict_binance_mode{ false };
+        bool strict_symbol_registration_mode{ false };
+        double perp_wallet_balance{ 0.0 };
+        double spot_cash_balance{ 0.0 };
+        double total_cash_balance{ 0.0 };
+        double equity{ 0.0 };
+        double margin_balance{ 0.0 };
+        double available_balance{ 0.0 };
+        std::vector<OrderStateView> open_orders;
+        std::vector<PositionStateView> positions;
+    };
+
+    AccountStateView snapshot_state_view() const;
+
     void set_market_slippage_buffer(double pct);
 
     // Kline-based market execution slippage (fraction of price, e.g. 0.001 = 0.1%).
@@ -504,6 +548,30 @@ private:
 
         static void CaptureMatchedFill(Account& owner, const Order& order_after_fill, const MatchedFillInput& in);
         static void CaptureLiquidationFill(Account& owner, const Order& liq_order, const LiquidationFillInput& in);
+    };
+
+    class FundingService final {
+    public:
+        static std::vector<FundingApplyResult> ApplyFunding(
+            Account& owner,
+            const std::string& symbol,
+            uint64_t funding_time,
+            double rate,
+            double mark_price);
+    };
+
+    class TransferService final {
+    public:
+        static bool TransferSpotToPerp(Account& owner, double amount);
+        static bool TransferPerpToSpot(Account& owner, double amount);
+    };
+
+    class PureCalculationService final {
+    public:
+        static double ComputeTotalCashBalance(double perp_wallet_balance, double spot_cash_balance) noexcept;
+        static double ComputeMaintenanceMarginForNotional(
+            double notional,
+            const std::vector<::MarginTier>& tiers) noexcept;
     };
 
     SpotLedgerEngine spot_ledger_{};

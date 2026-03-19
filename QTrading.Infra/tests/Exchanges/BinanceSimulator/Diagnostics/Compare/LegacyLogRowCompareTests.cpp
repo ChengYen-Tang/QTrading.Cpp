@@ -175,6 +175,31 @@ TEST(LegacyLogRowCompareTests, DetectsPayloadKeyValueMismatch)
     EXPECT_TRUE(FindMismatch(report, "payload.new_key").has_value());
 }
 
+TEST(LegacyLogRowCompareTests, PayloadNormalizationTrimsWhitespaceAndUsesNumericTolerance)
+{
+    ReplayCompare::LegacyLogRowComparer comparer;
+    auto legacy_row = MakeRow(0, 10, "AccountEvent", 1000, 1001, 1, 1);
+    legacy_row.payload_fields = {
+        {"qty", "1.0000000000"},
+        {"price", "100.0"},
+    };
+
+    auto candidate_row = legacy_row;
+    candidate_row.payload_fields = {
+        {"qty", " 1.0000000005 "},
+        {"price", "100.0000000004"},
+    };
+
+    const auto normalized_report = comparer.Compare({legacy_row}, {candidate_row});
+    EXPECT_TRUE(normalized_report.matched);
+
+    ReplayCompare::LegacyLogRowCompareRules strict_rules{};
+    strict_rules.payload_numeric_abs_tolerance = 1e-12;
+    const auto strict_report = comparer.Compare({legacy_row}, {candidate_row}, strict_rules);
+    EXPECT_FALSE(strict_report.matched);
+    EXPECT_TRUE(FindMismatch(strict_report, "payload.qty").has_value());
+}
+
 TEST(LegacyLogRowCompareTests, ProtectsStepEventSeqModuleOrderingAndBatchBoundarySemantics)
 {
     ReplayCompare::LegacyLogRowComparer comparer;
@@ -232,4 +257,3 @@ TEST(LegacyLogRowCompareTests, FirstDivergentRowLocalizationIncludesRowAndSequen
     EXPECT_EQ(report.first_mismatch->step_index, 1u);
     EXPECT_EQ(report.first_mismatch->event_seq, 2u);
 }
-

@@ -85,6 +85,14 @@ std::optional<ReplayCompareStatus> StatusFromString(std::string_view value)
     return std::nullopt;
 }
 
+std::string StepIndexToString(const std::optional<uint64_t>& value)
+{
+    if (!value.has_value()) {
+        return "n/a";
+    }
+    return std::to_string(*value);
+}
+
 std::string DomainToString(ReplayMismatchDomain domain)
 {
     switch (domain) {
@@ -173,6 +181,27 @@ std::optional<uint64_t> ExtractJsonUint(const std::string& json, const std::stri
         return std::nullopt;
     }
     const size_t value_begin = start + token.size();
+    size_t value_end = value_begin;
+    while (value_end < json.size() && std::isdigit(static_cast<unsigned char>(json[value_end]))) {
+        ++value_end;
+    }
+    if (value_end == value_begin) {
+        return std::nullopt;
+    }
+    return static_cast<uint64_t>(std::stoull(json.substr(value_begin, value_end - value_begin)));
+}
+
+std::optional<uint64_t> ExtractJsonNullableUint(const std::string& json, const std::string& key)
+{
+    const std::string token = "\"" + key + "\":";
+    const size_t start = json.find(token);
+    if (start == std::string::npos) {
+        return std::nullopt;
+    }
+    const size_t value_begin = start + token.size();
+    if (json.compare(value_begin, 4, "null") == 0) {
+        return std::nullopt;
+    }
     size_t value_end = value_begin;
     while (value_end < json.size() && std::isdigit(static_cast<unsigned char>(json[value_end]))) {
         ++value_end;
@@ -274,6 +303,27 @@ std::string DiagnosticReportFormatter::FormatHumanReadable(
         oss << "first_mismatch none\n";
     }
 
+    const bool has_first_divergence =
+        report.first_divergent_status.has_value() ||
+        report.first_divergent_step.has_value() ||
+        report.first_divergent_event_seq.has_value() ||
+        report.first_divergent_row.has_value();
+    if (has_first_divergence) {
+        oss << "first_divergence"
+            << " status=" << (report.first_divergent_status.has_value()
+                ? StatusToString(*report.first_divergent_status)
+                : "n/a")
+            << " step=" << StepIndexToString(report.first_divergent_step)
+            << " event=" << StepIndexToString(report.first_divergent_event_seq)
+            << " row=" << StepIndexToString(report.first_divergent_row);
+        if (!report.first_divergent_reason.empty()) {
+            oss << " reason=\"" << report.first_divergent_reason << "\"";
+        }
+        oss << "\n";
+    } else {
+        oss << "first_divergence none\n";
+    }
+
     if (options.mode == DiagnosticReportMode::Detailed) {
         oss << "steps legacy=" << report.legacy_steps_executed
             << " candidate=" << report.candidate_steps_executed
@@ -340,6 +390,34 @@ std::string DiagnosticReportFormatter::SerializeArtifactJson(
         oss << "null";
     }
     oss << ",";
+
+    oss << "\"first_divergence\":{";
+    oss << "\"first_divergence_status\":";
+    if (report.first_divergent_status.has_value()) {
+        oss << "\"" << EscapeJson(StatusToString(*report.first_divergent_status)) << "\"";
+    } else {
+        oss << "null";
+    }
+    oss << ",\"first_divergence_step\":";
+    if (report.first_divergent_step.has_value()) {
+        oss << *report.first_divergent_step;
+    } else {
+        oss << "null";
+    }
+    oss << ",\"first_divergence_event\":";
+    if (report.first_divergent_event_seq.has_value()) {
+        oss << *report.first_divergent_event_seq;
+    } else {
+        oss << "null";
+    }
+    oss << ",\"first_divergence_row\":";
+    if (report.first_divergent_row.has_value()) {
+        oss << *report.first_divergent_row;
+    } else {
+        oss << "null";
+    }
+    oss << ",\"first_divergence_reason\":\"" << EscapeJson(report.first_divergent_reason) << "\"";
+    oss << "},";
 
     oss << "\"mismatches\":[";
     for (size_t i = 0; i < mismatch_limit; ++i) {
@@ -423,6 +501,17 @@ bool DiagnosticReportFormatter::TryParseArtifactKeyFields(
     if (!first_domain.empty()) {
         out.first_mismatch_domain = first_domain;
     }
+
+    const std::string first_divergent_status = ExtractJsonString(artifact_json, "first_divergence_status");
+    if (!first_divergent_status.empty()) {
+        const auto parsed_first_divergent_status = StatusFromString(first_divergent_status);
+        if (parsed_first_divergent_status.has_value()) {
+            out.first_divergent_status = *parsed_first_divergent_status;
+        }
+    }
+    out.first_divergent_step = ExtractJsonNullableUint(artifact_json, "first_divergence_step");
+    out.first_divergent_event = ExtractJsonNullableUint(artifact_json, "first_divergence_event");
+    out.first_divergent_row = ExtractJsonNullableUint(artifact_json, "first_divergence_row");
 
     out.has_legacy_row_snapshot = artifact_json.find("\"legacy_row_snapshot_lines\":[]") == std::string::npos &&
         artifact_json.find("\"legacy_row_snapshot_lines\":[") != std::string::npos;

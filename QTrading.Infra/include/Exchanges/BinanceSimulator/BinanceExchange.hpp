@@ -19,6 +19,7 @@
 #include "Data/Binance/MarketData.hpp"
 #include "Data/Binance/FundingRateData.hpp"
 #include "Exchanges/BinanceSimulator/Account/Account.hpp"
+#include "Exchanges/BinanceSimulator/Account/AccountCoreV2.hpp"
 #include "Dto/Market/Binance/MultiKline.hpp"
 #include "Dto/Trading/Side.hpp"
 #include "Logging/StepLogContext.hpp"
@@ -195,6 +196,11 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
             std::shared_ptr<QTrading::Log::Logger> logger,
             std::shared_ptr<Account> account,
             uint64_t run_id = 0);
+        BinanceExchange(const std::vector<SymbolDataset>& datasets,
+            std::shared_ptr<QTrading::Log::Logger> logger,
+            std::shared_ptr<Account> account,
+            std::shared_ptr<AccountCoreV2> account_core_v2,
+            uint64_t run_id);
         ~BinanceExchange();
 
         SpotApi spot;
@@ -205,6 +211,54 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
             LegacyOnly = 0,
             NewCoreShadow = 1,
             NewCorePrimary = 2,
+        };
+
+        struct CoreModePolicy final {
+            static constexpr CoreMode normalize(CoreMode mode) noexcept
+            {
+                switch (mode) {
+                case CoreMode::LegacyOnly:
+                case CoreMode::NewCoreShadow:
+                case CoreMode::NewCorePrimary:
+                    return mode;
+                default:
+                    return CoreMode::LegacyOnly;
+                }
+            }
+
+            static constexpr bool is_legacy_only(CoreMode mode) noexcept
+            {
+                return normalize(mode) == CoreMode::LegacyOnly;
+            }
+
+            static constexpr bool is_shadow_compare(CoreMode mode) noexcept
+            {
+                return normalize(mode) == CoreMode::NewCoreShadow;
+            }
+
+            static constexpr bool is_new_core_primary(CoreMode mode) noexcept
+            {
+                return normalize(mode) == CoreMode::NewCorePrimary;
+            }
+
+            static constexpr bool allows_compare_diagnostics(CoreMode mode) noexcept
+            {
+                return !is_legacy_only(mode);
+            }
+
+            static constexpr const char* name(CoreMode mode) noexcept
+            {
+                switch (normalize(mode)) {
+                case CoreMode::LegacyOnly:
+                    return "LegacyOnly";
+                case CoreMode::NewCoreShadow:
+                    return "NewCoreShadow";
+                case CoreMode::NewCorePrimary:
+                    return "NewCorePrimary";
+                default:
+                    return "LegacyOnly";
+                }
+            }
         };
 
         struct RunStepResult {
@@ -231,6 +285,14 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
             std::string reason;
             StepCompareSnapshot legacy{};
             StepCompareSnapshot candidate{};
+        };
+
+        struct AccountFacadeBridgeDiagnostic {
+            CoreMode mode{ CoreMode::LegacyOnly };
+            bool has_v2{ false };
+            bool routed_to_v2{ false };
+            bool production_default_legacy_only{ true };
+            std::string reason;
         };
 
         enum class EventPublishMode : uint8_t {
@@ -280,9 +342,30 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
         void set_core_mode(CoreMode mode);
         CoreMode core_mode() const;
         std::optional<StepCompareDiagnostic> consume_last_compare_diagnostic();
+        std::optional<AccountFacadeBridgeDiagnostic> consume_last_account_facade_bridge_diagnostic();
         void set_event_publish_mode(EventPublishMode mode);
         EventPublishMode event_publish_mode() const;
         std::optional<EventPublishCompareDiagnostic> consume_last_event_publish_diagnostic();
+
+        struct SideEffectStepSnapshot {
+            uint64_t run_id{ 0 };
+            uint64_t step_seq{ 0 };
+            uint64_t ts_exchange{ 0 };
+            uint64_t state_version{ 0 };
+            bool market_published{ false };
+            bool position_published{ false };
+            bool order_published{ false };
+        };
+
+        struct SideEffectAdapterConfig {
+            std::function<void(MultiKlinePtr)> market_publisher{};
+            std::function<void(const std::vector<dto::Position>&)> position_publisher{};
+            std::function<void(const std::vector<dto::Order>&)> order_publisher{};
+            std::function<void(const SideEffectStepSnapshot&)> external_hook{};
+        };
+
+        void set_side_effect_adapters(SideEffectAdapterConfig config);
+        void reset_side_effect_adapters();
 
         /// @copydoc IExchange::get_all_positions
         const std::vector<dto::Position>& get_all_positions()   const override;
@@ -437,6 +520,8 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
         std::optional<uint64_t>                     replay_start_ts_ms_; ///< Optional replay window start (inclusive).
         std::optional<uint64_t>                     replay_end_ts_ms_;   ///< Optional replay window end (inclusive).
         std::shared_ptr<Account>                    account_engine_;  ///< Simulated margin account engine.
+        std::shared_ptr<Account>                    legacy_account_engine_;
+        std::shared_ptr<AccountCoreV2>              account_core_v2_;
         mutable std::mutex                          account_mtx_;
         mutable std::mutex                          state_mtx_;
         using PositionSnapshotPtr = std::shared_ptr<const std::vector<dto::Position>>;
@@ -552,6 +637,7 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
         };
 
         class IEventPublisher;
+        class LegacyAccountFacadeBridge;
         class LegacyLogAdapter;
         class LegacyEventPublisher;
         class AsyncEventPublisher;
@@ -565,6 +651,7 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
         class NewCoreSessionAdapter;
         class ExchangeSession;
         std::unique_ptr<IEventPublisher> event_publisher_;
+        std::unique_ptr<LegacyAccountFacadeBridge> account_facade_bridge_;
 
         // Multiway merge state: next timestamp for each symbol + a min-heap.
         struct HeapItem {
@@ -588,9 +675,15 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
         std::atomic<CoreMode> core_mode_{ CoreMode::LegacyOnly };
         mutable std::mutex compare_diag_mtx_;
         std::optional<StepCompareDiagnostic> last_compare_diagnostic_;
+        mutable std::mutex account_facade_bridge_diag_mtx_;
+        std::optional<AccountFacadeBridgeDiagnostic> last_account_facade_bridge_diagnostic_;
         std::atomic<EventPublishMode> event_publish_mode_{ EventPublishMode::LegacyDirect };
         mutable std::mutex event_publish_diag_mtx_;
         std::optional<EventPublishCompareDiagnostic> last_event_publish_diagnostic_;
+        std::function<void(MultiKlinePtr)> market_channel_publisher_{};
+        std::function<void(const std::vector<dto::Position>&)> position_channel_publisher_{};
+        std::function<void(const std::vector<dto::Order>&)> order_channel_publisher_{};
+        std::function<void(const SideEffectStepSnapshot&)> external_side_effect_hook_{};
 
         // P2: Reusable per-step market/reference caches.
         std::vector<size_t> kline_counts_;
@@ -672,6 +765,7 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
             const StepCompareSnapshot& legacy_snapshot,
             const StepCompareSnapshot& candidate_snapshot) const;
         void record_compare_diagnostic_(StepCompareDiagnostic diag);
+        void record_account_facade_bridge_diagnostic_(AccountFacadeBridgeDiagnostic diag);
         EventPublishCompareSnapshot build_event_publish_compare_snapshot_(
             const EventEnvelope& envelope) const;
         std::optional<std::string> compare_event_publish_snapshots_(
@@ -679,6 +773,7 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
             const EventPublishCompareSnapshot& candidate_snapshot) const;
         void record_event_publish_diagnostic_(EventPublishCompareDiagnostic diag);
         void emit_legacy_rows_from_event_envelope_(EventEnvelope&& envelope);
+        void install_default_side_effect_adapters_();
 
         void publish_log_task_(EventEnvelope&& task);
         void enqueue_deferred_order_locked_(uint64_t due_step, std::function<void(Account&, uint64_t)> fn);

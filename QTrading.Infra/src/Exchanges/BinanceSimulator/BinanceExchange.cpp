@@ -138,6 +138,20 @@ std::vector<BinanceExchange::SymbolDataset> to_datasets(
     return out;
 }
 
+std::shared_ptr<AccountCoreV2> make_account_core_v2(double init_balance, int vip_level)
+{
+    Account::AccountInitConfig cfg{};
+    cfg.spot_initial_cash = 0.0;
+    cfg.perp_initial_wallet = init_balance;
+    cfg.vip_level = vip_level;
+    return std::make_shared<AccountCoreV2>(cfg);
+}
+
+std::shared_ptr<AccountCoreV2> make_account_core_v2(const Account::AccountInitConfig& cfg)
+{
+    return std::make_shared<AccountCoreV2>(cfg);
+}
+
 size_t lower_bound_kline_ts(const MarketData& data, uint64_t ts)
 {
     size_t lo = 0;
@@ -192,6 +206,62 @@ class BinanceExchange::IEventPublisher {
 public:
     virtual ~IEventPublisher() = default;
     virtual void publish(EventEnvelope&& task) = 0;
+};
+
+class BinanceExchange::LegacyAccountFacadeBridge final {
+public:
+    struct RouteDecision {
+        std::shared_ptr<Account> account;
+        bool has_v2{ false };
+        bool routed_to_v2{ false };
+        std::string reason;
+    };
+
+    LegacyAccountFacadeBridge(std::shared_ptr<Account> legacy, std::shared_ptr<AccountCoreV2> v2)
+        : legacy_(std::move(legacy)),
+        v2_(std::move(v2))
+    {
+        if (v2_) {
+            // Alias shared ownership of v2 while exposing its legacy-compatible Account facade.
+            v2_account_alias_ = std::shared_ptr<Account>(v2_, &v2_->mutable_legacy_account());
+        }
+    }
+
+    RouteDecision route(CoreMode mode) const
+    {
+        RouteDecision out{};
+        out.has_v2 = static_cast<bool>(v2_account_alias_);
+
+        if (!legacy_) {
+            out.reason = "Legacy account unavailable.";
+            return out;
+        }
+
+        if (mode == CoreMode::NewCorePrimary && v2_account_alias_) {
+            out.account = v2_account_alias_;
+            out.routed_to_v2 = true;
+            out.reason = "NewCorePrimary routed through LegacyAccountFacade -> AccountCoreV2.";
+            return out;
+        }
+
+        out.account = legacy_;
+        out.routed_to_v2 = false;
+        if (mode == CoreMode::NewCorePrimary) {
+            out.reason = "AccountCoreV2 unavailable; keep legacy facade route.";
+        }
+        else if (mode == CoreMode::NewCoreShadow) {
+            out.reason = "Shadow mode keeps legacy facade route.";
+        }
+        else {
+            out.reason = "LegacyOnly keeps legacy facade route.";
+        }
+        return out;
+    }
+
+private:
+    std::shared_ptr<Account> legacy_;
+    std::shared_ptr<AccountCoreV2> v2_;
+    std::shared_ptr<Account> v2_account_alias_;
 };
 
 class BinanceExchange::NullEventPublisher final : public BinanceExchange::IEventPublisher {
@@ -412,27 +482,47 @@ BinanceExchange::BinanceExchange(
     const std::vector<std::pair<std::string, std::string>>& symbolCsv,
     std::shared_ptr<QTrading::Log::Logger> logger,
     double init_balance, int vip_level, uint64_t run_id)
-    : BinanceExchange(to_datasets(symbolCsv), logger, std::make_shared<Account>(init_balance, vip_level), run_id) { }
+    : BinanceExchange(
+        to_datasets(symbolCsv),
+        logger,
+        std::make_shared<Account>(init_balance, vip_level),
+        make_account_core_v2(init_balance, vip_level),
+        run_id) { }
 
 BinanceExchange::BinanceExchange(
     const std::vector<std::pair<std::string, std::string>>& symbolCsv,
     std::shared_ptr<QTrading::Log::Logger> logger,
     const Account::AccountInitConfig& account_init,
     uint64_t run_id)
-    : BinanceExchange(to_datasets(symbolCsv), logger, std::make_shared<Account>(account_init), run_id) { }
+    : BinanceExchange(
+        to_datasets(symbolCsv),
+        logger,
+        std::make_shared<Account>(account_init),
+        make_account_core_v2(account_init),
+        run_id) { }
 
 BinanceExchange::BinanceExchange(
     const std::vector<SymbolDataset>& datasets,
     std::shared_ptr<QTrading::Log::Logger> logger,
     double init_balance, int vip_level, uint64_t run_id)
-    : BinanceExchange(datasets, logger, std::make_shared<Account>(init_balance, vip_level), run_id) { }
+    : BinanceExchange(
+        datasets,
+        logger,
+        std::make_shared<Account>(init_balance, vip_level),
+        make_account_core_v2(init_balance, vip_level),
+        run_id) { }
 
 BinanceExchange::BinanceExchange(
     const std::vector<SymbolDataset>& datasets,
     std::shared_ptr<QTrading::Log::Logger> logger,
     const Account::AccountInitConfig& account_init,
     uint64_t run_id)
-    : BinanceExchange(datasets, logger, std::make_shared<Account>(account_init), run_id) { }
+    : BinanceExchange(
+        datasets,
+        logger,
+        std::make_shared<Account>(account_init),
+        make_account_core_v2(account_init),
+        run_id) { }
 
 /// @brief Primary constructor with an external Account instance.
 /// @param symbolCsv  Vector of (symbol, csv_file) pairs to drive market data.
@@ -443,7 +533,7 @@ BinanceExchange::BinanceExchange(
     std::shared_ptr<QTrading::Log::Logger> logger,
     std::shared_ptr<Account> account_engine,
     uint64_t run_id)
-    : BinanceExchange(to_datasets(symbolCsv), logger, account_engine, run_id)
+    : BinanceExchange(to_datasets(symbolCsv), logger, account_engine, nullptr, run_id)
 {
 }
 
@@ -452,12 +542,31 @@ BinanceExchange::BinanceExchange(
     std::shared_ptr<QTrading::Log::Logger> logger,
     std::shared_ptr<Account> account_engine,
     uint64_t run_id)
+    : BinanceExchange(datasets, logger, std::move(account_engine), nullptr, run_id)
+{
+}
+
+BinanceExchange::BinanceExchange(
+    const std::vector<SymbolDataset>& datasets,
+    std::shared_ptr<QTrading::Log::Logger> logger,
+    std::shared_ptr<Account> account_engine,
+    std::shared_ptr<AccountCoreV2> account_core_v2,
+    uint64_t run_id)
     : spot(*this),
     perp(*this),
     account(*this),
     logger(logger),
-    account_engine_(account_engine)
+    account_engine_(account_engine),
+    legacy_account_engine_(account_engine),
+    account_core_v2_(account_core_v2)
 {
+    account_facade_bridge_ = std::make_unique<LegacyAccountFacadeBridge>(legacy_account_engine_, account_core_v2_);
+    if (account_facade_bridge_) {
+        const auto route = account_facade_bridge_->route(core_mode_.load(std::memory_order_acquire));
+        if (route.account) {
+            account_engine_ = route.account;
+        }
+    }
     if (logger) {
         account_module_id_ = logger->GetModuleId(LogModuleToString(LogModule::Account));
         position_module_id_ = logger->GetModuleId(LogModuleToString(LogModule::Position));
@@ -640,6 +749,7 @@ BinanceExchange::BinanceExchange(
     market_channel = ChannelFactory::CreateBoundedChannel<MultiKlinePtr>(8, OverflowPolicy::DropOldest);
     position_channel = ChannelFactory::CreateUnboundedChannel<std::vector<dto::Position>>();
     order_channel = ChannelFactory::CreateUnboundedChannel<std::vector<dto::Order>>();
+    install_default_side_effect_adapters_();
 
     if (logger) {
         event_publisher_ = std::make_unique<AsyncEventPublisher>(
@@ -739,19 +849,45 @@ bool BinanceExchange::step()
 
 void BinanceExchange::set_core_mode(CoreMode mode)
 {
-    CoreMode effective_mode = CoreMode::LegacyOnly;
-    switch (mode) {
-    case CoreMode::LegacyOnly:
-    case CoreMode::NewCoreShadow:
-    case CoreMode::NewCorePrimary:
-        effective_mode = mode;
-        break;
-    default:
-        effective_mode = CoreMode::LegacyOnly;
-        break;
+    const CoreMode effective_mode = CoreModePolicy::normalize(mode);
+    core_mode_.store(effective_mode, std::memory_order_release);
+
+    AccountFacadeBridgeDiagnostic diag{};
+    diag.mode = effective_mode;
+    diag.production_default_legacy_only = true;
+
+    if (!account_facade_bridge_) {
+        diag.has_v2 = false;
+        diag.routed_to_v2 = false;
+        diag.reason = "Bridge unavailable; keep current account facade route.";
+        record_account_facade_bridge_diagnostic_(std::move(diag));
+        return;
     }
 
-    core_mode_.store(effective_mode, std::memory_order_release);
+    const auto route = account_facade_bridge_->route(effective_mode);
+    diag.has_v2 = route.has_v2;
+    diag.routed_to_v2 = route.routed_to_v2;
+    diag.reason = route.reason;
+
+    {
+        std::lock_guard<std::mutex> lk(account_mtx_);
+        if (route.account) {
+            account_engine_ = route.account;
+        }
+        else if (legacy_account_engine_) {
+            account_engine_ = legacy_account_engine_;
+            if (diag.reason.empty()) {
+                diag.reason = "Bridge returned no account; fallback to legacy facade route.";
+            }
+        }
+        else {
+            if (diag.reason.empty()) {
+                diag.reason = "Bridge returned no account and legacy facade is unavailable.";
+            }
+        }
+    }
+
+    record_account_facade_bridge_diagnostic_(std::move(diag));
 }
 
 BinanceExchange::CoreMode BinanceExchange::core_mode() const
@@ -764,6 +900,15 @@ std::optional<BinanceExchange::StepCompareDiagnostic> BinanceExchange::consume_l
     std::lock_guard<std::mutex> lk(compare_diag_mtx_);
     auto out = std::move(last_compare_diagnostic_);
     last_compare_diagnostic_.reset();
+    return out;
+}
+
+std::optional<BinanceExchange::AccountFacadeBridgeDiagnostic>
+BinanceExchange::consume_last_account_facade_bridge_diagnostic()
+{
+    std::lock_guard<std::mutex> lk(account_facade_bridge_diag_mtx_);
+    auto out = std::move(last_account_facade_bridge_diagnostic_);
+    last_account_facade_bridge_diagnostic_.reset();
     return out;
 }
 
@@ -948,6 +1093,15 @@ void BinanceExchange::record_compare_diagnostic_(StepCompareDiagnostic diag)
     }
     std::lock_guard<std::mutex> lk(compare_diag_mtx_);
     last_compare_diagnostic_ = std::move(diag);
+}
+
+void BinanceExchange::record_account_facade_bridge_diagnostic_(AccountFacadeBridgeDiagnostic diag)
+{
+    if (!diag.reason.empty()) {
+        QTR_TRACE("ex", diag.reason);
+    }
+    std::lock_guard<std::mutex> lk(account_facade_bridge_diag_mtx_);
+    last_account_facade_bridge_diagnostic_ = std::move(diag);
 }
 
 BinanceExchange::EventPublishCompareSnapshot
@@ -1331,9 +1485,21 @@ bool BinanceExchange::ExchangeSession::Run()
     }
 
     step_log_ctx.ts_local = now_ms();
+    SideEffectStepSnapshot side_effect_snapshot{};
+    side_effect_snapshot.run_id = step_log_ctx.run_id;
+    side_effect_snapshot.step_seq = step_log_ctx.step_seq;
+    side_effect_snapshot.ts_exchange = step_log_ctx.ts_exchange;
+    side_effect_snapshot.state_version = cur_ver;
 
     QTR_TRACE("ex", "market_channel Send begin");
-    owner_.market_channel->Send(dto);
+    if (owner_.market_channel_publisher_) {
+        owner_.market_channel_publisher_(dto);
+        side_effect_snapshot.market_published = true;
+    }
+    else if (owner_.market_channel) {
+        owner_.market_channel->Send(dto);
+        side_effect_snapshot.market_published = true;
+    }
     QTR_TRACE("ex", "market_channel Send end");
 
     bool pos_changed = false;
@@ -1348,15 +1514,33 @@ bool BinanceExchange::ExchangeSession::Run()
 
         if (!pos_unchanged) {
             QTR_TRACE("ex", "position_channel Send");
-            owner_.position_channel->Send(*curP);
+            if (owner_.position_channel_publisher_) {
+                owner_.position_channel_publisher_(*curP);
+                side_effect_snapshot.position_published = true;
+            }
+            else if (owner_.position_channel) {
+                owner_.position_channel->Send(*curP);
+                side_effect_snapshot.position_published = true;
+            }
             pos_changed = true;
         }
 
         if (!ord_unchanged) {
             QTR_TRACE("ex", "order_channel Send");
-            owner_.order_channel->Send(*curO);
+            if (owner_.order_channel_publisher_) {
+                owner_.order_channel_publisher_(*curO);
+                side_effect_snapshot.order_published = true;
+            }
+            else if (owner_.order_channel) {
+                owner_.order_channel->Send(*curO);
+                side_effect_snapshot.order_published = true;
+            }
             ord_changed = true;
         }
+    }
+
+    if (owner_.external_side_effect_hook_) {
+        owner_.external_side_effect_hook_(side_effect_snapshot);
     }
 
     if (owner_.logger) {
@@ -1387,6 +1571,46 @@ bool BinanceExchange::ExchangeSession::Run()
 
     QTR_TRACE("ex", "step end");
     return true;
+}
+
+void BinanceExchange::install_default_side_effect_adapters_()
+{
+    market_channel_publisher_ = [this](MultiKlinePtr dto) {
+        if (market_channel) {
+            market_channel->Send(std::move(dto));
+        }
+    };
+    position_channel_publisher_ = [this](const std::vector<dto::Position>& positions) {
+        if (position_channel) {
+            position_channel->Send(positions);
+        }
+    };
+    order_channel_publisher_ = [this](const std::vector<dto::Order>& orders) {
+        if (order_channel) {
+            order_channel->Send(orders);
+        }
+    };
+    external_side_effect_hook_ = {};
+}
+
+void BinanceExchange::set_side_effect_adapters(SideEffectAdapterConfig config)
+{
+    install_default_side_effect_adapters_();
+    if (config.market_publisher) {
+        market_channel_publisher_ = std::move(config.market_publisher);
+    }
+    if (config.position_publisher) {
+        position_channel_publisher_ = std::move(config.position_publisher);
+    }
+    if (config.order_publisher) {
+        order_channel_publisher_ = std::move(config.order_publisher);
+    }
+    external_side_effect_hook_ = std::move(config.external_hook);
+}
+
+void BinanceExchange::reset_side_effect_adapters()
+{
+    install_default_side_effect_adapters_();
 }
 
 void BinanceExchange::enqueue_deferred_order_locked_(uint64_t due_step, std::function<void(Account&, uint64_t)> fn)

@@ -61,32 +61,42 @@ double Account::get_spot_cash_balance() const
 
 bool Account::transfer_spot_to_perp(double amount)
 {
-    if (!std::isfinite(amount) || amount <= 0.0) {
-        return false;
-    }
-    const auto spot = get_spot_balance();
-    if (spot.AvailableBalance + 1e-12 < amount) {
-        return false;
-    }
-    spot_ledger_.debit_cash(amount);
-    perp_ledger_.credit_wallet(amount);
-    mark_balance_dirty_();
-    ++state_version_;
-    return true;
+    return TransferService::TransferSpotToPerp(*this, amount);
 }
 
 bool Account::transfer_perp_to_spot(double amount)
 {
+    return TransferService::TransferPerpToSpot(*this, amount);
+}
+
+bool Account::TransferService::TransferSpotToPerp(Account& owner, double amount)
+{
     if (!std::isfinite(amount) || amount <= 0.0) {
         return false;
     }
-    const auto perp = get_perp_balance();
+    const auto spot = owner.get_spot_balance();
+    if (spot.AvailableBalance + 1e-12 < amount) {
+        return false;
+    }
+    owner.spot_ledger_.debit_cash(amount);
+    owner.perp_ledger_.credit_wallet(amount);
+    owner.mark_balance_dirty_();
+    ++owner.state_version_;
+    return true;
+}
+
+bool Account::TransferService::TransferPerpToSpot(Account& owner, double amount)
+{
+    if (!std::isfinite(amount) || amount <= 0.0) {
+        return false;
+    }
+    const auto perp = owner.get_perp_balance();
     if (perp.AvailableBalance + 1e-12 < amount) {
         return false;
     }
-    perp_ledger_.debit_wallet(amount);
-    spot_ledger_.credit_cash(amount);
-    mark_balance_dirty_();
-    ++state_version_;
+    owner.perp_ledger_.debit_wallet(amount);
+    owner.spot_ledger_.credit_cash(amount);
+    owner.mark_balance_dirty_();
+    ++owner.state_version_;
     return true;
 }

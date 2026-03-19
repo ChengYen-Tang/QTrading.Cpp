@@ -43,8 +43,14 @@ ReplayCompareHarnessResult ReplayCompareTestHarness::RunSingleScenario(
     if (scenario.dataset_id.empty()) {
         scenario.dataset_id = "compare-test-dataset";
     }
-    const uint64_t inferred_steps = static_cast<uint64_t>(
+    uint64_t inferred_steps = static_cast<uint64_t>(
         std::max(scenario_data.legacy_steps.size(), scenario_data.candidate_steps.size()));
+    if (options.align_step_boundary_by_common_payload &&
+        !scenario_data.legacy_steps.empty() &&
+        !scenario_data.candidate_steps.empty()) {
+        inferred_steps = static_cast<uint64_t>(
+            std::min(scenario_data.legacy_steps.size(), scenario_data.candidate_steps.size()));
+    }
     if (scenario.expected_steps == 0) {
         scenario.expected_steps = inferred_steps;
     }
@@ -306,6 +312,26 @@ void ReplayCompareTestHarness::MergeRowCompareIntoReport(
         report.summary = "row compare mismatch";
     } else {
         report.summary += " + row compare mismatch";
+    }
+
+    if (!report.first_divergent_status.has_value()) {
+        report.first_divergent_status = ReplayCompareStatus::Failed;
+    }
+    if (!report.first_divergent_row.has_value() && row_report.first_divergent_row.has_value()) {
+        report.first_divergent_row = row_report.first_divergent_row;
+    }
+    if (!report.first_divergent_step.has_value() && row_report.first_mismatch.has_value()) {
+        report.first_divergent_step = row_report.first_mismatch->step_index;
+    }
+    if (!report.first_divergent_event_seq.has_value() && row_report.first_mismatch.has_value()) {
+        report.first_divergent_event_seq = row_report.first_mismatch->event_seq;
+    }
+    if (report.first_divergent_reason.empty()) {
+        if (row_report.first_mismatch.has_value() && !row_report.first_mismatch->reason.empty()) {
+            report.first_divergent_reason = row_report.first_mismatch->reason;
+        } else {
+            report.first_divergent_reason = "row compare mismatch";
+        }
     }
 }
 

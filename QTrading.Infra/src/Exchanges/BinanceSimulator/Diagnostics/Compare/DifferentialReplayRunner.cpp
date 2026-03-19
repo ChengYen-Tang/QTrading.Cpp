@@ -33,6 +33,62 @@ ReplayMismatch BuildOrchestrationMismatch(
     return mismatch;
 }
 
+void SetFirstDivergenceFromMismatch(
+    const ReplayMismatch& mismatch,
+    ReplayCompareStatus status,
+    ReplayCompareReport& report)
+{
+    if (!report.first_divergent_step.has_value() &&
+        mismatch.step_index != ReplayMismatch::kUnspecifiedIndex) {
+        report.first_divergent_step = mismatch.step_index;
+    }
+    if (!report.first_divergent_event_seq.has_value() &&
+        mismatch.event_seq != ReplayMismatch::kUnspecifiedIndex) {
+        report.first_divergent_event_seq = mismatch.event_seq;
+    }
+    if (!report.first_divergent_row.has_value() &&
+        mismatch.row_index != ReplayMismatch::kUnspecifiedIndex) {
+        report.first_divergent_row = mismatch.row_index;
+    }
+    if (!report.first_divergent_status.has_value()) {
+        report.first_divergent_status = status;
+    }
+    if (report.first_divergent_reason.empty()) {
+        report.first_divergent_reason = mismatch.reason;
+    }
+}
+
+void SetFirstDivergenceFromStep(
+    const ReplayStepCompareResult& step_result,
+    ReplayCompareReport& report)
+{
+    if (report.first_divergent_step.has_value()) {
+        return;
+    }
+    const bool divergent = (step_result.status != ReplayCompareStatus::Success) ||
+        !step_result.mismatches.empty() ||
+        !step_result.matched;
+    if (!divergent) {
+        return;
+    }
+
+    report.first_divergent_step = step_result.step_index;
+    report.first_divergent_status = step_result.status;
+
+    if (!step_result.mismatches.empty()) {
+        const auto& first = step_result.mismatches.front();
+        if (first.event_seq != ReplayMismatch::kUnspecifiedIndex) {
+            report.first_divergent_event_seq = first.event_seq;
+        }
+        if (first.row_index != ReplayMismatch::kUnspecifiedIndex) {
+            report.first_divergent_row = first.row_index;
+        }
+        report.first_divergent_reason = first.reason;
+    } else if (!step_result.note.empty()) {
+        report.first_divergent_reason = step_result.note;
+    }
+}
+
 void MergeStepIntoReport(
     const ReplayRunnerConfig& config,
     ReplayStepCompareResult step_result,
@@ -52,6 +108,12 @@ void MergeStepIntoReport(
         }
         if (!report.first_mismatch.has_value()) {
             report.first_mismatch = mismatch;
+            SetFirstDivergenceFromMismatch(
+                mismatch,
+                step_result.status == ReplayCompareStatus::Success
+                    ? ReplayCompareStatus::Failed
+                    : step_result.status,
+                report);
         }
         report.mismatches.push_back(mismatch);
         ++report.mismatch_count;
@@ -60,6 +122,7 @@ void MergeStepIntoReport(
         }
     }
 
+    SetFirstDivergenceFromStep(step_result, report);
     report.steps.push_back(std::move(step_result));
 }
 

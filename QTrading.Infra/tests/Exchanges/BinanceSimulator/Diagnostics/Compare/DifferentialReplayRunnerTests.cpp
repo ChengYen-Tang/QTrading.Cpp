@@ -128,6 +128,10 @@ TEST(DifferentialReplayRunnerTests, FailedStatusCapturesFirstMismatchAndStopsByD
     ASSERT_TRUE(report.first_mismatch.has_value());
     EXPECT_EQ(report.first_mismatch->step_index, 1u);
     EXPECT_EQ(report.first_mismatch->field, "wallet_balance");
+    ASSERT_TRUE(report.first_divergent_step.has_value());
+    EXPECT_EQ(*report.first_divergent_step, 1u);
+    ASSERT_TRUE(report.first_divergent_status.has_value());
+    EXPECT_EQ(*report.first_divergent_status, ReplayCompare::ReplayCompareStatus::Failed);
     EXPECT_EQ(legacy_calls, 2u);
     EXPECT_EQ(candidate_calls, 2u);
 }
@@ -197,4 +201,8 @@ TEST(DifferentialReplayRunnerTests, FallbackStatusPreservesLegacyBaselineWhenCan
         EXPECT_EQ(step.status, ReplayCompare::ReplayCompareStatus::Fallback);
         EXPECT_TRUE(step.fallback_to_legacy);
     }
+    ASSERT_TRUE(report.first_divergent_status.has_value());
+    EXPECT_EQ(*report.first_divergent_status, ReplayCompare::ReplayCompareStatus::Fallback);
+    ASSERT_TRUE(report.first_divergent_step.has_value());
+    EXPECT_EQ(*report.first_divergent_step, 0u);
 }

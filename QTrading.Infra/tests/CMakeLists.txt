@@ -4,15 +4,20 @@ add_executable(QTrading.Infra.Tests
   Exchanges/BinanceSimulator/DataProvider/MarketDataTests.cpp
   Exchanges/BinanceSimulator/DataProvider/FundingRateDataTests.cpp
   Exchanges/BinanceSimulator/Account/AccountTests.cpp
+  Exchanges/BinanceSimulator/Account/AccountCoreV2Tests.cpp
+  Exchanges/BinanceSimulator/Account/AccountServicesPhase3Tests.cpp
   Exchanges/BinanceSimulator/Account/AccountPolicyInjectionTests.cpp
   Exchanges/BinanceSimulator/Calibration/CalibrationMetricsTests.cpp
   Exchanges/BinanceSimulator/BinanceExchangeLogTests.cpp
   Exchanges/BinanceSimulator/BinanceExchangeTests.cpp
+  Exchanges/BinanceSimulator/PerformanceGuardrailTests.cpp
   Exchanges/BinanceSimulator/Diagnostics/Compare/DiagnosticReportFormatterTests.cpp
   Exchanges/BinanceSimulator/Diagnostics/Compare/DifferentialReplayRunnerTests.cpp
   Exchanges/BinanceSimulator/Diagnostics/Compare/LegacyLogRowCompareTests.cpp
+  Exchanges/BinanceSimulator/Diagnostics/Compare/ReplayCompareCiGateTests.cpp
   Exchanges/BinanceSimulator/Diagnostics/Compare/ReplayCompareTestHarnessTests.cpp
   Exchanges/BinanceSimulator/Diagnostics/Compare/StepCompareModelTests.cpp
+  Exchanges/BinanceSimulator/Diagnostics/Compare/V2ReplayScenarioPackTests.cpp
 )
 
 target_include_directories(QTrading.Infra.Tests

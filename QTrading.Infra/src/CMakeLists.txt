@@ -1,5 +1,6 @@
 add_library(QTrading.Infra.Library STATIC
   Exchanges/BinanceSimulator/Account/Account.cpp
+  Exchanges/BinanceSimulator/Account/AccountCoreV2.cpp
   Exchanges/BinanceSimulator/Account/Account.IndexCache.cpp
   Exchanges/BinanceSimulator/Account/Account.Opening.cpp
   Exchanges/BinanceSimulator/Account/Account.UpdatePipeline.cpp
@@ -27,8 +28,10 @@ add_library(QTrading.Infra.Library STATIC
   Exchanges/BinanceSimulator/Diagnostics/Compare/DiagnosticReportFormatter.cpp
   Exchanges/BinanceSimulator/Diagnostics/Compare/DifferentialReplayRunner.cpp
   Exchanges/BinanceSimulator/Diagnostics/Compare/LegacyLogRowCompare.cpp
+  Exchanges/BinanceSimulator/Diagnostics/Compare/ReplayCompareCiGate.cpp
   Exchanges/BinanceSimulator/Diagnostics/Compare/ReplayCompareTestHarness.cpp
   Exchanges/BinanceSimulator/Diagnostics/Compare/StepCompareModel.cpp
+  Exchanges/BinanceSimulator/Diagnostics/Compare/V2ReplayScenarioPack.cpp
   Exchanges/BinanceSimulator/BinanceExchange.cpp
 )
 

@@ -537,6 +537,27 @@ TEST_F(BinanceExchangeFixture, CoreModeDefaultsToLegacyOnly)
     EXPECT_FALSE(ex.consume_last_compare_diagnostic().has_value());
 }
 
+TEST_F(BinanceExchangeFixture, CoreModePolicyClassifiesAndNamesModes)
+{
+    using CoreMode = BinanceExchange::CoreMode;
+    using Policy = BinanceExchange::CoreModePolicy;
+
+    EXPECT_TRUE(Policy::is_legacy_only(CoreMode::LegacyOnly));
+    EXPECT_FALSE(Policy::allows_compare_diagnostics(CoreMode::LegacyOnly));
+    EXPECT_STREQ(Policy::name(CoreMode::LegacyOnly), "LegacyOnly");
+
+    EXPECT_TRUE(Policy::is_shadow_compare(CoreMode::NewCoreShadow));
+    EXPECT_TRUE(Policy::allows_compare_diagnostics(CoreMode::NewCoreShadow));
+    EXPECT_STREQ(Policy::name(CoreMode::NewCoreShadow), "NewCoreShadow");
+
+    EXPECT_TRUE(Policy::is_new_core_primary(CoreMode::NewCorePrimary));
+    EXPECT_TRUE(Policy::allows_compare_diagnostics(CoreMode::NewCorePrimary));
+    EXPECT_STREQ(Policy::name(CoreMode::NewCorePrimary), "NewCorePrimary");
+
+    EXPECT_EQ(Policy::normalize(static_cast<CoreMode>(99)), CoreMode::LegacyOnly);
+    EXPECT_STREQ(Policy::name(static_cast<CoreMode>(99)), "LegacyOnly");
+}
+
 TEST_F(BinanceExchangeFixture, InvalidCoreModeFallsBackToLegacyOnly)
 {
     writeCsv("btc.csv", {
@@ -588,6 +609,225 @@ TEST_F(BinanceExchangeFixture, NewCorePrimaryFallsBackToLegacyPath)
     EXPECT_FALSE(diag->compared);
     EXPECT_TRUE(diag->matched);
     EXPECT_FALSE(diag->reason.empty());
+}
+
+TEST_F(BinanceExchangeFixture, NewCorePrimaryBridgeRoutesToV2WhenAvailable)
+{
+    writeCsv("btc.csv", {
+        {0,100,100,100,100,1000, 30000,100,1,0,0}
+        });
+
+    BinanceExchange ex({ {"BTCUSDT",(tmpDir / "btc.csv").string()} }, logger, /*balance*/ 1000.0);
+    ex.set_core_mode(BinanceExchange::CoreMode::NewCorePrimary);
+
+    auto bridge_diag = ex.consume_last_account_facade_bridge_diagnostic();
+    ASSERT_TRUE(bridge_diag.has_value());
+    EXPECT_EQ(bridge_diag->mode, BinanceExchange::CoreMode::NewCorePrimary);
+    EXPECT_TRUE(bridge_diag->has_v2);
+    EXPECT_TRUE(bridge_diag->routed_to_v2);
+    EXPECT_TRUE(bridge_diag->production_default_legacy_only);
+    EXPECT_FALSE(bridge_diag->reason.empty());
+
+    using QTrading::Dto::Trading::OrderSide;
+    ASSERT_TRUE(ex.perp.place_order("BTCUSDT", 1.0, OrderSide::Buy));
+    ASSERT_TRUE(ex.step());
+    EXPECT_EQ(ex.get_all_positions().size(), 1u);
+}
+
+TEST_F(BinanceExchangeFixture, NewCorePrimaryBridgeFallsBackWhenV2Unavailable)
+{
+    writeCsv("btc.csv", {
+        {0,100,100,100,100,1000, 30000,100,1,0,0}
+        });
+
+    auto legacy_account = std::make_shared<Account>(1000.0, 0);
+    BinanceExchange ex(
+        { {"BTCUSDT",(tmpDir / "btc.csv").string()} },
+        logger,
+        legacy_account);
+
+    ex.set_core_mode(BinanceExchange::CoreMode::NewCorePrimary);
+    auto bridge_diag = ex.consume_last_account_facade_bridge_diagnostic();
+    ASSERT_TRUE(bridge_diag.has_value());
+    EXPECT_EQ(bridge_diag->mode, BinanceExchange::CoreMode::NewCorePrimary);
+    EXPECT_FALSE(bridge_diag->has_v2);
+    EXPECT_FALSE(bridge_diag->routed_to_v2);
+    EXPECT_TRUE(bridge_diag->production_default_legacy_only);
+    EXPECT_FALSE(bridge_diag->reason.empty());
+
+    using QTrading::Dto::Trading::OrderSide;
+    ASSERT_TRUE(ex.perp.place_order("BTCUSDT", 1.0, OrderSide::Buy));
+    ASSERT_TRUE(ex.step());
+    EXPECT_EQ(ex.get_all_positions().size(), 1u);
+}
+
+TEST_F(BinanceExchangeFixture, FacadeContractLegacyAndV2PrimaryKeepInputReturnAndSnapshotConsistent)
+{
+    writeCsv("btc.csv", {
+        {      0,100,100,100,100,1000, 30000,100,1,0,0 },
+        {  60000,105,105,105,105,1000, 90000,100,1,0,0 }
+        });
+    writeFundingCsv("btc_funding.csv", {
+        {  60000, 0.001, 100.0 }
+        });
+
+    struct RunResult {
+        bool place_ok{ false };
+        bool invalid_ok{ false };
+        std::vector<QTrading::dto::Position> positions{};
+        std::vector<QTrading::dto::Order> orders{};
+        QTrading::Dto::Account::BalanceSnapshot perp{};
+        QTrading::Dto::Account::BalanceSnapshot spot{};
+        double total_cash{ 0.0 };
+        BinanceExchange::StatusSnapshot snapshot{};
+        std::optional<BinanceExchange::AccountFacadeBridgeDiagnostic> bridge_diag{};
+    };
+
+    auto run_case = [&](bool with_v2, BinanceExchange::CoreMode mode) -> RunResult {
+        Account::AccountInitConfig cfg{};
+        cfg.spot_initial_cash = 500.0;
+        cfg.perp_initial_wallet = 1000.0;
+        cfg.vip_level = 0;
+
+        auto account = std::make_shared<Account>(cfg);
+        std::shared_ptr<AccountCoreV2> v2{};
+        if (with_v2) {
+            v2 = std::make_shared<AccountCoreV2>(cfg);
+        }
+
+        BinanceExchange ex(
+            { BinanceExchange::SymbolDataset{
+                "BTCUSDT",
+                (tmpDir / "btc.csv").string(),
+                std::optional<std::string>((tmpDir / "btc_funding.csv").string()),
+                std::nullopt,
+                std::nullopt,
+                QTrading::Dto::Trading::InstrumentType::Perp} },
+            logger,
+            account,
+            v2,
+            112233ull);
+        ex.set_core_mode(mode);
+
+        RunResult out{};
+        out.bridge_diag = ex.consume_last_account_facade_bridge_diagnostic();
+        const auto market_channel = ex.get_market_channel();
+
+        using QTrading::Dto::Trading::OrderSide;
+        EXPECT_NO_THROW(out.place_ok = ex.perp.place_order("BTCUSDT", 1.0, OrderSide::Buy));
+        EXPECT_NO_THROW(out.invalid_ok = ex.perp.place_order("BTCUSDT", -1.0, OrderSide::Buy));
+
+        const bool step1 = ex.step();
+        EXPECT_TRUE(step1);
+        if (step1) {
+            EXPECT_TRUE(market_channel->Receive().has_value());
+        }
+        const bool step2 = ex.step();
+        EXPECT_TRUE(step2);
+        if (step2) {
+            EXPECT_TRUE(market_channel->Receive().has_value());
+        }
+
+        out.positions = ex.get_all_positions();
+        out.orders = ex.get_all_open_orders();
+        out.perp = ex.get_perp_balance();
+        out.spot = ex.get_spot_balance();
+        out.total_cash = ex.get_total_cash_balance();
+        ex.FillStatusSnapshot(out.snapshot);
+        return out;
+    };
+
+    const auto legacy = run_case(false, BinanceExchange::CoreMode::LegacyOnly);
+    const auto v2_primary = run_case(true, BinanceExchange::CoreMode::NewCorePrimary);
+
+    EXPECT_TRUE(legacy.place_ok);
+    EXPECT_TRUE(v2_primary.place_ok);
+    EXPECT_FALSE(legacy.invalid_ok);
+    EXPECT_FALSE(v2_primary.invalid_ok);
+
+    EXPECT_TRUE(BinanceExchange::vec_equal(legacy.positions, v2_primary.positions));
+    EXPECT_TRUE(BinanceExchange::vec_equal(legacy.orders, v2_primary.orders));
+    EXPECT_NEAR(legacy.perp.WalletBalance, v2_primary.perp.WalletBalance, 1e-9);
+    EXPECT_NEAR(legacy.spot.WalletBalance, v2_primary.spot.WalletBalance, 1e-9);
+    EXPECT_NEAR(legacy.total_cash, v2_primary.total_cash, 1e-9);
+    EXPECT_NEAR(legacy.snapshot.total_ledger_value, v2_primary.snapshot.total_ledger_value, 1e-9);
+    EXPECT_EQ(legacy.snapshot.ts_exchange, v2_primary.snapshot.ts_exchange);
+
+    ASSERT_TRUE(v2_primary.bridge_diag.has_value());
+    EXPECT_EQ(v2_primary.bridge_diag->mode, BinanceExchange::CoreMode::NewCorePrimary);
+    EXPECT_TRUE(v2_primary.bridge_diag->has_v2);
+    EXPECT_TRUE(v2_primary.bridge_diag->routed_to_v2);
+}
+
+TEST_F(BinanceExchangeFixture, FacadeContractFallbackKeepsLegacyBaselineWhenV2Unavailable)
+{
+    writeCsv("btc.csv", {
+        {      0,100,100,100,100,1000, 30000,100,1,0,0 },
+        {  60000,90,90,90,90,1000, 90000,100,1,0,0 }
+        });
+    writeFundingCsv("btc_funding.csv", {
+        {  60000, -0.001, 100.0 }
+        });
+
+    auto run_case = [&](BinanceExchange::CoreMode mode)
+        -> std::tuple<
+            std::vector<QTrading::dto::Position>,
+            std::vector<QTrading::dto::Order>,
+            double,
+            BinanceExchange::StatusSnapshot,
+            std::optional<BinanceExchange::AccountFacadeBridgeDiagnostic>> {
+        auto account = std::make_shared<Account>(1000.0, 0);
+        BinanceExchange ex(
+            { BinanceExchange::SymbolDataset{
+                "BTCUSDT",
+                (tmpDir / "btc.csv").string(),
+                std::optional<std::string>((tmpDir / "btc_funding.csv").string()),
+                std::nullopt,
+                std::nullopt,
+                QTrading::Dto::Trading::InstrumentType::Perp} },
+            logger,
+            account);
+        ex.set_core_mode(mode);
+
+        const auto bridge_diag = ex.consume_last_account_facade_bridge_diagnostic();
+        using QTrading::Dto::Trading::OrderSide;
+        const bool placed = ex.perp.place_order("BTCUSDT", 1.0, OrderSide::Buy);
+        EXPECT_TRUE(placed);
+
+        const auto market_channel = ex.get_market_channel();
+        const bool step1 = ex.step();
+        EXPECT_TRUE(step1);
+        if (step1) {
+            EXPECT_TRUE(market_channel->Receive().has_value());
+        }
+        const bool step2 = ex.step();
+        EXPECT_TRUE(step2);
+        if (step2) {
+            EXPECT_TRUE(market_channel->Receive().has_value());
+        }
+
+        BinanceExchange::StatusSnapshot snapshot{};
+        ex.FillStatusSnapshot(snapshot);
+        return std::make_tuple(
+            ex.get_all_positions(),
+            ex.get_all_open_orders(),
+            ex.get_total_cash_balance(),
+            snapshot,
+            bridge_diag);
+    };
+
+    const auto legacy = run_case(BinanceExchange::CoreMode::LegacyOnly);
+    const auto fallback = run_case(BinanceExchange::CoreMode::NewCorePrimary);
+
+    EXPECT_TRUE(BinanceExchange::vec_equal(std::get<0>(legacy), std::get<0>(fallback)));
+    EXPECT_TRUE(BinanceExchange::vec_equal(std::get<1>(legacy), std::get<1>(fallback)));
+    EXPECT_NEAR(std::get<2>(legacy), std::get<2>(fallback), 1e-9);
+    EXPECT_NEAR(std::get<3>(legacy).total_ledger_value, std::get<3>(fallback).total_ledger_value, 1e-9);
+    EXPECT_EQ(std::get<3>(legacy).ts_exchange, std::get<3>(fallback).ts_exchange);
+
+    ASSERT_TRUE(std::get<4>(fallback).has_value());
+    EXPECT_FALSE(std::get<4>(fallback)->has_v2);
+    EXPECT_FALSE(std::get<4>(fallback)->routed_to_v2);
 }
 
 TEST_F(BinanceExchangeFixture, EventPublishModeDefaultsToLegacyDirect)
@@ -673,6 +913,165 @@ TEST_F(BinanceExchangeFixture, DualPublishCompareDeterministicReplayProducesStab
     const auto first = run_once();
     const auto second = run_once();
     EXPECT_EQ(first, second);
+}
+
+TEST_F(BinanceExchangeFixture, SideEffectAdaptersCaptureMaterializedSnapshotsAndHooks)
+{
+    writeCsv("btc.csv", {
+        {      0,1,1,1,1,100, 30000,100,1,0,0 },
+        {  60000,2,2,2,2,100, 90000,100,1,0,0 }
+        });
+
+    BinanceExchange ex({ {"BTCUSDT",(tmpDir / "btc.csv").string()} }, logger, /*balance*/ 1000.0);
+    auto mCh = ex.get_market_channel();
+    auto pCh = ex.get_position_channel();
+    auto oCh = ex.get_order_channel();
+
+    std::vector<uint64_t> market_timestamps;
+    std::vector<size_t> position_sizes;
+    std::vector<size_t> order_sizes;
+    std::vector<BinanceExchange::SideEffectStepSnapshot> snapshots;
+
+    BinanceExchange::SideEffectAdapterConfig adapters{};
+    adapters.market_publisher = [&](MultiKlinePtr dto) {
+        EXPECT_TRUE(dto != nullptr);
+        if (dto) {
+            market_timestamps.push_back(dto->Timestamp);
+        }
+    };
+    adapters.position_publisher = [&](const std::vector<QTrading::dto::Position>& positions) {
+        position_sizes.push_back(positions.size());
+    };
+    adapters.order_publisher = [&](const std::vector<QTrading::dto::Order>& orders) {
+        order_sizes.push_back(orders.size());
+    };
+    adapters.external_hook = [&](const BinanceExchange::SideEffectStepSnapshot& snap) {
+        snapshots.push_back(snap);
+    };
+    ex.set_side_effect_adapters(std::move(adapters));
+
+    ASSERT_TRUE(ex.step());
+    EXPECT_FALSE(mCh->TryReceive().has_value());
+    EXPECT_FALSE(pCh->TryReceive().has_value());
+    EXPECT_FALSE(oCh->TryReceive().has_value());
+
+    using QTrading::Dto::Trading::OrderSide;
+    ASSERT_TRUE(ex.perp.place_order("BTCUSDT", 1.0, 1.0, OrderSide::Buy));
+    ASSERT_TRUE(ex.step());
+    EXPECT_FALSE(mCh->TryReceive().has_value());
+    EXPECT_FALSE(pCh->TryReceive().has_value());
+    EXPECT_FALSE(oCh->TryReceive().has_value());
+
+    const std::vector<uint64_t> expected_market_ts{ 0u, 60000u };
+    EXPECT_EQ(market_timestamps, expected_market_ts);
+    EXPECT_TRUE(position_sizes.empty());
+    ASSERT_EQ(order_sizes.size(), 1u);
+    EXPECT_EQ(order_sizes[0], 1u);
+
+    ASSERT_EQ(snapshots.size(), 2u);
+    EXPECT_EQ(snapshots[0].step_seq, 1u);
+    EXPECT_EQ(snapshots[0].ts_exchange, 0u);
+    EXPECT_TRUE(snapshots[0].market_published);
+    EXPECT_FALSE(snapshots[0].position_published);
+    EXPECT_FALSE(snapshots[0].order_published);
+
+    EXPECT_EQ(snapshots[1].step_seq, 2u);
+    EXPECT_EQ(snapshots[1].ts_exchange, 60000u);
+    EXPECT_TRUE(snapshots[1].market_published);
+    EXPECT_FALSE(snapshots[1].position_published);
+    EXPECT_TRUE(snapshots[1].order_published);
+    EXPECT_GE(snapshots[1].state_version, snapshots[0].state_version);
+}
+
+TEST_F(BinanceExchangeFixture, ResetSideEffectAdaptersRestoresLegacyChannelPublish)
+{
+    writeCsv("btc.csv", {
+        {      0,1,1,1,1,100, 30000,100,1,0,0 },
+        {  60000,2,2,2,2,100, 90000,100,1,0,0 }
+        });
+
+    BinanceExchange ex({ {"BTCUSDT",(tmpDir / "btc.csv").string()} }, logger, /*balance*/ 1000.0);
+    auto mCh = ex.get_market_channel();
+
+    BinanceExchange::SideEffectAdapterConfig adapters{};
+    adapters.market_publisher = [](MultiKlinePtr) {
+        // swallow market publish
+    };
+    ex.set_side_effect_adapters(std::move(adapters));
+
+    ASSERT_TRUE(ex.step());
+    EXPECT_FALSE(mCh->TryReceive().has_value());
+
+    ex.reset_side_effect_adapters();
+
+    ASSERT_TRUE(ex.step());
+    auto dto = mCh->Receive();
+    ASSERT_TRUE(dto.has_value());
+    EXPECT_EQ(dto->get()->Timestamp, 60000u);
+}
+
+TEST_F(BinanceExchangeFixture, ForwardingSideEffectAdaptersPreservePublishOrderingAndEventDiagnostics)
+{
+    writeCsv("btc.csv", {
+        {      0,1,1,1,1,100, 30000,100,1,0,0 },
+        {  60000,2,2,2,2,100, 90000,100,1,0,0 },
+        {  90000,1,1,1,1,100,120000,100,1,0,0 }
+        });
+
+    BinanceExchange ex({ {"BTCUSDT",(tmpDir / "btc.csv").string()} }, logger, /*balance*/ 1000.0);
+    auto mCh = ex.get_market_channel();
+    auto pCh = ex.get_position_channel();
+    auto oCh = ex.get_order_channel();
+
+    std::vector<char> publish_sequence;
+    BinanceExchange::SideEffectAdapterConfig adapters{};
+    adapters.market_publisher = [&](MultiKlinePtr dto) {
+        publish_sequence.push_back('M');
+        mCh->Send(dto);
+    };
+    adapters.position_publisher = [&](const std::vector<QTrading::dto::Position>& positions) {
+        publish_sequence.push_back('P');
+        pCh->Send(positions);
+    };
+    adapters.order_publisher = [&](const std::vector<QTrading::dto::Order>& orders) {
+        publish_sequence.push_back('O');
+        oCh->Send(orders);
+    };
+    ex.set_side_effect_adapters(std::move(adapters));
+    ex.set_event_publish_mode(BinanceExchange::EventPublishMode::DualPublishCompare);
+
+    ASSERT_TRUE(ex.step());
+    ASSERT_TRUE(mCh->Receive().has_value());
+    auto diag1 = ex.consume_last_event_publish_diagnostic();
+    ASSERT_TRUE(diag1.has_value());
+    EXPECT_TRUE(diag1->matched);
+
+    using QTrading::Dto::Trading::OrderSide;
+    ASSERT_TRUE(ex.perp.place_order("BTCUSDT", 1.0, 1.0, OrderSide::Buy));
+
+    ASSERT_TRUE(ex.step());
+    ASSERT_TRUE(mCh->Receive().has_value());
+    auto ord1 = oCh->Receive();
+    ASSERT_TRUE(ord1.has_value());
+    EXPECT_EQ(ord1->size(), 1u);
+    auto diag2 = ex.consume_last_event_publish_diagnostic();
+    ASSERT_TRUE(diag2.has_value());
+    EXPECT_TRUE(diag2->matched);
+
+    ASSERT_TRUE(ex.step());
+    ASSERT_TRUE(mCh->Receive().has_value());
+    auto pos = pCh->Receive();
+    ASSERT_TRUE(pos.has_value());
+    EXPECT_EQ(pos->size(), 1u);
+    auto ord2 = oCh->Receive();
+    ASSERT_TRUE(ord2.has_value());
+    EXPECT_TRUE(ord2->empty());
+    auto diag3 = ex.consume_last_event_publish_diagnostic();
+    ASSERT_TRUE(diag3.has_value());
+    EXPECT_TRUE(diag3->matched);
+
+    const std::vector<char> expected_sequence{ 'M', 'M', 'O', 'M', 'P', 'O' };
+    EXPECT_EQ(publish_sequence, expected_sequence);
 }
 
 TEST_F(BinanceExchangeFixture, FundingAppliedAndDeduped)

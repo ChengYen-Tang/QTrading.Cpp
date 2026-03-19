@@ -76,6 +76,11 @@ ReplayCompare::ReplayCompareReport BuildFailedReport()
             "row contract mismatch"),
     };
     report.first_mismatch = report.mismatches.front();
+    report.first_divergent_step = 7;
+    report.first_divergent_event_seq = 3;
+    report.first_divergent_row = 15;
+    report.first_divergent_status = ReplayCompare::ReplayCompareStatus::Failed;
+    report.first_divergent_reason = "state drift";
     report.mismatch_count = report.mismatches.size();
     report.legacy_row_snapshot_lines = {
         "row[14] AccountEvent ...",
@@ -193,6 +198,7 @@ TEST(DiagnosticReportFormatterTests, OutputShowsScenarioStepAndFirstMismatchLoca
 
     EXPECT_NE(text.find("scenario=dual-symbol-holes"), std::string::npos);
     EXPECT_NE(text.find("step=7"), std::string::npos);
+    EXPECT_NE(text.find("first_divergence status=Failed"), std::string::npos);
     EXPECT_NE(text.find("field=account.total_cash_balance"), std::string::npos);
     EXPECT_NE(text.find("mismatch_count=3"), std::string::npos);
 }
@@ -219,6 +225,14 @@ TEST(DiagnosticReportFormatterTests, ArtifactJsonCanBeParsedForKeyFields)
     EXPECT_EQ(*key_fields.first_mismatch_step, 7u);
     ASSERT_TRUE(key_fields.first_mismatch_domain.has_value());
     EXPECT_EQ(*key_fields.first_mismatch_domain, "State");
+    ASSERT_TRUE(key_fields.first_divergent_status.has_value());
+    EXPECT_EQ(*key_fields.first_divergent_status, ReplayCompare::ReplayCompareStatus::Failed);
+    ASSERT_TRUE(key_fields.first_divergent_step.has_value());
+    EXPECT_EQ(*key_fields.first_divergent_step, 7u);
+    ASSERT_TRUE(key_fields.first_divergent_event.has_value());
+    EXPECT_EQ(*key_fields.first_divergent_event, 3u);
+    ASSERT_TRUE(key_fields.first_divergent_row.has_value());
+    EXPECT_EQ(*key_fields.first_divergent_row, 15u);
     EXPECT_TRUE(key_fields.has_legacy_row_snapshot);
 }
 
@@ -252,4 +266,3 @@ TEST(DiagnosticReportFormatterTests, TriageDifferentiatesFeatureGapAndSemanticDr
         ReplayCompare::DiagnosticReportFormatter::InferTriageKind(report),
         ReplayCompare::DiagnosticTriageKind::FeatureGap);
 }
-

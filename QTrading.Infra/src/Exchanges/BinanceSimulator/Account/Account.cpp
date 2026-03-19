@@ -547,8 +547,44 @@ Account::SpotCommissionMode Account::spot_commission_mode() const
     return spot_commission_mode_;
 }
 
+double Account::PureCalculationService::ComputeTotalCashBalance(
+    double perp_wallet_balance, double spot_cash_balance) noexcept
+{
+    return perp_wallet_balance + spot_cash_balance;
+}
+
+double Account::PureCalculationService::ComputeMaintenanceMarginForNotional(
+    double notional, const std::vector<::MarginTier>& tiers) noexcept
+{
+    const double n = std::max(0.0, notional);
+    if (tiers.empty()) {
+        return 0.0;
+    }
+
+    // Binance bracket-style cumulative deduction to keep piecewise function continuous.
+    double deduction = 0.0;
+    for (size_t i = 0; i < tiers.size(); ++i) {
+        const auto& tier = tiers[i];
+        if (i > 0) {
+            const auto& prev = tiers[i - 1];
+            deduction += prev.notional_upper * (tier.maintenance_margin_rate - prev.maintenance_margin_rate);
+        }
+
+        if (n <= tier.notional_upper) {
+            const double mm = n * tier.maintenance_margin_rate - deduction;
+            return std::max(0.0, mm);
+        }
+    }
+
+    const auto& back = tiers.back();
+    const double mm = n * back.maintenance_margin_rate - deduction;
+    return std::max(0.0, mm);
+}
+
 double Account::get_total_cash_balance() const {
-    return perp_ledger_.wallet_balance() + spot_ledger_.cash_balance();
+    return PureCalculationService::ComputeTotalCashBalance(
+        perp_ledger_.wallet_balance(),
+        spot_ledger_.cash_balance());
 }
 
 /// @brief Switch between one-way mode and hedge mode.
@@ -1271,6 +1307,55 @@ const std::vector<Position>& Account::get_all_positions() const {
     return positions_;
 }
 
+Account::AccountStateView Account::snapshot_state_view() const
+{
+    AccountStateView view{};
+    view.state_version = state_version_;
+    view.hedge_mode = hedge_mode_;
+    view.strict_binance_mode = strict_binance_mode_;
+    view.strict_symbol_registration_mode = strict_symbol_registration_mode_;
+    view.perp_wallet_balance = get_wallet_balance();
+    view.spot_cash_balance = get_spot_cash_balance();
+    view.total_cash_balance = get_total_cash_balance();
+    view.equity = get_equity();
+    view.margin_balance = get_margin_balance();
+    view.available_balance = get_available_balance();
+
+    view.open_orders.reserve(open_orders_.size());
+    for (const auto& order : open_orders_) {
+        OrderStateView row{};
+        row.id = order.id;
+        row.symbol = order.symbol;
+        row.side = order.side;
+        row.position_side = order.position_side;
+        row.instrument_type = order.instrument_type;
+        row.reduce_only = order.reduce_only;
+        row.close_position = order.close_position;
+        row.quantity = order.quantity;
+        row.price = order.price;
+        view.open_orders.push_back(std::move(row));
+    }
+
+    view.positions.reserve(positions_.size());
+    for (const auto& position : positions_) {
+        PositionStateView row{};
+        row.id = position.id;
+        row.symbol = position.symbol;
+        row.is_long = position.is_long;
+        row.instrument_type = position.instrument_type;
+        row.quantity = position.quantity;
+        row.entry_price = position.entry_price;
+        row.notional = position.notional;
+        row.initial_margin = position.initial_margin;
+        row.maintenance_margin = position.maintenance_margin;
+        row.unrealized_pnl = position.unrealized_pnl;
+        row.leverage = position.leverage;
+        view.positions.push_back(std::move(row));
+    }
+
+    return view;
+}
+
 /// @brief Find the maintenance margin rate and max leverage for a given notional.
 /// @param notional Position notional.
 /// @return Tuple(maintenance_margin_rate, max_leverage).
@@ -1286,29 +1371,7 @@ std::tuple<double, double> Account::get_tier_info(double notional) const {
 
 double Account::maintenance_margin_for_notional_(double notional) const
 {
-    const double n = std::max(0.0, notional);
-    if (margin_tiers.empty()) {
-        return 0.0;
-    }
-
-    // Binance bracket-style cumulative deduction to keep piecewise function continuous.
-    double deduction = 0.0;
-    for (size_t i = 0; i < margin_tiers.size(); ++i) {
-        const auto& tier = margin_tiers[i];
-        if (i > 0) {
-            const auto& prev = margin_tiers[i - 1];
-            deduction += prev.notional_upper * (tier.maintenance_margin_rate - prev.maintenance_margin_rate);
-        }
-
-        if (n <= tier.notional_upper) {
-            const double mm = n * tier.maintenance_margin_rate - deduction;
-            return std::max(0.0, mm);
-        }
-    }
-
-    const auto& back = margin_tiers.back();
-    const double mm = n * back.maintenance_margin_rate - deduction;
-    return std::max(0.0, mm);
+    return PureCalculationService::ComputeMaintenanceMarginForNotional(notional, margin_tiers);
 }
 
 /// @brief Get maker and taker fee rates by instrument type and VIP level.

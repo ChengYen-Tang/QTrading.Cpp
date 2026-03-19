@@ -43,6 +43,9 @@ struct LegacyLogRowCompareRules {
     LegacyLogRowOrderingRule ordering{ LegacyLogRowOrderingRule::Arrival };
     bool strict_row_kind{ true };
     bool strict_payload_fields{ true };
+    bool trim_payload_whitespace{ true };
+    bool normalize_numeric_payload{ true };
+    double payload_numeric_abs_tolerance{ 1e-9 };
     bool strict_step_seq{ true };
     bool strict_event_seq{ true };
     bool strict_ts_exchange{ true };

@@ -192,10 +192,17 @@ double Account::get_equity() const
 }
 
 std::vector<Account::FundingApplyResult> Account::apply_funding(
-    const std::string& symbol, uint64_t /*funding_time*/, double rate, double mark_price)
+    const std::string& symbol, uint64_t funding_time, double rate, double mark_price)
 {
+    return FundingService::ApplyFunding(*this, symbol, funding_time, rate, mark_price);
+}
+
+std::vector<Account::FundingApplyResult> Account::FundingService::ApplyFunding(
+    Account& owner, const std::string& symbol, uint64_t funding_time, double rate, double mark_price)
+{
+    (void)funding_time;
     std::vector<FundingApplyResult> results;
-    if (!resolve_instrument_spec_(symbol).funding_enabled) {
+    if (!owner.resolve_instrument_spec_(symbol).funding_enabled) {
         return results;
     }
     if (!std::isfinite(mark_price) || mark_price <= 0.0) {
@@ -203,22 +210,25 @@ std::vector<Account::FundingApplyResult> Account::apply_funding(
     }
 
     double total_delta = 0.0;
-
-    auto it = position_indices_by_symbol_.find(symbol);
-    if (it == position_indices_by_symbol_.end()) {
+    auto it = owner.position_indices_by_symbol_.find(symbol);
+    if (it == owner.position_indices_by_symbol_.end()) {
         return results;
     }
 
     const auto& indices = it->second;
     for (size_t idx : indices) {
-        if (idx >= positions_.size()) continue;
-        auto& pos = positions_[idx];
-        if (pos.symbol != symbol) continue;
-        if (pos.quantity <= 0.0) continue;
-        if (pos.instrument_type != InstrumentType::Perp) continue;
+        if (idx >= owner.positions_.size()) {
+            continue;
+        }
+        auto& pos = owner.positions_[idx];
+        if (pos.symbol != symbol || pos.quantity <= 0.0 || pos.instrument_type != InstrumentType::Perp) {
+            continue;
+        }
 
         const double notional = std::abs(pos.quantity) * mark_price;
-        if (notional <= 0.0) continue;
+        if (notional <= 0.0) {
+            continue;
+        }
 
         const double dir = pos.is_long ? -1.0 : 1.0;
         const double funding = notional * rate * dir;
@@ -230,8 +240,8 @@ std::vector<Account::FundingApplyResult> Account::apply_funding(
         return results;
     }
 
-    perp_ledger_.credit_wallet(total_delta);
-    mark_balance_dirty_();
-    ++state_version_;
+    owner.perp_ledger_.credit_wallet(total_delta);
+    owner.mark_balance_dirty_();
+    ++owner.state_version_;
     return results;
 }

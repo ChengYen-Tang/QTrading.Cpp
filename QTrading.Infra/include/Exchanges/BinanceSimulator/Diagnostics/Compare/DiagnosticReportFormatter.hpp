@@ -36,6 +36,10 @@ struct ReplayCompareArtifactKeyFields {
     std::optional<std::string> first_mismatch_field{};
     std::optional<uint64_t> first_mismatch_step{};
     std::optional<std::string> first_mismatch_domain{};
+    std::optional<ReplayCompareStatus> first_divergent_status{};
+    std::optional<uint64_t> first_divergent_step{};
+    std::optional<uint64_t> first_divergent_event{};
+    std::optional<uint64_t> first_divergent_row{};
     bool has_legacy_row_snapshot{ false };
 };
 
