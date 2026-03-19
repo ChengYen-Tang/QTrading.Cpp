@@ -526,14 +526,14 @@ TEST_F(BinanceExchangeFixture, AccountFacadeTransfersRespectAvailability)
     EXPECT_FALSE(ex.account.transfer_spot_to_perp(300.0));
 }
 
-TEST_F(BinanceExchangeFixture, CoreModeDefaultsToLegacyOnly)
+TEST_F(BinanceExchangeFixture, CoreModeDefaultsToNewCorePrimary)
 {
     writeCsv("btc.csv", {
         {0,100,100,100,100,1000, 30000,100,1,0,0}
         });
 
     BinanceExchange ex({ {"BTCUSDT",(tmpDir / "btc.csv").string()} }, logger, /*balance*/ 1000.0);
-    EXPECT_EQ(ex.core_mode(), BinanceExchange::CoreMode::LegacyOnly);
+    EXPECT_EQ(ex.core_mode(), BinanceExchange::CoreMode::NewCorePrimary);
     EXPECT_FALSE(ex.consume_last_compare_diagnostic().has_value());
 }
 
@@ -644,8 +644,8 @@ TEST_F(BinanceExchangeFixture, SessionReplayCoexistenceDiagnosticClassifiesModes
     EXPECT_EQ(primary_diag->effective_mode, BinanceExchange::CoreMode::NewCorePrimary);
     EXPECT_FALSE(primary_diag->shadow_compare_enabled);
     EXPECT_TRUE(primary_diag->v2_explicit_enabled);
-    EXPECT_TRUE(primary_diag->compare_artifact_enabled);
-    EXPECT_TRUE(primary_diag->production_default_legacy_only);
+    EXPECT_FALSE(primary_diag->compare_artifact_enabled);
+    EXPECT_FALSE(primary_diag->production_default_legacy_only);
     EXPECT_TRUE(primary_diag->fail_close_protected);
 }
 
@@ -807,7 +807,7 @@ TEST_F(BinanceExchangeFixture, NewCorePrimaryBridgeRoutesToV2WhenAvailable)
     EXPECT_EQ(bridge_diag->mode, BinanceExchange::CoreMode::NewCorePrimary);
     EXPECT_TRUE(bridge_diag->has_v2);
     EXPECT_TRUE(bridge_diag->routed_to_v2);
-    EXPECT_TRUE(bridge_diag->production_default_legacy_only);
+    EXPECT_FALSE(bridge_diag->production_default_legacy_only);
     EXPECT_FALSE(bridge_diag->reason.empty());
 
     using QTrading::Dto::Trading::OrderSide;
@@ -834,7 +834,7 @@ TEST_F(BinanceExchangeFixture, NewCorePrimaryBridgeFallsBackWhenV2Unavailable)
     EXPECT_EQ(bridge_diag->mode, BinanceExchange::CoreMode::NewCorePrimary);
     EXPECT_FALSE(bridge_diag->has_v2);
     EXPECT_FALSE(bridge_diag->routed_to_v2);
-    EXPECT_TRUE(bridge_diag->production_default_legacy_only);
+    EXPECT_FALSE(bridge_diag->production_default_legacy_only);
     EXPECT_FALSE(bridge_diag->reason.empty());
 
     using QTrading::Dto::Trading::OrderSide;
@@ -1393,6 +1393,9 @@ TEST_F(BinanceExchangeFixture, BinanceExchangeFacadeBridgeKeepsLegacyContractBou
 
     BinanceExchange ex({ {"BTCUSDT",(tmpDir / "btc.csv").string()} }, logger, /*balance*/ 1000.0);
     auto mCh = ex.get_market_channel();
+    ex.set_core_mode(BinanceExchange::CoreMode::LegacyOnly);
+    (void)ex.consume_last_session_replay_coexistence_diagnostic();
+    (void)ex.consume_last_account_facade_bridge_diagnostic();
 
     ASSERT_TRUE(ex.step());
     ASSERT_TRUE(mCh->Receive().has_value());

@@ -681,6 +681,9 @@ BinanceExchange::BinanceExchange(
     if (const char* env = std::getenv("QTRADING_SESSION_REPLAY_FORCE_LEGACY_ONLY")) {
         force_legacy_only_.store(env_truthy(env), std::memory_order_release);
     }
+    if (force_legacy_only_.load(std::memory_order_acquire) && legacy_account_engine_) {
+        account_engine_ = legacy_account_engine_;
+    }
     if (run_id == 0) {
         run_id = now_ms();
     }
@@ -959,12 +962,11 @@ void BinanceExchange::set_core_mode(CoreMode mode)
     SessionReplayCoexistenceDiagnostic coexistence_diag{};
     coexistence_diag.requested_mode = requested_mode;
     coexistence_diag.effective_mode = effective_mode;
-    coexistence_diag.production_default_legacy_only = true;
+    coexistence_diag.production_default_legacy_only = false;
     coexistence_diag.force_legacy_only = force_legacy_only;
     coexistence_diag.shadow_compare_enabled = (effective_mode == CoreMode::NewCoreShadow);
     coexistence_diag.v2_explicit_enabled = (effective_mode == CoreMode::NewCorePrimary);
-    coexistence_diag.compare_artifact_enabled = coexistence_diag.shadow_compare_enabled
-        || coexistence_diag.v2_explicit_enabled;
+    coexistence_diag.compare_artifact_enabled = coexistence_diag.shadow_compare_enabled;
     coexistence_diag.fail_close_protected = true;
     coexistence_diag.fallback_to_legacy = (effective_mode == CoreMode::LegacyOnly) &&
         (requested_mode != CoreMode::LegacyOnly);
@@ -977,7 +979,7 @@ void BinanceExchange::set_core_mode(CoreMode mode)
 
     AccountFacadeBridgeDiagnostic diag{};
     diag.mode = effective_mode;
-    diag.production_default_legacy_only = true;
+    diag.production_default_legacy_only = false;
 
     if (!account_facade_bridge_) {
         diag.has_v2 = false;
@@ -1125,11 +1127,11 @@ bool BinanceExchange::run_step_session_()
     SessionReplayCoexistenceDiagnostic diag{};
     diag.requested_mode = requested_mode;
     diag.effective_mode = effective_mode;
-    diag.production_default_legacy_only = true;
+    diag.production_default_legacy_only = false;
     diag.force_legacy_only = force_legacy_only;
     diag.shadow_compare_enabled = (effective_mode == CoreMode::NewCoreShadow);
     diag.v2_explicit_enabled = (effective_mode == CoreMode::NewCorePrimary);
-    diag.compare_artifact_enabled = diag.shadow_compare_enabled || diag.v2_explicit_enabled;
+    diag.compare_artifact_enabled = diag.shadow_compare_enabled;
     diag.fallback_to_legacy = result.fallback_to_legacy || (force_legacy_only && requested_mode != CoreMode::LegacyOnly);
     diag.fail_close_protected = true;
     if (force_legacy_only && requested_mode != CoreMode::LegacyOnly) {

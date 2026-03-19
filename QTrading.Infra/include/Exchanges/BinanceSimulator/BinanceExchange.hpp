@@ -291,14 +291,14 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
             CoreMode mode{ CoreMode::LegacyOnly };
             bool has_v2{ false };
             bool routed_to_v2{ false };
-            bool production_default_legacy_only{ true };
+            bool production_default_legacy_only{ false };
             std::string reason;
         };
 
         struct SessionReplayCoexistenceDiagnostic {
             CoreMode requested_mode{ CoreMode::LegacyOnly };
             CoreMode effective_mode{ CoreMode::LegacyOnly };
-            bool production_default_legacy_only{ true };
+            bool production_default_legacy_only{ false };
             bool force_legacy_only{ false };
             bool shadow_compare_enabled{ false };
             bool v2_explicit_enabled{ false };
@@ -758,7 +758,7 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
         uint64_t last_account_version_{ 0 };
         uint64_t last_logged_version_{ static_cast<uint64_t>(-1) };
         uint64_t last_step_ts_{ 0 };
-        std::atomic<CoreMode> core_mode_{ CoreMode::LegacyOnly };
+        std::atomic<CoreMode> core_mode_{ CoreMode::NewCorePrimary };
         mutable std::mutex compare_diag_mtx_;
         std::optional<StepCompareDiagnostic> last_compare_diagnostic_;
         mutable std::mutex account_facade_bridge_diag_mtx_;

@@ -12,6 +12,8 @@ add_executable(QTrading.Infra.Tests
   Exchanges/BinanceSimulator/BinanceExchangeTests.cpp
   Exchanges/BinanceSimulator/PerformanceGuardrailTests.cpp
   Exchanges/BinanceSimulator/Diagnostics/Compare/DiagnosticReportFormatterTests.cpp
+  Exchanges/BinanceSimulator/Diagnostics/Compare/PerformanceCiGateTests.cpp
+  Exchanges/BinanceSimulator/Diagnostics/Compare/PerformanceEvidenceFormatterTests.cpp
   Exchanges/BinanceSimulator/Diagnostics/Compare/DifferentialReplayRunnerTests.cpp
   Exchanges/BinanceSimulator/Diagnostics/Compare/LegacyLogRowCompareTests.cpp
   Exchanges/BinanceSimulator/Diagnostics/Compare/ReplayCompareCiGateTests.cpp
