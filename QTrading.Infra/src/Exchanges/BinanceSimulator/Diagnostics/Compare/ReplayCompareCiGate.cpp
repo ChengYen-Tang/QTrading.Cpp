@@ -8,7 +8,7 @@ ReplayCompareBaselineVersion BuildPinnedBaselineVersion()
 {
     ReplayCompareBaselineVersion out{};
     out.dataset_version = "v2-legacy-replay-pack-20260319";
-    out.scenario_pack_version = "milestone4-v2-core-pack-20260319";
+    out.scenario_pack_version = "milestone5-v2-session-replay-pack-20260319";
     out.artifact_format_version = "replay-compare-artifact-v1";
     return out;
 }
@@ -44,7 +44,7 @@ ReplayCompareCiGatePlan ReplayCompareCiGate::BuildCompareQuickPlan()
     plan.options.align_step_boundary_by_common_payload = true;
     plan.options.scenario_name_filters = {
         "v2-vs-legacy.single-symbol",
-        "v2-vs-legacy.funding",
+        "v2-vs-legacy.funding-reference-edge",
         "v2-vs-legacy.async-ack-latency",
     };
     plan.options.run_id_override = 8001;
@@ -120,4 +120,3 @@ ReplayCompareCiGateDecision ReplayCompareCiGate::Evaluate(
 }
 
 } // namespace QTrading::Infra::Exchanges::BinanceSim::Diagnostics::Compare
-

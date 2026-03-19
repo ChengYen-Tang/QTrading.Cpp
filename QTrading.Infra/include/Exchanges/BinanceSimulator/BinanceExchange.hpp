@@ -295,6 +295,66 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
             std::string reason;
         };
 
+        struct SessionReplayCoexistenceDiagnostic {
+            CoreMode requested_mode{ CoreMode::LegacyOnly };
+            CoreMode effective_mode{ CoreMode::LegacyOnly };
+            bool production_default_legacy_only{ true };
+            bool force_legacy_only{ false };
+            bool shadow_compare_enabled{ false };
+            bool v2_explicit_enabled{ false };
+            bool compare_artifact_enabled{ false };
+            bool fallback_to_legacy{ false };
+            bool fail_close_protected{ true };
+            std::string reason;
+        };
+
+        enum class ReplayStepKind : uint8_t {
+            EndOfStream = 0,
+            MarketOnly = 1,
+            FundingOnly = 2,
+            Mixed = 3,
+        };
+
+        struct ReplayFrameV2Diagnostic {
+            bool has_next{ false };
+            bool end_of_stream{ false };
+            uint64_t ts_exchange{ 0 };
+            uint64_t next_kline_ts{ 0 };
+            uint64_t next_funding_ts{ 0 };
+            ReplayStepKind step_kind{ ReplayStepKind::EndOfStream };
+            uint32_t symbols_with_trade{ 0 };
+            uint32_t symbols_with_funding{ 0 };
+            std::string reason;
+        };
+
+        struct TradingSessionCoreV2Diagnostic {
+            uint64_t step_seq{ 0 };
+            uint64_t ts_exchange{ 0 };
+            bool progressed{ false };
+            bool terminated{ false };
+            bool terminated_end_of_stream{ false };
+            bool terminated_balance_depleted{ false };
+            bool funding_before_matching{ true };
+            uint64_t deferred_due_step{ 0 };
+            uint32_t deferred_executed{ 0 };
+            uint64_t async_ack_queue_size{ 0 };
+            std::string reason;
+        };
+
+        struct BinanceExchangeFacadeBridgeDiagnostic {
+            CoreMode requested_mode{ CoreMode::LegacyOnly };
+            CoreMode effective_mode{ CoreMode::LegacyOnly };
+            bool progressed{ false };
+            bool fallback_to_legacy{ false };
+            bool used_v2_session_core{ false };
+            bool preserve_capture_boundary{ true };
+            bool preserve_log_batch_boundary{ true };
+            bool preserve_timestamp_semantics{ true };
+            uint64_t step_seq{ 0 };
+            uint64_t ts_exchange{ 0 };
+            std::string reason;
+        };
+
         enum class EventPublishMode : uint8_t {
             LegacyDirect = 0,
             DomainEventAdapter = 1,
@@ -341,6 +401,12 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
         bool  step() override;
         void set_core_mode(CoreMode mode);
         CoreMode core_mode() const;
+        void set_force_legacy_only(bool enabled);
+        bool force_legacy_only() const;
+        std::optional<SessionReplayCoexistenceDiagnostic> consume_last_session_replay_coexistence_diagnostic();
+        std::optional<ReplayFrameV2Diagnostic> consume_last_replay_frame_v2_diagnostic();
+        std::optional<TradingSessionCoreV2Diagnostic> consume_last_trading_session_core_v2_diagnostic();
+        std::optional<BinanceExchangeFacadeBridgeDiagnostic> consume_last_binance_exchange_facade_bridge_diagnostic();
         std::optional<StepCompareDiagnostic> consume_last_compare_diagnostic();
         std::optional<AccountFacadeBridgeDiagnostic> consume_last_account_facade_bridge_diagnostic();
         void set_event_publish_mode(EventPublishMode mode);
@@ -418,6 +484,17 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
             BeforeMatching = 0,
             AfterMatching = 1,
         };
+        struct ReferenceFundingResolverDiagnostic {
+            uint64_t ts_exchange{ 0 };
+            uint32_t funding_rows_seen{ 0 };
+            uint32_t funding_rows_applied{ 0 };
+            uint32_t funding_rows_skipped_no_mark{ 0 };
+            uint32_t funding_rows_skipped_duplicate{ 0 };
+            uint32_t mark_source_raw_count{ 0 };
+            uint32_t mark_source_interpolated_count{ 0 };
+            FundingApplyTiming funding_apply_timing{ FundingApplyTiming::BeforeMatching };
+            std::string reason;
+        };
         enum class ReferencePriceSource : int32_t {
             None = 0,
             Raw = 1,
@@ -425,6 +502,7 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
         };
         void set_funding_apply_timing(FundingApplyTiming timing);
         FundingApplyTiming funding_apply_timing() const;
+        std::optional<ReferenceFundingResolverDiagnostic> consume_last_reference_funding_resolver_diagnostic();
         void set_uncertainty_band_bps(double bps);
         double uncertainty_band_bps() const;
         void set_mark_index_basis_thresholds_bps(double warning_bps, double stress_bps);
@@ -517,6 +595,9 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
         std::vector<double>                         last_funding_rate_by_symbol_;
         std::vector<uint64_t>                       last_funding_time_by_symbol_;
         std::vector<uint8_t>                        has_last_funding_;
+        std::vector<uint64_t>                       last_applied_funding_time_by_symbol_;
+        std::vector<double>                         last_applied_funding_rate_by_symbol_;
+        std::vector<uint8_t>                        has_last_applied_funding_;
         std::optional<uint64_t>                     replay_start_ts_ms_; ///< Optional replay window start (inclusive).
         std::optional<uint64_t>                     replay_end_ts_ms_;   ///< Optional replay window end (inclusive).
         std::shared_ptr<Account>                    account_engine_;  ///< Simulated margin account engine.
@@ -643,7 +724,12 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
         class AsyncEventPublisher;
         class NullEventPublisher;
         class EventCaptureBoundary;
+        class MarketReplayEngineV2;
         class MarketReplayEngine;
+        class ReferencePriceResolver;
+        class FundingTimelineResolver;
+        class TradingSessionCoreV2;
+        class BinanceExchangeFacadeBridge;
         class StatusSnapshotBuilder;
         class SimulatorRiskOverlayEngine;
         class CoreDispatchFacade;
@@ -677,6 +763,17 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
         std::optional<StepCompareDiagnostic> last_compare_diagnostic_;
         mutable std::mutex account_facade_bridge_diag_mtx_;
         std::optional<AccountFacadeBridgeDiagnostic> last_account_facade_bridge_diagnostic_;
+        std::atomic<bool> force_legacy_only_{ false };
+        mutable std::mutex session_replay_diag_mtx_;
+        std::optional<SessionReplayCoexistenceDiagnostic> last_session_replay_coexistence_diagnostic_;
+        mutable std::mutex replay_frame_v2_diag_mtx_;
+        std::optional<ReplayFrameV2Diagnostic> last_replay_frame_v2_diagnostic_;
+        mutable std::mutex trading_session_core_v2_diag_mtx_;
+        std::optional<TradingSessionCoreV2Diagnostic> last_trading_session_core_v2_diagnostic_;
+        mutable std::mutex binance_exchange_facade_bridge_diag_mtx_;
+        std::optional<BinanceExchangeFacadeBridgeDiagnostic> last_binance_exchange_facade_bridge_diagnostic_;
+        mutable std::mutex reference_funding_diag_mtx_;
+        std::optional<ReferenceFundingResolverDiagnostic> last_reference_funding_resolver_diagnostic_;
         std::atomic<EventPublishMode> event_publish_mode_{ EventPublishMode::LegacyDirect };
         mutable std::mutex event_publish_diag_mtx_;
         std::optional<EventPublishCompareDiagnostic> last_event_publish_diagnostic_;
@@ -766,6 +863,11 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
             const StepCompareSnapshot& candidate_snapshot) const;
         void record_compare_diagnostic_(StepCompareDiagnostic diag);
         void record_account_facade_bridge_diagnostic_(AccountFacadeBridgeDiagnostic diag);
+        void record_session_replay_coexistence_diagnostic_(SessionReplayCoexistenceDiagnostic diag);
+        void record_replay_frame_v2_diagnostic_(ReplayFrameV2Diagnostic diag);
+        void record_trading_session_core_v2_diagnostic_(TradingSessionCoreV2Diagnostic diag);
+        void record_binance_exchange_facade_bridge_diagnostic_(BinanceExchangeFacadeBridgeDiagnostic diag);
+        void record_reference_funding_resolver_diagnostic_(ReferenceFundingResolverDiagnostic diag);
         EventPublishCompareSnapshot build_event_publish_compare_snapshot_(
             const EventEnvelope& envelope) const;
         std::optional<std::string> compare_event_publish_snapshots_(
@@ -777,6 +879,7 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
 
         void publish_log_task_(EventEnvelope&& task);
         void enqueue_deferred_order_locked_(uint64_t due_step, std::function<void(Account&, uint64_t)> fn);
+        size_t flush_deferred_orders_with_count_locked_(uint64_t step_seq);
         void flush_deferred_orders_locked_(uint64_t step_seq);
         void push_async_order_ack_locked_(AsyncOrderAck ack);
         static std::pair<int, std::string> map_binance_reject_(const std::optional<Account::OrderRejectInfo>& reject);

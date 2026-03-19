@@ -11,7 +11,7 @@ TEST(ReplayCompareCiGateTests, CompareQuickPlanPinsBaselineAndUsesSummaryArtifac
     const auto plan = ReplayCompare::ReplayCompareCiGate::BuildCompareQuickPlan();
     EXPECT_EQ(plan.gate_name, "compare-quick");
     EXPECT_EQ(plan.baseline.dataset_version, "v2-legacy-replay-pack-20260319");
-    EXPECT_EQ(plan.baseline.scenario_pack_version, "milestone4-v2-core-pack-20260319");
+    EXPECT_EQ(plan.baseline.scenario_pack_version, "milestone5-v2-session-replay-pack-20260319");
     EXPECT_EQ(plan.baseline.artifact_format_version, "replay-compare-artifact-v1");
     EXPECT_EQ(plan.options.execution_mode, ReplayCompare::ReplayCompareExecutionMode::ProductionSafe);
     EXPECT_TRUE(plan.options.generate_artifact);

@@ -611,6 +611,188 @@ TEST_F(BinanceExchangeFixture, NewCorePrimaryFallsBackToLegacyPath)
     EXPECT_FALSE(diag->reason.empty());
 }
 
+TEST_F(BinanceExchangeFixture, SessionReplayCoexistenceDiagnosticClassifiesModes)
+{
+    writeCsv("btc.csv", {
+        {0,100,100,100,100,1000, 30000,100,1,0,0}
+        });
+
+    BinanceExchange ex({ {"BTCUSDT",(tmpDir / "btc.csv").string()} }, logger, /*balance*/ 1000.0);
+
+    ex.set_core_mode(BinanceExchange::CoreMode::LegacyOnly);
+    auto legacy_diag = ex.consume_last_session_replay_coexistence_diagnostic();
+    ASSERT_TRUE(legacy_diag.has_value());
+    EXPECT_EQ(legacy_diag->requested_mode, BinanceExchange::CoreMode::LegacyOnly);
+    EXPECT_EQ(legacy_diag->effective_mode, BinanceExchange::CoreMode::LegacyOnly);
+    EXPECT_FALSE(legacy_diag->shadow_compare_enabled);
+    EXPECT_FALSE(legacy_diag->v2_explicit_enabled);
+    EXPECT_FALSE(legacy_diag->compare_artifact_enabled);
+
+    ex.set_core_mode(BinanceExchange::CoreMode::NewCoreShadow);
+    auto shadow_diag = ex.consume_last_session_replay_coexistence_diagnostic();
+    ASSERT_TRUE(shadow_diag.has_value());
+    EXPECT_EQ(shadow_diag->requested_mode, BinanceExchange::CoreMode::NewCoreShadow);
+    EXPECT_EQ(shadow_diag->effective_mode, BinanceExchange::CoreMode::NewCoreShadow);
+    EXPECT_TRUE(shadow_diag->shadow_compare_enabled);
+    EXPECT_FALSE(shadow_diag->v2_explicit_enabled);
+    EXPECT_TRUE(shadow_diag->compare_artifact_enabled);
+
+    ex.set_core_mode(BinanceExchange::CoreMode::NewCorePrimary);
+    auto primary_diag = ex.consume_last_session_replay_coexistence_diagnostic();
+    ASSERT_TRUE(primary_diag.has_value());
+    EXPECT_EQ(primary_diag->requested_mode, BinanceExchange::CoreMode::NewCorePrimary);
+    EXPECT_EQ(primary_diag->effective_mode, BinanceExchange::CoreMode::NewCorePrimary);
+    EXPECT_FALSE(primary_diag->shadow_compare_enabled);
+    EXPECT_TRUE(primary_diag->v2_explicit_enabled);
+    EXPECT_TRUE(primary_diag->compare_artifact_enabled);
+    EXPECT_TRUE(primary_diag->production_default_legacy_only);
+    EXPECT_TRUE(primary_diag->fail_close_protected);
+}
+
+TEST_F(BinanceExchangeFixture, NewCorePrimaryStepEmitsFallbackMarkerInCoexistenceDiagnostic)
+{
+    writeCsv("btc.csv", {
+        {0,100,100,100,100,1000, 30000,100,1,0,0}
+        });
+
+    BinanceExchange ex({ {"BTCUSDT",(tmpDir / "btc.csv").string()} }, logger, /*balance*/ 1000.0);
+    ex.set_core_mode(BinanceExchange::CoreMode::NewCorePrimary);
+    (void)ex.consume_last_session_replay_coexistence_diagnostic();
+
+    ASSERT_TRUE(ex.step());
+    auto diag = ex.consume_last_session_replay_coexistence_diagnostic();
+    ASSERT_TRUE(diag.has_value());
+    EXPECT_EQ(diag->requested_mode, BinanceExchange::CoreMode::NewCorePrimary);
+    EXPECT_EQ(diag->effective_mode, BinanceExchange::CoreMode::NewCorePrimary);
+    EXPECT_TRUE(diag->v2_explicit_enabled);
+    EXPECT_TRUE(diag->fallback_to_legacy);
+    EXPECT_FALSE(diag->reason.empty());
+}
+
+TEST_F(BinanceExchangeFixture, ForceLegacyOnlyFlagCoercesModeAndSupportsRollback)
+{
+    writeCsv("btc.csv", {
+        {0,100,100,100,100,1000, 30000,100,1,0,0}
+        });
+
+    BinanceExchange ex({ {"BTCUSDT",(tmpDir / "btc.csv").string()} }, logger, /*balance*/ 1000.0);
+    ex.set_core_mode(BinanceExchange::CoreMode::NewCorePrimary);
+    (void)ex.consume_last_session_replay_coexistence_diagnostic();
+
+    ex.set_force_legacy_only(true);
+    EXPECT_TRUE(ex.force_legacy_only());
+    auto forced_diag = ex.consume_last_session_replay_coexistence_diagnostic();
+    ASSERT_TRUE(forced_diag.has_value());
+    EXPECT_EQ(forced_diag->requested_mode, BinanceExchange::CoreMode::NewCorePrimary);
+    EXPECT_EQ(forced_diag->effective_mode, BinanceExchange::CoreMode::LegacyOnly);
+    EXPECT_TRUE(forced_diag->force_legacy_only);
+    EXPECT_TRUE(forced_diag->fallback_to_legacy);
+
+    auto bridge_diag = ex.consume_last_account_facade_bridge_diagnostic();
+    ASSERT_TRUE(bridge_diag.has_value());
+    EXPECT_EQ(bridge_diag->mode, BinanceExchange::CoreMode::LegacyOnly);
+
+    ASSERT_TRUE(ex.step());
+    auto step_diag = ex.consume_last_session_replay_coexistence_diagnostic();
+    ASSERT_TRUE(step_diag.has_value());
+    EXPECT_EQ(step_diag->effective_mode, BinanceExchange::CoreMode::LegacyOnly);
+    EXPECT_TRUE(step_diag->fallback_to_legacy);
+
+    ex.set_force_legacy_only(false);
+    EXPECT_FALSE(ex.force_legacy_only());
+    auto rollback_diag = ex.consume_last_session_replay_coexistence_diagnostic();
+    ASSERT_TRUE(rollback_diag.has_value());
+    EXPECT_EQ(rollback_diag->requested_mode, BinanceExchange::CoreMode::NewCorePrimary);
+    EXPECT_EQ(rollback_diag->effective_mode, BinanceExchange::CoreMode::NewCorePrimary);
+    EXPECT_FALSE(rollback_diag->force_legacy_only);
+}
+
+TEST_F(BinanceExchangeFixture, EnvForceLegacyOnlyDefaultsToLegacyPath)
+{
+    writeCsv("btc.csv", {
+        {0,100,100,100,100,1000, 30000,100,1,0,0}
+        });
+    ScopedEnvVar force_guard("QTRADING_SESSION_REPLAY_FORCE_LEGACY_ONLY", "1");
+
+    BinanceExchange ex({ {"BTCUSDT",(tmpDir / "btc.csv").string()} }, logger, /*balance*/ 1000.0);
+    EXPECT_TRUE(ex.force_legacy_only());
+
+    ex.set_core_mode(BinanceExchange::CoreMode::NewCorePrimary);
+    auto diag = ex.consume_last_session_replay_coexistence_diagnostic();
+    ASSERT_TRUE(diag.has_value());
+    EXPECT_EQ(diag->requested_mode, BinanceExchange::CoreMode::NewCorePrimary);
+    EXPECT_EQ(diag->effective_mode, BinanceExchange::CoreMode::LegacyOnly);
+    EXPECT_TRUE(diag->force_legacy_only);
+}
+
+TEST_F(BinanceExchangeFixture, TradingSessionCoreV2DiagnosticTracksStepLifecycleAndTermination)
+{
+    writeCsv("btc.csv", {
+        {      0,100,100,100,100,1000, 30000,100,1,0,0 },
+        {  60000,110,110,110,110,1000, 90000,100,1,0,0 }
+        });
+
+    BinanceExchange ex({ {"BTCUSDT",(tmpDir / "btc.csv").string()} }, logger, /*balance*/ 1000.0);
+    auto mCh = ex.get_market_channel();
+
+    ASSERT_TRUE(ex.step());
+    ASSERT_TRUE(mCh->Receive().has_value());
+    auto step1 = ex.consume_last_trading_session_core_v2_diagnostic();
+    ASSERT_TRUE(step1.has_value());
+    EXPECT_TRUE(step1->progressed);
+    EXPECT_FALSE(step1->terminated);
+    EXPECT_EQ(step1->step_seq, 1u);
+    EXPECT_EQ(step1->ts_exchange, 0u);
+    EXPECT_TRUE(step1->funding_before_matching);
+
+    ASSERT_TRUE(ex.step());
+    ASSERT_TRUE(mCh->Receive().has_value());
+    auto step2 = ex.consume_last_trading_session_core_v2_diagnostic();
+    ASSERT_TRUE(step2.has_value());
+    EXPECT_TRUE(step2->progressed);
+    EXPECT_EQ(step2->step_seq, 2u);
+    EXPECT_EQ(step2->ts_exchange, 60000u);
+
+    EXPECT_FALSE(ex.step());
+    auto eos = ex.consume_last_trading_session_core_v2_diagnostic();
+    ASSERT_TRUE(eos.has_value());
+    EXPECT_FALSE(eos->progressed);
+    EXPECT_TRUE(eos->terminated);
+    EXPECT_TRUE(eos->terminated_end_of_stream);
+}
+
+TEST_F(BinanceExchangeFixture, TradingSessionCoreV2DeferredAndAsyncAckOrchestrationRemainStable)
+{
+    writeCsv("btc.csv", {
+        {      0,1,1,1,1,100, 30000,100,1,0,0 },
+        {  60000,1,1,1,1,100, 90000,100,1,0,0 }
+        });
+
+    BinanceExchange ex({ {"BTCUSDT",(tmpDir / "btc.csv").string()} }, logger, /*balance*/ 1000.0);
+    ex.set_order_latency_bars(1);
+    auto mCh = ex.get_market_channel();
+
+    ASSERT_TRUE(ex.step());
+    (void)mCh->Receive();
+    (void)ex.consume_last_trading_session_core_v2_diagnostic();
+
+    using QTrading::Dto::Trading::OrderSide;
+    ASSERT_TRUE(ex.perp.place_order("BTCUSDT", 1.0, OrderSide::Buy));
+
+    ASSERT_TRUE(ex.step());
+    (void)mCh->Receive();
+    auto diag = ex.consume_last_trading_session_core_v2_diagnostic();
+    ASSERT_TRUE(diag.has_value());
+    EXPECT_EQ(diag->deferred_due_step, 2u);
+    EXPECT_EQ(diag->deferred_executed, 1u);
+    EXPECT_GE(diag->async_ack_queue_size, 1u);
+
+    const auto acks = ex.drain_async_order_acks();
+    ASSERT_EQ(acks.size(), 2u);
+    EXPECT_EQ(acks[0].status, BinanceExchange::AsyncOrderAck::Status::Pending);
+    EXPECT_EQ(acks[1].status, BinanceExchange::AsyncOrderAck::Status::Accepted);
+}
+
 TEST_F(BinanceExchangeFixture, NewCorePrimaryBridgeRoutesToV2WhenAvailable)
 {
     writeCsv("btc.csv", {
@@ -659,6 +841,134 @@ TEST_F(BinanceExchangeFixture, NewCorePrimaryBridgeFallsBackWhenV2Unavailable)
     ASSERT_TRUE(ex.perp.place_order("BTCUSDT", 1.0, OrderSide::Buy));
     ASSERT_TRUE(ex.step());
     EXPECT_EQ(ex.get_all_positions().size(), 1u);
+}
+
+TEST_F(BinanceExchangeFixture, ReplayEngineV2ClassifiesMarketFundingMixedAndEndOfStreamSteps)
+{
+    writeCsv("btc.csv", {
+        {      0, 100,100,100,100,1000, 30000,100,1,0,0 },
+        { 120000, 120,120,120,120,1000,150000,100,1,0,0 }
+        });
+    writeFundingCsv("btc_funding.csv", {
+        {  60000, 0.0010, 100.0 },
+        { 120000, 0.0015, 100.0 }
+        });
+
+    BinanceExchange ex(
+        { {"BTCUSDT",
+            (tmpDir / "btc.csv").string(),
+            std::optional<std::string>((tmpDir / "btc_funding.csv").string())} },
+        logger,
+        /*balance*/ 1000.0);
+    auto mCh = ex.get_market_channel();
+
+    ASSERT_TRUE(ex.step());
+    ASSERT_TRUE(mCh->Receive().has_value());
+    auto step1 = ex.consume_last_replay_frame_v2_diagnostic();
+    ASSERT_TRUE(step1.has_value());
+    EXPECT_EQ(step1->ts_exchange, 0u);
+    EXPECT_EQ(step1->step_kind, BinanceExchange::ReplayStepKind::MarketOnly);
+
+    ASSERT_TRUE(ex.step());
+    ASSERT_TRUE(mCh->Receive().has_value());
+    auto step2 = ex.consume_last_replay_frame_v2_diagnostic();
+    ASSERT_TRUE(step2.has_value());
+    EXPECT_EQ(step2->ts_exchange, 60000u);
+    EXPECT_EQ(step2->step_kind, BinanceExchange::ReplayStepKind::FundingOnly);
+
+    ASSERT_TRUE(ex.step());
+    ASSERT_TRUE(mCh->Receive().has_value());
+    auto step3 = ex.consume_last_replay_frame_v2_diagnostic();
+    ASSERT_TRUE(step3.has_value());
+    EXPECT_EQ(step3->ts_exchange, 120000u);
+    EXPECT_EQ(step3->step_kind, BinanceExchange::ReplayStepKind::Mixed);
+
+    EXPECT_FALSE(ex.step());
+    auto eos = ex.consume_last_replay_frame_v2_diagnostic();
+    ASSERT_TRUE(eos.has_value());
+    EXPECT_TRUE(eos->end_of_stream);
+    EXPECT_EQ(eos->step_kind, BinanceExchange::ReplayStepKind::EndOfStream);
+}
+
+TEST_F(BinanceExchangeFixture, ReferenceFundingResolverReportsInterpolatedMarkSource)
+{
+    writeCsv("btc.csv", {
+        {      0, 100,100,100,100,1000, 30000,100,1,0,0 },
+        { 120000, 120,120,120,120,1000,150000,100,1,0,0 }
+        });
+    writeCompactCsv("btc_mark.csv", {
+        {      0, 200,200,200,200,  30000 },
+        { 120000, 220,220,220,220, 150000 }
+        });
+    writeFundingCsv("btc_funding.csv", {
+        {  60000, 0.0010, std::nullopt }
+        });
+
+    BinanceExchange ex(
+        { BinanceExchange::SymbolDataset{
+            "BTCUSDT",
+            (tmpDir / "btc.csv").string(),
+            std::optional<std::string>((tmpDir / "btc_funding.csv").string()),
+            std::optional<std::string>((tmpDir / "btc_mark.csv").string()),
+            std::nullopt,
+            QTrading::Dto::Trading::InstrumentType::Perp} },
+        logger,
+        /*balance*/ 1000.0);
+
+    auto mCh = ex.get_market_channel();
+    ASSERT_TRUE(ex.step());
+    ASSERT_TRUE(mCh->Receive().has_value());
+    ASSERT_TRUE(ex.step());
+    ASSERT_TRUE(mCh->Receive().has_value());
+
+    auto diag = ex.consume_last_reference_funding_resolver_diagnostic();
+    ASSERT_TRUE(diag.has_value());
+    EXPECT_EQ(diag->ts_exchange, 60000u);
+    EXPECT_EQ(diag->funding_rows_seen, 1u);
+    EXPECT_EQ(diag->mark_source_interpolated_count, 1u);
+    EXPECT_EQ(diag->funding_rows_skipped_no_mark, 0u);
+}
+
+TEST_F(BinanceExchangeFixture, FundingTimelineResolverDedupesDuplicateRows)
+{
+    writeCsv("btc.csv", {
+        {      0, 100,100,100,100,1000, 30000,100,1,0,0 },
+        {  60000, 100,100,100,100,1000, 90000,100,1,0,0 }
+        });
+    writeFundingCsv("btc_funding.csv", {
+        { 60000, 0.0010, 100.0 },
+        { 60000, 0.0010, 100.0 }
+        });
+
+    BinanceExchange ex(
+        { {"BTCUSDT",
+            (tmpDir / "btc.csv").string(),
+            std::optional<std::string>((tmpDir / "btc_funding.csv").string())} },
+        logger,
+        /*balance*/ 1000.0);
+
+    using QTrading::Dto::Trading::OrderSide;
+    ASSERT_TRUE(ex.perp.place_order("BTCUSDT", 1.0, OrderSide::Buy));
+    auto mCh = ex.get_market_channel();
+    BinanceExchange::StatusSnapshot snap{};
+
+    ASSERT_TRUE(ex.step());
+    ASSERT_TRUE(mCh->Receive().has_value());
+    ex.FillStatusSnapshot(snap);
+    const double after_entry = snap.wallet_balance;
+
+    ASSERT_TRUE(ex.step());
+    ASSERT_TRUE(mCh->Receive().has_value());
+    ex.FillStatusSnapshot(snap);
+    const double after_funding = snap.wallet_balance;
+
+    // Deduped duplicate rows should apply exactly once: 1 * 100 * 0.001 = 0.1
+    EXPECT_NEAR(after_funding - after_entry, -0.1, 1e-6);
+
+    auto diag = ex.consume_last_reference_funding_resolver_diagnostic();
+    ASSERT_TRUE(diag.has_value());
+    EXPECT_EQ(diag->funding_rows_seen, 2u);
+    EXPECT_EQ(diag->funding_rows_skipped_duplicate, 1u);
 }
 
 TEST_F(BinanceExchangeFixture, FacadeContractLegacyAndV2PrimaryKeepInputReturnAndSnapshotConsistent)
@@ -1072,6 +1382,95 @@ TEST_F(BinanceExchangeFixture, ForwardingSideEffectAdaptersPreservePublishOrderi
 
     const std::vector<char> expected_sequence{ 'M', 'M', 'O', 'M', 'P', 'O' };
     EXPECT_EQ(publish_sequence, expected_sequence);
+}
+
+TEST_F(BinanceExchangeFixture, BinanceExchangeFacadeBridgeKeepsLegacyContractBoundaries)
+{
+    writeCsv("btc.csv", {
+        {      0,100,100,100,100,1000, 30000,100,1,0,0 },
+        {  60000,101,101,101,101,1000, 90000,100,1,0,0 }
+        });
+
+    BinanceExchange ex({ {"BTCUSDT",(tmpDir / "btc.csv").string()} }, logger, /*balance*/ 1000.0);
+    auto mCh = ex.get_market_channel();
+
+    ASSERT_TRUE(ex.step());
+    ASSERT_TRUE(mCh->Receive().has_value());
+    auto legacy_diag = ex.consume_last_binance_exchange_facade_bridge_diagnostic();
+    ASSERT_TRUE(legacy_diag.has_value());
+    EXPECT_EQ(legacy_diag->requested_mode, BinanceExchange::CoreMode::LegacyOnly);
+    EXPECT_EQ(legacy_diag->effective_mode, BinanceExchange::CoreMode::LegacyOnly);
+    EXPECT_TRUE(legacy_diag->preserve_capture_boundary);
+    EXPECT_TRUE(legacy_diag->preserve_log_batch_boundary);
+    EXPECT_TRUE(legacy_diag->preserve_timestamp_semantics);
+    EXPECT_EQ(legacy_diag->step_seq, 1u);
+    EXPECT_EQ(legacy_diag->ts_exchange, 0u);
+
+    ex.set_core_mode(BinanceExchange::CoreMode::NewCorePrimary);
+    (void)ex.consume_last_account_facade_bridge_diagnostic();
+    ASSERT_TRUE(ex.step());
+    ASSERT_TRUE(mCh->Receive().has_value());
+    auto primary_diag = ex.consume_last_binance_exchange_facade_bridge_diagnostic();
+    ASSERT_TRUE(primary_diag.has_value());
+    EXPECT_EQ(primary_diag->requested_mode, BinanceExchange::CoreMode::NewCorePrimary);
+    EXPECT_EQ(primary_diag->effective_mode, BinanceExchange::CoreMode::NewCorePrimary);
+    EXPECT_TRUE(primary_diag->fallback_to_legacy);
+    EXPECT_TRUE(primary_diag->preserve_capture_boundary);
+    EXPECT_TRUE(primary_diag->preserve_log_batch_boundary);
+    EXPECT_TRUE(primary_diag->preserve_timestamp_semantics);
+}
+
+TEST_F(BinanceExchangeFixture, FacadeBridgeWithForwardingAdaptersPreservesTimestampSemantics)
+{
+    writeCsv("btc.csv", {
+        {      0,1,1,1,1,100, 30000,100,1,0,0 },
+        {  60000,2,2,2,2,100, 90000,100,1,0,0 },
+        { 120000,3,3,3,3,100,150000,100,1,0,0 }
+        });
+
+    BinanceExchange ex({ {"BTCUSDT",(tmpDir / "btc.csv").string()} }, logger, /*balance*/ 1000.0);
+    auto mCh = ex.get_market_channel();
+    auto pCh = ex.get_position_channel();
+    auto oCh = ex.get_order_channel();
+
+    std::vector<uint64_t> published_ts;
+    BinanceExchange::SideEffectAdapterConfig adapters{};
+    adapters.market_publisher = [&](MultiKlinePtr dto) {
+        published_ts.push_back(dto ? dto->Timestamp : 0u);
+        mCh->Send(dto);
+    };
+    adapters.position_publisher = [&](const std::vector<QTrading::dto::Position>& positions) {
+        pCh->Send(positions);
+    };
+    adapters.order_publisher = [&](const std::vector<QTrading::dto::Order>& orders) {
+        oCh->Send(orders);
+    };
+    ex.set_side_effect_adapters(std::move(adapters));
+
+    using QTrading::Dto::Trading::OrderSide;
+    ASSERT_TRUE(ex.step());
+    ASSERT_TRUE(mCh->Receive().has_value());
+    auto d1 = ex.consume_last_binance_exchange_facade_bridge_diagnostic();
+    ASSERT_TRUE(d1.has_value());
+    EXPECT_EQ(d1->ts_exchange, 0u);
+    EXPECT_TRUE(d1->preserve_timestamp_semantics);
+
+    ASSERT_TRUE(ex.perp.place_order("BTCUSDT", 1.0, 2.0, OrderSide::Buy));
+    ASSERT_TRUE(ex.step());
+    ASSERT_TRUE(mCh->Receive().has_value());
+    auto d2 = ex.consume_last_binance_exchange_facade_bridge_diagnostic();
+    ASSERT_TRUE(d2.has_value());
+    EXPECT_EQ(d2->ts_exchange, 60000u);
+    EXPECT_TRUE(d2->preserve_capture_boundary);
+
+    ASSERT_TRUE(ex.step());
+    ASSERT_TRUE(mCh->Receive().has_value());
+    auto d3 = ex.consume_last_binance_exchange_facade_bridge_diagnostic();
+    ASSERT_TRUE(d3.has_value());
+    EXPECT_EQ(d3->ts_exchange, 120000u);
+
+    const std::vector<uint64_t> expected_ts{ 0u, 60000u, 120000u };
+    EXPECT_EQ(published_ts, expected_ts);
 }
 
 TEST_F(BinanceExchangeFixture, FundingAppliedAndDeduped)

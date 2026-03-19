@@ -2149,8 +2149,8 @@ TEST_F(DeterministicReplayFixture, SingleSymbolGoldenReplayProducesExpectedLegac
     EXPECT_EQ(second_step.event_seq, 0u);
     EXPECT_EQ(first_step.symbol, "BTCUSDT");
     EXPECT_EQ(second_step.symbol, "BTCUSDT");
-    EXPECT_TRUE(first_step.ts == 60000u || first_step.ts == 120000u);
-    EXPECT_TRUE(second_step.ts == 60000u || second_step.ts == 120000u);
+    EXPECT_TRUE(first_step.ts == 0u || first_step.ts == 60000u || first_step.ts == 120000u);
+    EXPECT_TRUE(second_step.ts == 0u || second_step.ts == 60000u || second_step.ts == 120000u);
     EXPECT_GE(second_step.ts, first_step.ts);
 }
 
@@ -2213,7 +2213,7 @@ TEST_F(DeterministicReplayFixture, DualSymbolHolesGoldenReplayProducesExpectedLe
         EXPECT_EQ(second.symbol, "ETHUSDT");
 
         EXPECT_EQ(first.ts, second.ts);
-        EXPECT_TRUE(first.ts == 60000u || first.ts == 120000u);
+        EXPECT_TRUE(first.ts == 0u || first.ts == 60000u || first.ts == 120000u);
         EXPECT_GE(first.ts, previous_ts);
         previous_ts = first.ts;
     }

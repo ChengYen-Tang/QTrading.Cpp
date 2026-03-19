@@ -130,69 +130,131 @@ ReplayCompareScenarioData BuildSingleSymbolScenario()
     return scenario;
 }
 
-ReplayCompareScenarioData BuildDualSymbolHolesScenario()
+ReplayCompareScenarioData BuildBasisStressScenario()
 {
     ReplayCompareScenarioData scenario{};
-    scenario.scenario.name = "v2-vs-legacy.dual-symbol-holes";
+    scenario.scenario.name = "v2-vs-legacy.basis-stress";
+    scenario.scenario.dataset_id = kDatasetId;
+    scenario.scenario.start_ts_exchange = kBaseTs;
+    scenario.scenario.end_ts_exchange = kBaseTs + 180'000;
+    scenario.scenario.expected_steps = 4;
+
+    auto step1 = BuildStep(1, kBaseTs, 1000.0, 0.0, 1000.0, 2, 2, 0, 0, 200.0, 0.0);
+    auto step2 = BuildStep(2, kBaseTs + 60'000, 997.25, 0.0, 997.25, 2, 2, 0, 0, 240.0, 120.0);
+    auto step3 = BuildStep(3, kBaseTs + 120'000, 1002.10, 0.0, 1002.10, 1, 1, 0, 0, 180.0, 90.0);
+    auto step4 = BuildStep(4, kBaseTs + 180'000, 1005.50, 0.0, 1005.50, 0, 0, 0, 0, 0.0, 0.0);
+
+    auto open = BuildEvent(ReplayEventType::Fill, 501, kBaseTs, "BTCUSDT", "basis-open");
+    open.quantity = 2.0;
+    open.price = 100.0;
+    auto adverse = BuildEvent(ReplayEventType::Fill, 502, kBaseTs + 60'000, "BTCUSDT", "basis-adverse");
+    adverse.quantity = 2.0;
+    adverse.price = 98.25;
+    auto recover = BuildEvent(ReplayEventType::Fill, 503, kBaseTs + 120'000, "BTCUSDT", "basis-recover");
+    recover.quantity = 1.0;
+    recover.price = 102.10;
+    auto flatten = BuildEvent(ReplayEventType::Fill, 504, kBaseTs + 180'000, "BTCUSDT", "basis-flatten");
+    flatten.quantity = 1.0;
+    flatten.price = 105.50;
+
+    step1.event.events.push_back(std::move(open));
+    step2.event.events.push_back(std::move(adverse));
+    step3.event.events.push_back(std::move(recover));
+    step4.event.events.push_back(std::move(flatten));
+
+    scenario.legacy_steps = { step1, step2, step3, step4 };
+    scenario.candidate_steps = scenario.legacy_steps;
+    scenario.legacy_rows = {
+        BuildRow(0, 0, 60, "BasisEvent", kBaseTs, 1, 501, "BTCUSDT", LegacyLogRowKind::Event, {{"basis_spread_bps", "12.0"}}),
+        BuildRow(1, 0, 60, "BasisEvent", kBaseTs + 60'000, 2, 502, "BTCUSDT", LegacyLogRowKind::Event, {{"basis_spread_bps", "-45.0"}}),
+        BuildRow(2, 0, 60, "BasisEvent", kBaseTs + 120'000, 3, 503, "BTCUSDT", LegacyLogRowKind::Event, {{"basis_spread_bps", "18.0"}}),
+        BuildRow(3, 1, 60, "BasisEvent", kBaseTs + 180'000, 4, 504, "BTCUSDT", LegacyLogRowKind::Event, {{"basis_spread_bps", "0.0"}}),
+    };
+    scenario.candidate_rows = scenario.legacy_rows;
+    scenario.legacy_row_snapshot_lines = {
+        "basis-stress row[1] adverse spread",
+        "basis-stress row[3] flattened"
+    };
+    return scenario;
+}
+
+ReplayCompareScenarioData BuildMixedSpotPerpScenario()
+{
+    ReplayCompareScenarioData scenario{};
+    scenario.scenario.name = "v2-vs-legacy.mixed-spot-perp";
+    scenario.scenario.dataset_id = kDatasetId;
+    scenario.scenario.start_ts_exchange = kBaseTs;
+    scenario.scenario.end_ts_exchange = kBaseTs + 120'000;
+    scenario.scenario.expected_steps = 3;
+
+    auto step1 = BuildStep(1, kBaseTs, 600.0, 400.0, 1000.0, 2, 2, 0, 0, 200.0, 20.0);
+    auto step2 = BuildStep(2, kBaseTs + 60'000, 590.0, 415.0, 1005.0, 2, 2, 0, 0, 220.0, 15.0);
+    auto step3 = BuildStep(3, kBaseTs + 120'000, 605.0, 405.0, 1010.0, 1, 1, 0, 0, 150.0, 10.0);
+
+    auto spot_fill = BuildEvent(ReplayEventType::Fill, 601, kBaseTs, "BTCUSDT-SPOT", "spot-fill-601");
+    spot_fill.quantity = 0.4;
+    spot_fill.price = 25000.0;
+    auto perp_fill = BuildEvent(ReplayEventType::Fill, 602, kBaseTs + 60'000, "BTCUSDT-PERP", "perp-fill-602");
+    perp_fill.quantity = 0.4;
+    perp_fill.price = 25010.0;
+    auto rebalance = BuildEvent(ReplayEventType::Fill, 603, kBaseTs + 120'000, "BTCUSDT-PERP", "rebalance-603");
+    rebalance.quantity = 0.2;
+    rebalance.price = 25030.0;
+
+    step1.event.events.push_back(std::move(spot_fill));
+    step2.event.events.push_back(std::move(perp_fill));
+    step3.event.events.push_back(std::move(rebalance));
+
+    scenario.legacy_steps = { step1, step2, step3 };
+    scenario.candidate_steps = scenario.legacy_steps;
+    scenario.legacy_rows = {
+        BuildRow(0, 0, 61, "SpotOrderEvent", kBaseTs, 1, 601, "BTCUSDT-SPOT", LegacyLogRowKind::Event, {{"market", "spot"}}),
+        BuildRow(1, 0, 62, "PerpOrderEvent", kBaseTs + 60'000, 2, 602, "BTCUSDT-PERP", LegacyLogRowKind::Event, {{"market", "perp"}}),
+        BuildRow(2, 1, 62, "PerpOrderEvent", kBaseTs + 120'000, 3, 603, "BTCUSDT-PERP", LegacyLogRowKind::Event, {{"market", "perp"}}),
+    };
+    scenario.candidate_rows = scenario.legacy_rows;
+    scenario.legacy_row_snapshot_lines = {
+        "mixed-spot-perp row[0] spot fill",
+        "mixed-spot-perp row[1] perp fill"
+    };
+    return scenario;
+}
+
+ReplayCompareScenarioData BuildFundingReferenceEdgeScenario()
+{
+    ReplayCompareScenarioData scenario{};
+    scenario.scenario.name = "v2-vs-legacy.funding-reference-edge";
     scenario.scenario.dataset_id = kDatasetId;
     scenario.scenario.start_ts_exchange = kBaseTs;
     scenario.scenario.end_ts_exchange = kBaseTs + 120'000;
     scenario.scenario.expected_steps = 3;
 
     auto step1 = BuildStep(1, kBaseTs, 1000.0, 0.0, 1000.0, 1, 1, 0, 0, 100.0, 100.0);
-    auto step2 = BuildStep(2, kBaseTs + 60'000, 1000.0, 0.0, 1000.0, 1, 1, 0, 0, 100.0, 100.0);
-    auto step3 = BuildStep(3, kBaseTs + 120'000, 1001.1, 0.0, 1001.1, 2, 2, 0, 0, 200.0, 0.0);
+    auto step2 = BuildStep(2, kBaseTs + 60'000, 999.88, 0.0, 999.88, 1, 1, 0, 0, 100.0, 100.0);
+    auto step3 = BuildStep(3, kBaseTs + 120'000, 1000.11, 0.0, 1000.11, 1, 1, 0, 0, 100.5, 100.5);
 
-    step1.event.events.push_back(BuildEvent(
-        ReplayEventType::Fill, 1, kBaseTs, "BTCUSDT", "btc-fill-open"));
-    step2.event.events.push_back(BuildEvent(
-        ReplayEventType::Fill, 2, kBaseTs + 60'000, "ETHUSDT", "eth-fill-open"));
-    step3.event.events.push_back(BuildEvent(
-        ReplayEventType::Fill, 3, kBaseTs + 120'000, "BTCUSDT", "btc-adjust"));
-    step3.event.events.push_back(BuildEvent(
-        ReplayEventType::Fill, 4, kBaseTs + 120'000, "ETHUSDT", "eth-adjust"));
+    auto funding_mark = BuildEvent(
+        ReplayEventType::Funding, 11, kBaseTs + 60'000, "BTCUSDT", "funding-mark");
+    funding_mark.amount = -0.12;
+    funding_mark.price = 100.0;
+    auto funding_index = BuildEvent(
+        ReplayEventType::Funding, 12, kBaseTs + 120'000, "BTCUSDT", "funding-index-fallback");
+    funding_index.amount = 0.23;
+    funding_index.price = 100.5;
+
+    step2.event.events.push_back(std::move(funding_mark));
+    step3.event.events.push_back(std::move(funding_index));
 
     scenario.legacy_steps = { step1, step2, step3 };
     scenario.candidate_steps = scenario.legacy_steps;
-
     scenario.legacy_rows = {
-        BuildRow(0, 0, 20, "MarketEvent", kBaseTs, 1, 1, "BTCUSDT", LegacyLogRowKind::Event, {{"holes", "ETH-missing"}}),
-        BuildRow(1, 0, 20, "MarketEvent", kBaseTs + 60'000, 2, 2, "ETHUSDT", LegacyLogRowKind::Event, {{"holes", "BTC-missing"}}),
-        BuildRow(2, 0, 20, "MarketEvent", kBaseTs + 120'000, 3, 3, "BTCUSDT", LegacyLogRowKind::Event, {{"holes", "none"}}),
+        BuildRow(0, 0, 30, "FundingEvent", kBaseTs + 60'000, 2, 11, "BTCUSDT", LegacyLogRowKind::Event, {{"funding", "-0.12"}, {"mark", "100.0"}, {"reference_source", "mark"}}),
+        BuildRow(1, 0, 30, "FundingEvent", kBaseTs + 120'000, 3, 12, "BTCUSDT", LegacyLogRowKind::Event, {{"funding", "0.23"}, {"mark", "100.5"}, {"reference_source", "index-fallback"}}),
     };
     scenario.candidate_rows = scenario.legacy_rows;
     scenario.legacy_row_snapshot_lines = {
-        "dual-symbol-holes row[0] missing ETH",
-        "dual-symbol-holes row[1] missing BTC"
-    };
-    return scenario;
-}
-
-ReplayCompareScenarioData BuildFundingScenario()
-{
-    ReplayCompareScenarioData scenario{};
-    scenario.scenario.name = "v2-vs-legacy.funding";
-    scenario.scenario.dataset_id = kDatasetId;
-    scenario.scenario.start_ts_exchange = kBaseTs;
-    scenario.scenario.end_ts_exchange = kBaseTs + 60'000;
-    scenario.scenario.expected_steps = 2;
-
-    auto step1 = BuildStep(1, kBaseTs, 1000.0, 0.0, 1000.0, 1, 1, 0, 0, 100.0, 100.0);
-    auto step2 = BuildStep(2, kBaseTs + 60'000, 999.88, 0.0, 999.88, 1, 1, 0, 0, 100.0, 100.0);
-    auto funding = BuildEvent(
-        ReplayEventType::Funding, 11, kBaseTs + 60'000, "BTCUSDT", "funding-11");
-    funding.amount = -0.12;
-    funding.price = 100.0;
-    step2.event.events.push_back(std::move(funding));
-
-    scenario.legacy_steps = { step1, step2 };
-    scenario.candidate_steps = scenario.legacy_steps;
-    scenario.legacy_rows = {
-        BuildRow(0, 0, 30, "FundingEvent", kBaseTs + 60'000, 2, 11, "BTCUSDT", LegacyLogRowKind::Event, {{"funding", "-0.12"}, {"mark", "100.0"}}),
-    };
-    scenario.candidate_rows = scenario.legacy_rows;
-    scenario.legacy_row_snapshot_lines = {
-        "funding row[0] ts_exchange aligned with funding timestamp"
+        "funding-reference-edge row[0] mark source",
+        "funding-reference-edge row[1] index fallback source"
     };
     return scenario;
 }
@@ -279,10 +341,11 @@ ReplayCompareScenarioData BuildRejectionLiquidationScenario()
 std::vector<ReplayCompareScenarioData> V2ReplayScenarioPack::BuildCoreScenarioPack()
 {
     std::vector<ReplayCompareScenarioData> out;
-    out.reserve(5);
+    out.reserve(6);
     out.push_back(BuildSingleSymbolScenario());
-    out.push_back(BuildDualSymbolHolesScenario());
-    out.push_back(BuildFundingScenario());
+    out.push_back(BuildBasisStressScenario());
+    out.push_back(BuildMixedSpotPerpScenario());
+    out.push_back(BuildFundingReferenceEdgeScenario());
     out.push_back(BuildAsyncAckLatencyScenario());
     out.push_back(BuildRejectionLiquidationScenario());
     return out;

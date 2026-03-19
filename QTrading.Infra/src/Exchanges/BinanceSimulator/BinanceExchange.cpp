@@ -119,6 +119,16 @@ int32_t ledger_from_instrument_type(QTrading::Dto::Trading::InstrumentType type)
     return static_cast<int32_t>(Ledger::Unknown);
 }
 
+bool env_truthy(const char* value)
+{
+    if (!value || value[0] == '\0') {
+        return false;
+    }
+    return value[0] == '1' ||
+        value[0] == 't' || value[0] == 'T' ||
+        value[0] == 'y' || value[0] == 'Y';
+}
+
 std::vector<BinanceExchange::SymbolDataset> to_datasets(
     const std::vector<std::pair<std::string, std::string>>& symbolCsv)
 {
@@ -393,6 +403,84 @@ public:
     }
 };
 
+class BinanceExchange::MarketReplayEngineV2 final {
+public:
+    struct ProbeResult {
+        bool has_next{ false };
+        uint64_t next_ts{ std::numeric_limits<uint64_t>::max() };
+        uint64_t next_kline_ts{ std::numeric_limits<uint64_t>::max() };
+        uint64_t next_funding_ts{ std::numeric_limits<uint64_t>::max() };
+        ReplayStepKind step_kind{ ReplayStepKind::EndOfStream };
+    };
+
+    static ProbeResult ProbeNext(BinanceExchange& owner);
+    static bool NextTimestamp(BinanceExchange& owner, uint64_t& ts);
+    static void BuildMultiKline(BinanceExchange& owner, uint64_t ts, MultiKlineDto& out);
+};
+
+class BinanceExchange::ReferencePriceResolver final {
+public:
+    struct Resolution {
+        bool has_price{ false };
+        double price{ 0.0 };
+        ReferencePriceSource source{ ReferencePriceSource::None };
+    };
+
+    static Resolution ResolveMarkForReplay(const BinanceExchange& owner, size_t sym_id, uint64_t ts);
+    static Resolution ResolveIndexForReplay(const BinanceExchange& owner, size_t sym_id, uint64_t ts);
+    static Resolution ResolveMarkForFunding(const BinanceExchange& owner,
+        size_t sym_id,
+        uint64_t ts,
+        const std::optional<double>& explicit_mark);
+};
+
+class BinanceExchange::FundingTimelineResolver final {
+public:
+    static bool IsDuplicate(const BinanceExchange& owner, size_t sym_id, uint64_t funding_time, double rate);
+};
+
+class BinanceExchange::TradingSessionCoreV2 final {
+public:
+    struct StepSchedulingPolicy {
+        static uint64_t NextStepSeq(uint64_t processed_steps) noexcept
+        {
+            return processed_steps + 1;
+        }
+    };
+
+    struct EventOrderingPolicy {
+        static void BeginStep(BinanceExchange& owner, uint64_t ts, QTrading::Infra::Logging::StepLogContext& out_ctx)
+        {
+            std::lock_guard<std::mutex> state_lk(owner.state_mtx_);
+            owner.last_step_ts_ = ts;
+            owner.log_ctx_.ts_exchange = ts;
+            owner.log_ctx_.step_seq += 1;
+            owner.log_ctx_.event_seq = 0;
+            out_ctx = owner.log_ctx_;
+        }
+    };
+
+    struct TerminationPolicy {
+        static bool ShouldTerminateEndOfStream(BinanceExchange& owner, uint64_t& ts)
+        {
+            std::lock_guard<std::mutex> state_lk(owner.state_mtx_);
+            return !owner.next_timestamp(ts);
+        }
+
+        static bool ShouldTerminateBalanceDepleted(BinanceExchange& owner)
+        {
+            const auto initial_perp_balance = owner.account_engine_->get_perp_balance();
+            const auto initial_spot_balance = owner.account_engine_->get_spot_balance();
+            const bool no_positions = owner.account_engine_->get_all_positions().empty();
+            const bool no_orders = owner.account_engine_->get_all_open_orders().empty();
+            return initial_perp_balance.WalletBalance <= 0.0 &&
+                initial_spot_balance.WalletBalance <= 0.0 &&
+                no_positions &&
+                no_orders;
+        }
+    };
+};
+
 class BinanceExchange::MarketReplayEngine final {
 public:
     static bool NextTimestamp(BinanceExchange& owner, uint64_t& ts);
@@ -435,6 +523,14 @@ public:
     static RunStepResult RunStep(BinanceExchange& owner, CoreMode mode)
     {
         return owner.dispatch_step_(mode);
+    }
+};
+
+class BinanceExchange::BinanceExchangeFacadeBridge final {
+public:
+    static RunStepResult RunSessionStep(BinanceExchange& owner, CoreMode effective_mode)
+    {
+        return CoreDispatchFacade::RunStep(owner, effective_mode);
     }
 };
 
@@ -578,9 +674,12 @@ BinanceExchange::BinanceExchange(
         funding_event_module_id_ = logger->GetModuleId(LogModuleToString(LogModule::FundingEvent));
     }
     if (const char* env = std::getenv("QTRADING_DISABLE_EVENT_LOGS")) {
-        if (env[0] == '1' || env[0] == 't' || env[0] == 'T' || env[0] == 'y' || env[0] == 'Y') {
+        if (env_truthy(env)) {
             enable_event_logging_ = false;
         }
+    }
+    if (const char* env = std::getenv("QTRADING_SESSION_REPLAY_FORCE_LEGACY_ONLY")) {
+        force_legacy_only_.store(env_truthy(env), std::memory_order_release);
     }
     if (run_id == 0) {
         run_id = now_ms();
@@ -714,6 +813,9 @@ BinanceExchange::BinanceExchange(
     last_funding_rate_by_symbol_.assign(datasets.size(), 0.0);
     last_funding_time_by_symbol_.assign(datasets.size(), 0);
     has_last_funding_.assign(datasets.size(), 0);
+    last_applied_funding_time_by_symbol_.assign(datasets.size(), 0);
+    last_applied_funding_rate_by_symbol_.assign(datasets.size(), 0.0);
+    has_last_applied_funding_.assign(datasets.size(), 0);
     for (size_t i = 0; i < datasets.size(); ++i) {
         const auto& ds = datasets[i];
         if (ds.funding_csv.has_value() && !ds.funding_csv->empty()) {
@@ -849,8 +951,29 @@ bool BinanceExchange::step()
 
 void BinanceExchange::set_core_mode(CoreMode mode)
 {
-    const CoreMode effective_mode = CoreModePolicy::normalize(mode);
-    core_mode_.store(effective_mode, std::memory_order_release);
+    const CoreMode requested_mode = CoreModePolicy::normalize(mode);
+    core_mode_.store(requested_mode, std::memory_order_release);
+    const bool force_legacy_only = force_legacy_only_.load(std::memory_order_acquire);
+    const CoreMode effective_mode = force_legacy_only ? CoreMode::LegacyOnly : requested_mode;
+
+    SessionReplayCoexistenceDiagnostic coexistence_diag{};
+    coexistence_diag.requested_mode = requested_mode;
+    coexistence_diag.effective_mode = effective_mode;
+    coexistence_diag.production_default_legacy_only = true;
+    coexistence_diag.force_legacy_only = force_legacy_only;
+    coexistence_diag.shadow_compare_enabled = (effective_mode == CoreMode::NewCoreShadow);
+    coexistence_diag.v2_explicit_enabled = (effective_mode == CoreMode::NewCorePrimary);
+    coexistence_diag.compare_artifact_enabled = coexistence_diag.shadow_compare_enabled
+        || coexistence_diag.v2_explicit_enabled;
+    coexistence_diag.fail_close_protected = true;
+    coexistence_diag.fallback_to_legacy = (effective_mode == CoreMode::LegacyOnly) &&
+        (requested_mode != CoreMode::LegacyOnly);
+    if (force_legacy_only && requested_mode != CoreMode::LegacyOnly) {
+        coexistence_diag.reason = "force legacy-only flag enabled; coerced session/replay mode to LegacyOnly.";
+    }
+    else {
+        coexistence_diag.reason = "session/replay coexistence mode updated.";
+    }
 
     AccountFacadeBridgeDiagnostic diag{};
     diag.mode = effective_mode;
@@ -888,11 +1011,59 @@ void BinanceExchange::set_core_mode(CoreMode mode)
     }
 
     record_account_facade_bridge_diagnostic_(std::move(diag));
+    record_session_replay_coexistence_diagnostic_(std::move(coexistence_diag));
 }
 
 BinanceExchange::CoreMode BinanceExchange::core_mode() const
 {
     return core_mode_.load(std::memory_order_acquire);
+}
+
+void BinanceExchange::set_force_legacy_only(bool enabled)
+{
+    force_legacy_only_.store(enabled, std::memory_order_release);
+    set_core_mode(core_mode_.load(std::memory_order_acquire));
+}
+
+bool BinanceExchange::force_legacy_only() const
+{
+    return force_legacy_only_.load(std::memory_order_acquire);
+}
+
+std::optional<BinanceExchange::SessionReplayCoexistenceDiagnostic>
+BinanceExchange::consume_last_session_replay_coexistence_diagnostic()
+{
+    std::lock_guard<std::mutex> lk(session_replay_diag_mtx_);
+    auto out = std::move(last_session_replay_coexistence_diagnostic_);
+    last_session_replay_coexistence_diagnostic_.reset();
+    return out;
+}
+
+std::optional<BinanceExchange::ReplayFrameV2Diagnostic>
+BinanceExchange::consume_last_replay_frame_v2_diagnostic()
+{
+    std::lock_guard<std::mutex> lk(replay_frame_v2_diag_mtx_);
+    auto out = std::move(last_replay_frame_v2_diagnostic_);
+    last_replay_frame_v2_diagnostic_.reset();
+    return out;
+}
+
+std::optional<BinanceExchange::TradingSessionCoreV2Diagnostic>
+BinanceExchange::consume_last_trading_session_core_v2_diagnostic()
+{
+    std::lock_guard<std::mutex> lk(trading_session_core_v2_diag_mtx_);
+    auto out = std::move(last_trading_session_core_v2_diagnostic_);
+    last_trading_session_core_v2_diagnostic_.reset();
+    return out;
+}
+
+std::optional<BinanceExchange::BinanceExchangeFacadeBridgeDiagnostic>
+BinanceExchange::consume_last_binance_exchange_facade_bridge_diagnostic()
+{
+    std::lock_guard<std::mutex> lk(binance_exchange_facade_bridge_diag_mtx_);
+    auto out = std::move(last_binance_exchange_facade_bridge_diagnostic_);
+    last_binance_exchange_facade_bridge_diagnostic_.reset();
+    return out;
 }
 
 std::optional<BinanceExchange::StepCompareDiagnostic> BinanceExchange::consume_last_compare_diagnostic()
@@ -946,8 +1117,54 @@ BinanceExchange::consume_last_event_publish_diagnostic()
 
 bool BinanceExchange::run_step_session_()
 {
-    const CoreMode mode = core_mode_.load(std::memory_order_acquire);
-    return CoreDispatchFacade::RunStep(*this, mode).progressed;
+    const CoreMode requested_mode = core_mode_.load(std::memory_order_acquire);
+    const bool force_legacy_only = force_legacy_only_.load(std::memory_order_acquire);
+    const CoreMode effective_mode = force_legacy_only ? CoreMode::LegacyOnly : requested_mode;
+    auto result = BinanceExchangeFacadeBridge::RunSessionStep(*this, effective_mode);
+
+    SessionReplayCoexistenceDiagnostic diag{};
+    diag.requested_mode = requested_mode;
+    diag.effective_mode = effective_mode;
+    diag.production_default_legacy_only = true;
+    diag.force_legacy_only = force_legacy_only;
+    diag.shadow_compare_enabled = (effective_mode == CoreMode::NewCoreShadow);
+    diag.v2_explicit_enabled = (effective_mode == CoreMode::NewCorePrimary);
+    diag.compare_artifact_enabled = diag.shadow_compare_enabled || diag.v2_explicit_enabled;
+    diag.fallback_to_legacy = result.fallback_to_legacy || (force_legacy_only && requested_mode != CoreMode::LegacyOnly);
+    diag.fail_close_protected = true;
+    if (force_legacy_only && requested_mode != CoreMode::LegacyOnly) {
+        diag.reason = "force legacy-only flag active during step; executing legacy path.";
+    }
+    else if (result.fallback_to_legacy) {
+        diag.reason = "v2 path signaled fallback; legacy path executed.";
+    }
+    else {
+        diag.reason = "session/replay step executed.";
+    }
+    record_session_replay_coexistence_diagnostic_(std::move(diag));
+
+    BinanceExchangeFacadeBridgeDiagnostic facade_diag{};
+    facade_diag.requested_mode = requested_mode;
+    facade_diag.effective_mode = effective_mode;
+    facade_diag.progressed = result.progressed;
+    facade_diag.fallback_to_legacy = result.fallback_to_legacy || (force_legacy_only && requested_mode != CoreMode::LegacyOnly);
+    facade_diag.used_v2_session_core = (effective_mode == CoreMode::NewCorePrimary) && !facade_diag.fallback_to_legacy;
+    facade_diag.preserve_capture_boundary = true;
+    facade_diag.preserve_log_batch_boundary = true;
+    facade_diag.preserve_timestamp_semantics = true;
+    {
+        std::lock_guard<std::mutex> lk(state_mtx_);
+        facade_diag.step_seq = log_ctx_.step_seq;
+        facade_diag.ts_exchange = last_step_ts_;
+    }
+    if (facade_diag.fallback_to_legacy) {
+        facade_diag.reason = "Facade bridge routed to legacy-compatible session path.";
+    }
+    else {
+        facade_diag.reason = "Facade bridge preserved legacy contract boundaries.";
+    }
+    record_binance_exchange_facade_bridge_diagnostic_(std::move(facade_diag));
+    return result.progressed;
 }
 
 BinanceExchange::RunStepResult BinanceExchange::dispatch_step_(CoreMode mode)
@@ -1102,6 +1319,51 @@ void BinanceExchange::record_account_facade_bridge_diagnostic_(AccountFacadeBrid
     }
     std::lock_guard<std::mutex> lk(account_facade_bridge_diag_mtx_);
     last_account_facade_bridge_diagnostic_ = std::move(diag);
+}
+
+void BinanceExchange::record_session_replay_coexistence_diagnostic_(SessionReplayCoexistenceDiagnostic diag)
+{
+    if (!diag.reason.empty()) {
+        QTR_TRACE("ex", diag.reason);
+    }
+    std::lock_guard<std::mutex> lk(session_replay_diag_mtx_);
+    last_session_replay_coexistence_diagnostic_ = std::move(diag);
+}
+
+void BinanceExchange::record_replay_frame_v2_diagnostic_(ReplayFrameV2Diagnostic diag)
+{
+    if (!diag.reason.empty()) {
+        QTR_TRACE("ex", diag.reason);
+    }
+    std::lock_guard<std::mutex> lk(replay_frame_v2_diag_mtx_);
+    last_replay_frame_v2_diagnostic_ = std::move(diag);
+}
+
+void BinanceExchange::record_trading_session_core_v2_diagnostic_(TradingSessionCoreV2Diagnostic diag)
+{
+    if (!diag.reason.empty()) {
+        QTR_TRACE("ex", diag.reason);
+    }
+    std::lock_guard<std::mutex> lk(trading_session_core_v2_diag_mtx_);
+    last_trading_session_core_v2_diagnostic_ = std::move(diag);
+}
+
+void BinanceExchange::record_binance_exchange_facade_bridge_diagnostic_(BinanceExchangeFacadeBridgeDiagnostic diag)
+{
+    if (!diag.reason.empty()) {
+        QTR_TRACE("ex", diag.reason);
+    }
+    std::lock_guard<std::mutex> lk(binance_exchange_facade_bridge_diag_mtx_);
+    last_binance_exchange_facade_bridge_diagnostic_ = std::move(diag);
+}
+
+void BinanceExchange::record_reference_funding_resolver_diagnostic_(ReferenceFundingResolverDiagnostic diag)
+{
+    if (!diag.reason.empty()) {
+        QTR_TRACE("ex", diag.reason);
+    }
+    std::lock_guard<std::mutex> lk(reference_funding_diag_mtx_);
+    last_reference_funding_resolver_diagnostic_ = std::move(diag);
 }
 
 BinanceExchange::EventPublishCompareSnapshot
@@ -1265,16 +1527,19 @@ void BinanceExchange::record_event_publish_diagnostic_(EventPublishCompareDiagno
 
 bool BinanceExchange::ExchangeSession::Run()
 {
-    uint64_t ts;
-    {
-        std::lock_guard<std::mutex> state_lk(owner_.state_mtx_);
-        if (!owner_.next_timestamp(ts)) {
-            QTR_TRACE("ex", "no next timestamp -> close channels");
-            owner_.market_channel->Close();
-            owner_.position_channel->Close();
-            owner_.order_channel->Close();
-            return false;
-        }
+    TradingSessionCoreV2Diagnostic core_diag{};
+    uint64_t ts = std::numeric_limits<uint64_t>::max();
+    if (TradingSessionCoreV2::TerminationPolicy::ShouldTerminateEndOfStream(owner_, ts)) {
+        core_diag.progressed = false;
+        core_diag.terminated = true;
+        core_diag.terminated_end_of_stream = true;
+        core_diag.reason = "TradingSessionCoreV2 termination: end-of-stream.";
+        QTR_TRACE("ex", "no next timestamp -> close channels");
+        owner_.market_channel->Close();
+        owner_.position_channel->Close();
+        owner_.order_channel->Close();
+        owner_.record_trading_session_core_v2_diagnostic_(std::move(core_diag));
+        return false;
     }
 
     QTrading::Dto::Account::BalanceSnapshot perp_balance{};
@@ -1294,36 +1559,34 @@ bool BinanceExchange::ExchangeSession::Run()
 
     {
         std::lock_guard<std::mutex> lk(owner_.account_mtx_);
-        const uint64_t next_step = owner_.processed_steps_ + 1;
-        owner_.flush_deferred_orders_locked_(next_step);
+        const uint64_t next_step = TradingSessionCoreV2::StepSchedulingPolicy::NextStepSeq(owner_.processed_steps_);
+        core_diag.deferred_due_step = next_step;
+        core_diag.deferred_executed = static_cast<uint32_t>(owner_.flush_deferred_orders_with_count_locked_(next_step));
         owner_.processed_steps_ = next_step;
         owner_.set_global_timestamp(ts);
         apply_timing = owner_.funding_apply_timing_;
+        core_diag.funding_before_matching = (apply_timing == FundingApplyTiming::BeforeMatching);
 
-        const auto initial_perp_balance = owner_.account_engine_->get_perp_balance();
-        const auto initial_spot_balance = owner_.account_engine_->get_spot_balance();
-        const bool no_positions = owner_.account_engine_->get_all_positions().empty();
-        const bool no_orders = owner_.account_engine_->get_all_open_orders().empty();
-        if (initial_perp_balance.WalletBalance <= 0.0 &&
-            initial_spot_balance.WalletBalance <= 0.0 &&
-            no_positions &&
-            no_orders) {
+        if (TradingSessionCoreV2::TerminationPolicy::ShouldTerminateBalanceDepleted(owner_)) {
+            core_diag.progressed = false;
+            core_diag.terminated = true;
+            core_diag.terminated_balance_depleted = true;
+            core_diag.ts_exchange = ts;
+            core_diag.step_seq = owner_.log_ctx_.step_seq;
+            core_diag.reason = "TradingSessionCoreV2 termination: balance depleted.";
             QTR_TRACE("ex", "balance depleted -> close channels");
             owner_.market_channel->Close();
             owner_.position_channel->Close();
             owner_.order_channel->Close();
+            core_diag.async_ack_queue_size = owner_.async_order_acks_.size();
+            owner_.record_trading_session_core_v2_diagnostic_(std::move(core_diag));
             return false;
         }
     }
 
-    {
-        std::lock_guard<std::mutex> state_lk(owner_.state_mtx_);
-        owner_.last_step_ts_ = ts;
-        owner_.log_ctx_.ts_exchange = ts;
-        owner_.log_ctx_.step_seq += 1;
-        owner_.log_ctx_.event_seq = 0;
-        step_log_ctx = owner_.log_ctx_;
-    }
+    TradingSessionCoreV2::EventOrderingPolicy::BeginStep(owner_, ts, step_log_ctx);
+    core_diag.step_seq = step_log_ctx.step_seq;
+    core_diag.ts_exchange = step_log_ctx.ts_exchange;
     dto = make_pooled<MultiKlineDto>();
 
     auto build_market = [&]() {
@@ -1569,6 +1832,15 @@ bool BinanceExchange::ExchangeSession::Run()
         owner_.last_account_version_ = cur_ver;
     }
 
+    {
+        std::lock_guard<std::mutex> lk(owner_.account_mtx_);
+        core_diag.async_ack_queue_size = owner_.async_order_acks_.size();
+    }
+    core_diag.progressed = true;
+    core_diag.terminated = false;
+    core_diag.reason = "TradingSessionCoreV2 step lifecycle completed.";
+    owner_.record_trading_session_core_v2_diagnostic_(std::move(core_diag));
+
     QTR_TRACE("ex", "step end");
     return true;
 }
@@ -1618,18 +1890,20 @@ void BinanceExchange::enqueue_deferred_order_locked_(uint64_t due_step, std::fun
     deferred_order_commands_.push_back(DeferredOrderCommand{ due_step, std::move(fn) });
 }
 
-void BinanceExchange::flush_deferred_orders_locked_(uint64_t step_seq)
+size_t BinanceExchange::flush_deferred_orders_with_count_locked_(uint64_t step_seq)
 {
     if (deferred_order_commands_.empty() || !account_engine_) {
-        return;
+        return 0;
     }
 
+    size_t executed = 0;
     // In-place stable compaction avoids O(K^2) middle-erases on deque.
     size_t write = 0;
     for (size_t read = 0; read < deferred_order_commands_.size(); ++read) {
         auto& cmd = deferred_order_commands_[read];
         if (cmd.due_step <= step_seq) {
             cmd.fn(*account_engine_, step_seq);
+            ++executed;
             continue;
         }
         if (write != read) {
@@ -1638,6 +1912,12 @@ void BinanceExchange::flush_deferred_orders_locked_(uint64_t step_seq)
         ++write;
     }
     deferred_order_commands_.resize(write);
+    return executed;
+}
+
+void BinanceExchange::flush_deferred_orders_locked_(uint64_t step_seq)
+{
+    (void)flush_deferred_orders_with_count_locked_(step_seq);
 }
 
 void BinanceExchange::push_async_order_ack_locked_(AsyncOrderAck ack)
@@ -1780,6 +2060,15 @@ BinanceExchange::FundingApplyTiming BinanceExchange::funding_apply_timing() cons
     return funding_apply_timing_;
 }
 
+std::optional<BinanceExchange::ReferenceFundingResolverDiagnostic>
+BinanceExchange::consume_last_reference_funding_resolver_diagnostic()
+{
+    std::lock_guard<std::mutex> lk(reference_funding_diag_mtx_);
+    auto out = std::move(last_reference_funding_resolver_diagnostic_);
+    last_reference_funding_resolver_diagnostic_.reset();
+    return out;
+}
+
 void BinanceExchange::set_uncertainty_band_bps(double bps)
 {
     std::lock_guard<std::mutex> lk(account_mtx_);
@@ -1867,10 +2156,10 @@ void BinanceExchange::close()
 	IExchange<MultiKlinePtr>::close();
 }
 
-bool BinanceExchange::MarketReplayEngine::NextTimestamp(BinanceExchange& owner, uint64_t& ts)
+BinanceExchange::MarketReplayEngineV2::ProbeResult
+BinanceExchange::MarketReplayEngineV2::ProbeNext(BinanceExchange& owner)
 {
-    uint64_t next_kline_ts = std::numeric_limits<uint64_t>::max();
-    bool has_next_kline = false;
+    ProbeResult probe{};
 
     // Pop stale heap entries until top matches current per-symbol next_ts.
     while (!owner.next_ts_heap_.empty()) {
@@ -1878,15 +2167,12 @@ bool BinanceExchange::MarketReplayEngine::NextTimestamp(BinanceExchange& owner, 
         if (top.sym_id < owner.next_ts_by_symbol_.size() &&
             owner.has_next_ts_[top.sym_id] &&
             owner.next_ts_by_symbol_[top.sym_id] == top.ts) {
-            next_kline_ts = top.ts;
-            has_next_kline = true;
+            probe.next_kline_ts = top.ts;
             break;
         }
         owner.next_ts_heap_.pop();
     }
 
-    uint64_t next_funding_ts = std::numeric_limits<uint64_t>::max();
-    bool has_next_funding = false;
     const size_t funding_count = std::min(owner.funding_md_.size(), owner.funding_cursor_.size());
     for (size_t i = 0; i < funding_count; ++i) {
         if (!owner.has_funding_[i] || !owner.funding_md_[i]) {
@@ -1901,25 +2187,127 @@ bool BinanceExchange::MarketReplayEngine::NextTimestamp(BinanceExchange& owner, 
             continue;
         }
         const uint64_t fts = data.get_funding(cur).FundingTime;
-        if (!has_next_funding || fts < next_funding_ts) {
-            next_funding_ts = fts;
-            has_next_funding = true;
+        if (fts < probe.next_funding_ts) {
+            probe.next_funding_ts = fts;
         }
     }
 
+    const bool has_next_kline = probe.next_kline_ts != std::numeric_limits<uint64_t>::max();
+    const bool has_next_funding = probe.next_funding_ts != std::numeric_limits<uint64_t>::max();
     if (!has_next_kline && !has_next_funding) {
+        probe.has_next = false;
+        probe.next_ts = std::numeric_limits<uint64_t>::max();
+        probe.step_kind = ReplayStepKind::EndOfStream;
+        return probe;
+    }
+
+    probe.has_next = true;
+    probe.next_ts = std::min(probe.next_kline_ts, probe.next_funding_ts);
+    const bool kline_at_ts = has_next_kline && probe.next_kline_ts == probe.next_ts;
+    const bool funding_at_ts = has_next_funding && probe.next_funding_ts == probe.next_ts;
+    if (kline_at_ts && funding_at_ts) {
+        probe.step_kind = ReplayStepKind::Mixed;
+    }
+    else if (kline_at_ts) {
+        probe.step_kind = ReplayStepKind::MarketOnly;
+    }
+    else {
+        probe.step_kind = ReplayStepKind::FundingOnly;
+    }
+    return probe;
+}
+
+bool BinanceExchange::MarketReplayEngineV2::NextTimestamp(BinanceExchange& owner, uint64_t& ts)
+{
+    const auto probe = ProbeNext(owner);
+    ReplayFrameV2Diagnostic diag{};
+    diag.has_next = probe.has_next;
+    diag.end_of_stream = !probe.has_next;
+    diag.ts_exchange = probe.has_next ? probe.next_ts : 0;
+    diag.next_kline_ts = probe.next_kline_ts;
+    diag.next_funding_ts = probe.next_funding_ts;
+    diag.step_kind = probe.step_kind;
+    diag.reason = probe.has_next
+        ? "MarketReplayEngineV2 selected next replay timestamp."
+        : "MarketReplayEngineV2 reached end-of-stream.";
+    owner.record_replay_frame_v2_diagnostic_(std::move(diag));
+
+    if (!probe.has_next) {
         ts = std::numeric_limits<uint64_t>::max();
         return false;
     }
-
-    ts = std::min(next_kline_ts, next_funding_ts);
+    ts = probe.next_ts;
     return true;
 }
 
-void BinanceExchange::MarketReplayEngine::BuildMultiKline(BinanceExchange& owner,
+BinanceExchange::ReferencePriceResolver::Resolution
+BinanceExchange::ReferencePriceResolver::ResolveMarkForReplay(const BinanceExchange& owner, size_t sym_id, uint64_t ts)
+{
+    Resolution out{};
+    out.source = ReferencePriceSource::None;
+    out.price = 0.0;
+    if (owner.resolve_mark_price_with_source_(sym_id, ts, out.price, out.source)) {
+        out.has_price = true;
+    }
+    return out;
+}
+
+BinanceExchange::ReferencePriceResolver::Resolution
+BinanceExchange::ReferencePriceResolver::ResolveIndexForReplay(const BinanceExchange& owner, size_t sym_id, uint64_t ts)
+{
+    Resolution out{};
+    out.source = ReferencePriceSource::None;
+    out.price = 0.0;
+    if (owner.resolve_index_price_with_source_(sym_id, ts, out.price, out.source)) {
+        out.has_price = true;
+    }
+    return out;
+}
+
+BinanceExchange::ReferencePriceResolver::Resolution
+BinanceExchange::ReferencePriceResolver::ResolveMarkForFunding(const BinanceExchange& owner,
+    size_t sym_id,
+    uint64_t ts,
+    const std::optional<double>& explicit_mark)
+{
+    Resolution out{};
+    if (explicit_mark.has_value()) {
+        out.has_price = true;
+        out.price = *explicit_mark;
+        out.source = ReferencePriceSource::Raw;
+        return out;
+    }
+    if (owner.interpolate_mark_price_(sym_id, ts, out.price)) {
+        out.has_price = true;
+        out.source = ReferencePriceSource::Interpolated;
+    }
+    return out;
+}
+
+bool BinanceExchange::FundingTimelineResolver::IsDuplicate(
+    const BinanceExchange& owner,
+    size_t sym_id,
+    uint64_t funding_time,
+    double rate)
+{
+    if (sym_id >= owner.has_last_applied_funding_.size()) {
+        return false;
+    }
+    if (!owner.has_last_applied_funding_[sym_id]) {
+        return false;
+    }
+    if (owner.last_applied_funding_time_by_symbol_[sym_id] != funding_time) {
+        return false;
+    }
+    return std::fabs(owner.last_applied_funding_rate_by_symbol_[sym_id] - rate) <= 1e-12;
+}
+
+void BinanceExchange::MarketReplayEngineV2::BuildMultiKline(BinanceExchange& owner,
     uint64_t ts,
     MultiKlineDto& out)
 {
+    uint32_t symbols_with_trade = 0;
+    uint32_t symbols_with_funding = 0;
     out.Timestamp = ts;
     out.symbols = owner.symbols_shared_;
     out.trade_klines_by_id.clear();
@@ -1942,6 +2330,7 @@ void BinanceExchange::MarketReplayEngine::BuildMultiKline(BinanceExchange& owner
         {
             const auto& k = data.get_kline(idx);
             out.trade_klines_by_id[i] = k;
+            ++symbols_with_trade;
             owner.last_close_by_symbol_[i] = k.ClosePrice;
             owner.last_close_ts_by_symbol_[i] = k.Timestamp;
             owner.has_last_close_[i] = 1;
@@ -1963,26 +2352,60 @@ void BinanceExchange::MarketReplayEngine::BuildMultiKline(BinanceExchange& owner
             out.funding_by_id[i] = FundingRateDto(
                 owner.last_funding_time_by_symbol_[i],
                 owner.last_funding_rate_by_symbol_[i]);
+            ++symbols_with_funding;
         }
 
-        double mark = 0.0;
-        ReferencePriceSource mark_source = ReferencePriceSource::None;
-        if (owner.resolve_mark_price_with_source_(i, ts, mark, mark_source)) {
-            out.mark_klines_by_id[i] = QTrading::Dto::Market::Binance::ReferenceKlineDto::Point(ts, mark);
+        const auto mark_resolution = ReferencePriceResolver::ResolveMarkForReplay(owner, i, ts);
+        if (mark_resolution.has_price) {
+            out.mark_klines_by_id[i] = QTrading::Dto::Market::Binance::ReferenceKlineDto::Point(ts, mark_resolution.price);
         }
         if (i < owner.last_mark_source_by_symbol_.size()) {
-            owner.last_mark_source_by_symbol_[i] = static_cast<int32_t>(mark_source);
+            owner.last_mark_source_by_symbol_[i] = static_cast<int32_t>(mark_resolution.source);
         }
 
-        double index = 0.0;
-        ReferencePriceSource index_source = ReferencePriceSource::None;
-        if (owner.resolve_index_price_with_source_(i, ts, index, index_source)) {
-            out.index_klines_by_id[i] = QTrading::Dto::Market::Binance::ReferenceKlineDto::Point(ts, index);
+        const auto index_resolution = ReferencePriceResolver::ResolveIndexForReplay(owner, i, ts);
+        if (index_resolution.has_price) {
+            out.index_klines_by_id[i] = QTrading::Dto::Market::Binance::ReferenceKlineDto::Point(ts, index_resolution.price);
         }
         if (i < owner.last_index_source_by_symbol_.size()) {
-            owner.last_index_source_by_symbol_[i] = static_cast<int32_t>(index_source);
+            owner.last_index_source_by_symbol_[i] = static_cast<int32_t>(index_resolution.source);
         }
     }
+
+    ReplayFrameV2Diagnostic diag{};
+    diag.has_next = true;
+    diag.end_of_stream = false;
+    diag.ts_exchange = ts;
+    diag.symbols_with_trade = symbols_with_trade;
+    diag.symbols_with_funding = symbols_with_funding;
+    const bool has_trade = symbols_with_trade > 0;
+    const bool has_funding = symbols_with_funding > 0;
+    if (has_trade && has_funding) {
+        diag.step_kind = ReplayStepKind::Mixed;
+    }
+    else if (has_trade) {
+        diag.step_kind = ReplayStepKind::MarketOnly;
+    }
+    else if (has_funding) {
+        diag.step_kind = ReplayStepKind::FundingOnly;
+    }
+    else {
+        diag.step_kind = ReplayStepKind::EndOfStream;
+    }
+    diag.reason = "MarketReplayEngineV2 built replay frame.";
+    owner.record_replay_frame_v2_diagnostic_(std::move(diag));
+}
+
+bool BinanceExchange::MarketReplayEngine::NextTimestamp(BinanceExchange& owner, uint64_t& ts)
+{
+    return MarketReplayEngineV2::NextTimestamp(owner, ts);
+}
+
+void BinanceExchange::MarketReplayEngine::BuildMultiKline(BinanceExchange& owner,
+    uint64_t ts,
+    MultiKlineDto& out)
+{
+    MarketReplayEngineV2::BuildMultiKline(owner, ts, out);
 }
 
 /// @brief Determine the next global timestamp to emit.
@@ -2473,10 +2896,18 @@ void BinanceExchange::collect_funding_events_unlocked_(uint64_t ts, std::vector<
 {
     out.clear();
     if (funding_md_.empty()) {
+        ReferenceFundingResolverDiagnostic diag{};
+        diag.ts_exchange = ts;
+        diag.funding_apply_timing = funding_apply_timing_;
+        diag.reason = "No funding dataset configured.";
+        record_reference_funding_resolver_diagnostic_(std::move(diag));
         return;
     }
 
     out.reserve(symbols_.size());
+    ReferenceFundingResolverDiagnostic diag{};
+    diag.ts_exchange = ts;
+    diag.funding_apply_timing = funding_apply_timing_;
 
     for (size_t i = 0; i < funding_md_.size(); ++i) {
         if (i >= symbols_.size()) break;
@@ -2493,31 +2924,54 @@ void BinanceExchange::collect_funding_events_unlocked_(uint64_t ts, std::vector<
         }
         while (cur < end) {
             const auto& fr = data.get_funding(cur);
+            ++diag.funding_rows_seen;
             if (i < has_last_funding_.size()) {
                 has_last_funding_[i] = 1;
                 last_funding_rate_by_symbol_[i] = fr.Rate;
                 last_funding_time_by_symbol_[i] = fr.FundingTime;
             }
 
-            double price = 0.0;
-            bool has_price = false;
-            ReferencePriceSource mark_source = ReferencePriceSource::None;
-            if (fr.MarkPrice.has_value()) {
-                price = fr.MarkPrice.value();
-                has_price = true;
-                mark_source = ReferencePriceSource::Raw;
+            const auto mark_resolution =
+                ReferencePriceResolver::ResolveMarkForFunding(*this, i, fr.FundingTime, fr.MarkPrice);
+            if (mark_resolution.source == ReferencePriceSource::Raw) {
+                ++diag.mark_source_raw_count;
             }
-            else if (interpolate_mark_price_(i, fr.FundingTime, price)) {
-                has_price = true;
-                mark_source = ReferencePriceSource::Interpolated;
+            else if (mark_resolution.source == ReferencePriceSource::Interpolated) {
+                ++diag.mark_source_interpolated_count;
+            }
+
+            if (FundingTimelineResolver::IsDuplicate(*this, i, fr.FundingTime, fr.Rate)) {
+                ++diag.funding_rows_skipped_duplicate;
+                DomainFundingEvent skip{};
+                skip.symbol = symbols_[i];
+                if (account_engine_) {
+                    skip.instrument_type = static_cast<int32_t>(account_engine_->get_instrument_spec(symbols_[i]).type);
+                }
+                skip.funding_time = fr.FundingTime;
+                skip.rate = fr.Rate;
+                skip.has_mark_price = mark_resolution.has_price;
+                skip.mark_price = mark_resolution.has_price ? mark_resolution.price : 0.0;
+                skip.mark_price_source = static_cast<int32_t>(mark_resolution.source);
+                skip.skip_reason = 2; // duplicate funding row deduped
+                skip.position_id = -1;
+                out.emplace_back(std::move(skip));
+                ++cur;
+                continue;
             }
 
             std::vector<Account::FundingApplyResult> applied;
-            if (has_price && account_engine_) {
-                applied = account_engine_->apply_funding(symbols_[i], fr.FundingTime, fr.Rate, price);
+            if (mark_resolution.has_price && account_engine_) {
+                applied = account_engine_->apply_funding(
+                    symbols_[i], fr.FundingTime, fr.Rate, mark_resolution.price);
+                if (i < has_last_applied_funding_.size()) {
+                    has_last_applied_funding_[i] = 1;
+                    last_applied_funding_time_by_symbol_[i] = fr.FundingTime;
+                    last_applied_funding_rate_by_symbol_[i] = fr.Rate;
+                }
             }
-            else if (!has_price) {
+            else if (!mark_resolution.has_price) {
                 ++funding_skipped_no_mark_total_;
+                ++diag.funding_rows_skipped_no_mark;
                 DomainFundingEvent skip;
                 skip.symbol = symbols_[i];
                 if (account_engine_) {
@@ -2544,9 +2998,9 @@ void BinanceExchange::collect_funding_events_unlocked_(uint64_t ts, std::vector<
                 }
                 e.funding_time = fr.FundingTime;
                 e.rate = fr.Rate;
-                e.has_mark_price = has_price;
-                e.mark_price = has_price ? price : 0.0;
-                e.mark_price_source = static_cast<int32_t>(mark_source);
+                e.has_mark_price = mark_resolution.has_price;
+                e.mark_price = mark_resolution.has_price ? mark_resolution.price : 0.0;
+                e.mark_price_source = static_cast<int32_t>(mark_resolution.source);
                 e.skip_reason = 0;
                 e.position_id = static_cast<int64_t>(r.position_id);
                 e.is_long = r.is_long;
@@ -2555,10 +3009,13 @@ void BinanceExchange::collect_funding_events_unlocked_(uint64_t ts, std::vector<
                 out.emplace_back(std::move(e));
             }
             funding_applied_events_total_ += applied.size();
+            diag.funding_rows_applied += static_cast<uint32_t>(applied.size());
 
             ++cur;
         }
     }
+    diag.reason = "ReferencePriceResolver + FundingTimelineResolver completed.";
+    record_reference_funding_resolver_diagnostic_(std::move(diag));
 }
 
 namespace {
