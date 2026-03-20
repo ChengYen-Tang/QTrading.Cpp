@@ -20,6 +20,7 @@ add_executable(QTrading.Infra.Tests
   Exchanges/BinanceSimulator/Diagnostics/Compare/ReplayCompareTestHarnessTests.cpp
   Exchanges/BinanceSimulator/Diagnostics/Compare/StepCompareModelTests.cpp
   Exchanges/BinanceSimulator/Diagnostics/Compare/V2ReplayScenarioPackTests.cpp
+  Exchanges/BinanceSimulator/Observability/CompareNamespaceAliasTests.cpp
 )
 
 target_include_directories(QTrading.Infra.Tests

@@ -719,13 +719,11 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
 
         class IEventPublisher;
         class LegacyAccountFacadeBridge;
-        class LegacyLogAdapter;
         class LegacyEventPublisher;
         class AsyncEventPublisher;
         class NullEventPublisher;
         class EventCaptureBoundary;
         class MarketReplayEngineV2;
-        class MarketReplayEngine;
         class ReferencePriceResolver;
         class FundingTimelineResolver;
         class TradingSessionCoreV2;

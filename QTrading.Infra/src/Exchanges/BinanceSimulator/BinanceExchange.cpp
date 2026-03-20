@@ -279,32 +279,18 @@ public:
     void publish(EventEnvelope&&) override {}
 };
 
-class BinanceExchange::LegacyLogAdapter final {
+class BinanceExchange::LegacyEventPublisher final : public BinanceExchange::IEventPublisher {
 public:
-    explicit LegacyLogAdapter(BinanceExchange& owner)
+    explicit LegacyEventPublisher(BinanceExchange& owner)
         : owner_(owner) {}
 
-    void publish(EventEnvelope&& task)
+    void publish(EventEnvelope&& task) override
     {
         owner_.emit_legacy_rows_from_event_envelope_(std::move(task));
     }
 
 private:
     BinanceExchange& owner_;
-};
-
-class BinanceExchange::LegacyEventPublisher final : public BinanceExchange::IEventPublisher {
-public:
-    explicit LegacyEventPublisher(BinanceExchange& owner)
-        : adapter_(owner) {}
-
-    void publish(EventEnvelope&& task) override
-    {
-        adapter_.publish(std::move(task));
-    }
-
-private:
-    LegacyLogAdapter adapter_;
 };
 
 class BinanceExchange::AsyncEventPublisher final : public BinanceExchange::IEventPublisher {
@@ -479,12 +465,6 @@ public:
                 no_orders;
         }
     };
-};
-
-class BinanceExchange::MarketReplayEngine final {
-public:
-    static bool NextTimestamp(BinanceExchange& owner, uint64_t& ts);
-    static void BuildMultiKline(BinanceExchange& owner, uint64_t ts, MultiKlineDto& out);
 };
 
 class BinanceExchange::SimulatorRiskOverlayEngine final {
@@ -2398,24 +2378,12 @@ void BinanceExchange::MarketReplayEngineV2::BuildMultiKline(BinanceExchange& own
     owner.record_replay_frame_v2_diagnostic_(std::move(diag));
 }
 
-bool BinanceExchange::MarketReplayEngine::NextTimestamp(BinanceExchange& owner, uint64_t& ts)
-{
-    return MarketReplayEngineV2::NextTimestamp(owner, ts);
-}
-
-void BinanceExchange::MarketReplayEngine::BuildMultiKline(BinanceExchange& owner,
-    uint64_t ts,
-    MultiKlineDto& out)
-{
-    MarketReplayEngineV2::BuildMultiKline(owner, ts, out);
-}
-
 /// @brief Determine the next global timestamp to emit.
 /// @param[out] ts  The minimum upcoming timestamp among all symbols.
 /// @return true if at least one symbol has data remaining.
 bool BinanceExchange::next_timestamp(uint64_t& ts)
 {
-    return MarketReplayEngine::NextTimestamp(*this, ts);
+    return MarketReplayEngineV2::NextTimestamp(*this, ts);
 }
 
 /// @brief Build and send a MultiKlineDto for timestamp `ts`.
@@ -2424,7 +2392,7 @@ bool BinanceExchange::next_timestamp(uint64_t& ts)
 void BinanceExchange::build_multikline(uint64_t ts,
     MultiKlineDto& out)
 {
-    MarketReplayEngine::BuildMultiKline(*this, ts, out);
+    MarketReplayEngineV2::BuildMultiKline(*this, ts, out);
 }
 
 /// @brief Log account balance, positions, and orders via the Logger.
