@@ -372,7 +372,7 @@ TEST_F(BinanceExchangeFixture, OrderLatencyBarsPublishesPendingThenAcceptedAsync
     EXPECT_EQ(acks[0].submitted_step, 1u);
     EXPECT_EQ(acks[0].due_step, 2u);
     EXPECT_EQ(acks[0].resolved_step, 0u);
-    EXPECT_EQ(acks[0].reject_code, Account::OrderRejectInfo::Code::None);
+    EXPECT_EQ(acks[0].reject_code, Contracts::OrderRejectInfo::Code::None);
     EXPECT_TRUE(acks[0].reject_message.empty());
     EXPECT_EQ(acks[0].client_order_id, "cid-lat-1");
     EXPECT_EQ(acks[0].stp_mode, Account::SelfTradePreventionMode::ExpireMaker);
@@ -388,7 +388,7 @@ TEST_F(BinanceExchangeFixture, OrderLatencyBarsPublishesPendingThenAcceptedAsync
     EXPECT_EQ(acks[0].request_id, req_id);
     EXPECT_EQ(acks[0].status, BinanceExchange::AsyncOrderAck::Status::Accepted);
     EXPECT_EQ(acks[0].resolved_step, 2u);
-    EXPECT_EQ(acks[0].reject_code, Account::OrderRejectInfo::Code::None);
+    EXPECT_EQ(acks[0].reject_code, Contracts::OrderRejectInfo::Code::None);
     EXPECT_TRUE(acks[0].reject_message.empty());
     EXPECT_EQ(acks[0].client_order_id, "cid-lat-1");
     EXPECT_EQ(acks[0].stp_mode, Account::SelfTradePreventionMode::ExpireMaker);
@@ -418,7 +418,7 @@ TEST_F(BinanceExchangeFixture, OrderLatencyBarsPublishesPendingThenRejectedAsync
     ASSERT_EQ(acks.size(), 1u);
     EXPECT_EQ(acks[0].status, BinanceExchange::AsyncOrderAck::Status::Pending);
     EXPECT_EQ(acks[0].instrument_type, QTrading::Dto::Trading::InstrumentType::Spot);
-    EXPECT_EQ(acks[0].reject_code, Account::OrderRejectInfo::Code::None);
+    EXPECT_EQ(acks[0].reject_code, Contracts::OrderRejectInfo::Code::None);
     EXPECT_TRUE(acks[0].reject_message.empty());
     EXPECT_EQ(acks[0].binance_error_code, 0);
     EXPECT_TRUE(acks[0].binance_error_message.empty());
@@ -432,7 +432,7 @@ TEST_F(BinanceExchangeFixture, OrderLatencyBarsPublishesPendingThenRejectedAsync
     EXPECT_EQ(acks[0].request_id, req_id);
     EXPECT_EQ(acks[0].status, BinanceExchange::AsyncOrderAck::Status::Rejected);
     EXPECT_EQ(acks[0].resolved_step, 2u);
-    EXPECT_EQ(acks[0].reject_code, Account::OrderRejectInfo::Code::SpotNoInventory);
+    EXPECT_EQ(acks[0].reject_code, Contracts::OrderRejectInfo::Code::SpotNoInventory);
     EXPECT_FALSE(acks[0].reject_message.empty());
     EXPECT_EQ(acks[0].binance_error_code, -2010);
     EXPECT_FALSE(acks[0].binance_error_message.empty());
@@ -2272,7 +2272,7 @@ TEST_F(BinanceExchangeFixture, StrictModeRejectsOrdersForUnknownDatasetSymbol)
     auto resolved = ex.drain_async_order_acks();
     ASSERT_EQ(resolved.size(), 1u);
     EXPECT_EQ(resolved[0].status, BinanceExchange::AsyncOrderAck::Status::Rejected);
-    EXPECT_EQ(resolved[0].reject_code, Account::OrderRejectInfo::Code::UnknownSymbol);
+    EXPECT_EQ(resolved[0].reject_code, Contracts::OrderRejectInfo::Code::UnknownSymbol);
     EXPECT_EQ(resolved[0].binance_error_code, -1121);
 }
 

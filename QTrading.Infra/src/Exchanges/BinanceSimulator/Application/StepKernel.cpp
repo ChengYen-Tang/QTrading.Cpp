@@ -4,6 +4,7 @@
 #include <utility>
 
 #include "Exchanges/BinanceSimulator/Application/MarketReplayKernel.hpp"
+#include "Exchanges/BinanceSimulator/Application/OrderCommandKernel.hpp"
 #include "Exchanges/BinanceSimulator/Application/TerminationPolicy.hpp"
 #include "Exchanges/BinanceSimulator/BinanceExchange.hpp"
 #include "Exchanges/BinanceSimulator/Output/ChannelPublisher.hpp"
@@ -97,6 +98,7 @@ bool StepKernel::run_step() const
     }
 
     ++step_state.step_seq;
+    OrderCommandKernel(exchange_).FlushDeferredForStep(step_state.step_seq);
     runtime_state.last_status_snapshot.ts_exchange = frame.ts_exchange;
 
     Output::StepObservableContext observable_ctx{};

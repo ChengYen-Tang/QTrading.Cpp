@@ -1,44 +1,56 @@
 #include "Exchanges/BinanceSimulator/BinanceExchange.hpp"
+#include "Exchanges/BinanceSimulator/Application/OrderCommandKernel.hpp"
 #include "Exchanges/BinanceSimulator/Support/BinanceExchangeSkeletonSupport.hpp"
 
 namespace QTrading::Infra::Exchanges::BinanceSim::Api {
 
-bool PerpApi::place_order(const std::string&, double, double,
-    QTrading::Dto::Trading::OrderSide, QTrading::Dto::Trading::PositionSide, bool,
-    const std::string&, Account::SelfTradePreventionMode)
+bool PerpApi::place_order(const std::string& symbol, double quantity, double price,
+    QTrading::Dto::Trading::OrderSide side, QTrading::Dto::Trading::PositionSide position_side, bool reduce_only,
+    const std::string& client_order_id, Account::SelfTradePreventionMode stp_mode)
 {
-    // Explicit stub while preserving outward facade behavior.
-    Support::ThrowNotImplemented("BinanceExchange::PerpApi::place_order(limit)");
+    return Application::OrderCommandKernel(owner_).PlacePerpLimit(
+        symbol, quantity, price, side, position_side, reduce_only, client_order_id, stp_mode);
 }
 
-bool PerpApi::place_order(const std::string&, double,
-    QTrading::Dto::Trading::OrderSide, QTrading::Dto::Trading::PositionSide, bool,
-    const std::string&, Account::SelfTradePreventionMode)
+bool PerpApi::place_order(const std::string& symbol, double quantity,
+    QTrading::Dto::Trading::OrderSide side, QTrading::Dto::Trading::PositionSide position_side, bool reduce_only,
+    const std::string& client_order_id, Account::SelfTradePreventionMode stp_mode)
 {
-    Support::ThrowNotImplemented("BinanceExchange::PerpApi::place_order(market)");
+    return Application::OrderCommandKernel(owner_).PlacePerpMarket(
+        symbol, quantity, side, position_side, reduce_only, client_order_id, stp_mode);
 }
 
-bool PerpApi::place_close_position_order(const std::string&,
-    QTrading::Dto::Trading::OrderSide, QTrading::Dto::Trading::PositionSide, double,
-    const std::string&, Account::SelfTradePreventionMode)
+bool PerpApi::place_close_position_order(const std::string& symbol,
+    QTrading::Dto::Trading::OrderSide side, QTrading::Dto::Trading::PositionSide position_side, double price,
+    const std::string& client_order_id, Account::SelfTradePreventionMode stp_mode)
 {
-    Support::ThrowNotImplemented("BinanceExchange::PerpApi::place_close_position_order");
+    return Application::OrderCommandKernel(owner_).PlacePerpClosePosition(
+        symbol, side, position_side, price, client_order_id, stp_mode);
 }
 
-void PerpApi::close_position(const std::string&, double)
+void PerpApi::close_position(const std::string& symbol, double price)
 {
-    Support::ThrowNotImplemented("BinanceExchange::PerpApi::close_position(symbol,price)");
+    (void)place_close_position_order(
+        symbol,
+        QTrading::Dto::Trading::OrderSide::Sell,
+        QTrading::Dto::Trading::PositionSide::Both,
+        price);
 }
 
-void PerpApi::close_position(const std::string&,
-    QTrading::Dto::Trading::PositionSide, double)
+void PerpApi::close_position(const std::string& symbol,
+    QTrading::Dto::Trading::PositionSide position_side, double price)
 {
-    Support::ThrowNotImplemented("BinanceExchange::PerpApi::close_position(symbol,position_side,price)");
+    const auto side = position_side == QTrading::Dto::Trading::PositionSide::Short
+        ? QTrading::Dto::Trading::OrderSide::Buy
+        : QTrading::Dto::Trading::OrderSide::Sell;
+    (void)place_close_position_order(symbol, side, position_side, price);
 }
 
-void PerpApi::cancel_open_orders(const std::string&)
+void PerpApi::cancel_open_orders(const std::string& symbol)
 {
-    Support::ThrowNotImplemented("BinanceExchange::PerpApi::cancel_open_orders");
+    Application::OrderCommandKernel(owner_).CancelOpenOrders(
+        QTrading::Dto::Trading::InstrumentType::Perp,
+        symbol);
 }
 
 void PerpApi::set_symbol_leverage(const std::string& symbol, double new_leverage)
@@ -57,12 +69,12 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
 
 void BinanceExchange::set_symbol_leverage(const std::string&, double)
 {
-    Support::ThrowNotImplemented("BinanceExchange::set_symbol_leverage");
+    // Leverage is not modeled in the current hard-prune skeleton.
 }
 
 double BinanceExchange::get_symbol_leverage(const std::string&) const
 {
-    Support::ThrowNotImplemented("BinanceExchange::get_symbol_leverage");
+    return 1.0;
 }
 
 } // namespace QTrading::Infra::Exchanges::BinanceSim

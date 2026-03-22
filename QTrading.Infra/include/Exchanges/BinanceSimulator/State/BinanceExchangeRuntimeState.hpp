@@ -1,11 +1,13 @@
 #pragma once
 
+#include <deque>
 #include <optional>
 #include <vector>
 
 #include "Dto/Order.hpp"
 #include "Dto/Position.hpp"
 #include "Exchanges/BinanceSimulator/Config/BinanceSimulationConfig.hpp"
+#include "Exchanges/BinanceSimulator/Contracts/OrderCommandRequest.hpp"
 #include "Exchanges/BinanceSimulator/Contracts/BinanceExchangeDiagnostics.hpp"
 #include "Exchanges/BinanceSimulator/Contracts/BinanceExchangeRuntimeTypes.hpp"
 #include "Exchanges/BinanceSimulator/Contracts/BinanceExchangeStatusSnapshot.hpp"
@@ -24,6 +26,9 @@ struct BinanceExchangeRuntimeState {
     Config::SimulationConfig simulation_config{};
     std::optional<Contracts::EventPublishCompareDiagnostic> last_event_publish_compare_diagnostic;
     size_t order_latency_bars{ 0 };
+    uint64_t next_order_id{ 1 };
+    uint64_t next_async_order_request_id{ 1 };
+    std::deque<Contracts::DeferredOrderCommand> deferred_order_commands;
 };
 
 } // namespace QTrading::Infra::Exchanges::BinanceSim::State

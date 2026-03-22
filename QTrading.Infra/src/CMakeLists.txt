@@ -3,8 +3,11 @@ add_library(QTrading.Infra.Library STATIC
   Data/Binance/MarketData.cpp
   Exchanges/BinanceSimulator/Bootstrap/BinanceExchangeBootstrap.cpp
   Exchanges/BinanceSimulator/Application/MarketReplayKernel.cpp
+  Exchanges/BinanceSimulator/Application/OrderCommandKernel.cpp
   Exchanges/BinanceSimulator/Application/TerminationPolicy.cpp
   Exchanges/BinanceSimulator/Application/StepKernel.cpp
+  Exchanges/BinanceSimulator/Domain/BinanceRejectSurface.cpp
+  Exchanges/BinanceSimulator/Domain/OrderEntryService.cpp
   Exchanges/BinanceSimulator/Output/ChannelPublisher.cpp
   Exchanges/BinanceSimulator/Output/SnapshotBuilder.cpp
   Exchanges/BinanceSimulator/Support/BinanceExchangeSkeletonSupport.cpp

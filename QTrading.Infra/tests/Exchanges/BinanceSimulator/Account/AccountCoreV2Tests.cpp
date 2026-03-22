@@ -109,7 +109,7 @@ TEST(AccountCoreV2Tests, ApplyCommandReturnsRejectInfoForInvalidOrder)
     const auto result = v2.apply_command(cmd);
     EXPECT_FALSE(result.accepted);
     ASSERT_TRUE(result.reject_info.has_value());
-    EXPECT_EQ(result.reject_info->code, Account::OrderRejectInfo::Code::InvalidQuantity);
+    EXPECT_EQ(result.reject_info->code, Contracts::OrderRejectInfo::Code::InvalidQuantity);
 }
 
 TEST(AccountCoreV2Tests, ApplyFundingCommandMatchesLegacyFundingEffect)

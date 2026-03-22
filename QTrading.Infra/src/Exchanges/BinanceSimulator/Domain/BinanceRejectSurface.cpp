@@ -3,9 +3,9 @@
 namespace QTrading::Infra::Exchanges::BinanceSim::Domain {
 
 std::pair<int, std::string> BinanceRejectSurface::MapToBinanceError(
-    const std::optional<Account::OrderRejectInfo>& reject)
+    const std::optional<Contracts::OrderRejectInfo>& reject)
 {
-    using Code = Account::OrderRejectInfo::Code;
+    using Code = Contracts::OrderRejectInfo::Code;
     if (!reject.has_value() || reject->code == Code::None) {
         return { 0, {} };
     }

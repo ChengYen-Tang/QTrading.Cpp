@@ -1,90 +1,87 @@
 #include "Exchanges/BinanceSimulator/Domain/OrderEntryService.hpp"
 
+#include <algorithm>
+
+#include "Exchanges/BinanceSimulator/State/BinanceExchangeRuntimeState.hpp"
+#include "Exchanges/BinanceSimulator/State/StepKernelState.hpp"
+
 namespace QTrading::Infra::Exchanges::BinanceSim::Domain {
 
-bool OrderEntryService::PlaceSpotLimitSync(
-    Account& account,
-    const std::string& symbol,
-    double quantity,
-    double price,
-    QTrading::Dto::Trading::OrderSide side,
-    bool reduce_only,
-    const std::string& client_order_id,
-    Account::SelfTradePreventionMode stp_mode)
+namespace {
+
+bool symbol_exists(
+    const State::StepKernelState& step_state,
+    const std::string& symbol)
 {
-    return account.spot.place_order(symbol, quantity, price, side, reduce_only, client_order_id, stp_mode);
+    return std::find(step_state.symbols.begin(), step_state.symbols.end(), symbol) != step_state.symbols.end();
 }
 
-bool OrderEntryService::PlaceSpotMarketSync(
-    Account& account,
-    const std::string& symbol,
-    double quantity,
-    QTrading::Dto::Trading::OrderSide side,
-    bool reduce_only,
-    const std::string& client_order_id,
-    Account::SelfTradePreventionMode stp_mode)
+double effective_quantity(const Contracts::OrderCommandRequest& request)
 {
-    return account.spot.place_order(symbol, quantity, side, reduce_only, client_order_id, stp_mode);
+    if (request.kind == Contracts::OrderCommandKind::SpotMarketQuote) {
+        return request.quote_order_qty;
+    }
+    if (request.kind == Contracts::OrderCommandKind::PerpClosePosition) {
+        return 0.0;
+    }
+    return request.quantity;
 }
 
-bool OrderEntryService::PlaceSpotMarketQuoteSync(
-    Account& account,
-    const std::string& symbol,
-    double quote_order_qty,
-    QTrading::Dto::Trading::OrderSide side,
-    bool reduce_only,
-    const std::string& client_order_id,
-    Account::SelfTradePreventionMode stp_mode)
-{
-    return account.spot.place_market_order_quote(
-        symbol, quote_order_qty, side, reduce_only, client_order_id, stp_mode);
-}
+} // namespace
 
-bool OrderEntryService::PlacePerpLimitSync(
-    Account& account,
-    const PerpOpeningBlockEvaluator& opening_blocked,
-    const PerpOpeningBlockRecorder& on_blocked,
-    const std::string& symbol,
-    double quantity,
-    double price,
-    QTrading::Dto::Trading::OrderSide side,
-    QTrading::Dto::Trading::PositionSide position_side,
-    bool reduce_only,
-    const std::string& client_order_id,
-    Account::SelfTradePreventionMode stp_mode)
+bool OrderEntryService::Execute(
+    State::BinanceExchangeRuntimeState& runtime_state,
+    const State::StepKernelState& step_state,
+    const Contracts::OrderCommandRequest& request,
+    std::optional<Contracts::OrderRejectInfo>& reject)
 {
-    if (opening_blocked && opening_blocked(symbol, side, position_side, reduce_only)) {
-        if (on_blocked) {
-            on_blocked();
-        }
+    reject.reset();
+
+    if (!symbol_exists(step_state, request.symbol)) {
+        reject = Contracts::OrderRejectInfo{ Contracts::OrderRejectInfo::Code::UnknownSymbol, "unknown symbol" };
         return false;
     }
 
-    return account.perp.place_order(
-        symbol, quantity, price, side, position_side, reduce_only, client_order_id, stp_mode);
-}
-
-bool OrderEntryService::PlacePerpMarketSync(
-    Account& account,
-    const PerpOpeningBlockEvaluator& opening_blocked,
-    const PerpOpeningBlockRecorder& on_blocked,
-    const std::string& symbol,
-    double quantity,
-    QTrading::Dto::Trading::OrderSide side,
-    QTrading::Dto::Trading::PositionSide position_side,
-    bool reduce_only,
-    const std::string& client_order_id,
-    Account::SelfTradePreventionMode stp_mode)
-{
-    if (opening_blocked && opening_blocked(symbol, side, position_side, reduce_only)) {
-        if (on_blocked) {
-            on_blocked();
-        }
+    if (request.kind != Contracts::OrderCommandKind::PerpClosePosition &&
+        effective_quantity(request) <= 0.0) {
+        reject = Contracts::OrderRejectInfo{ Contracts::OrderRejectInfo::Code::InvalidQuantity, "invalid quantity" };
         return false;
     }
 
-    return account.perp.place_order(
-        symbol, quantity, side, position_side, reduce_only, client_order_id, stp_mode);
+    if (request.instrument_type == QTrading::Dto::Trading::InstrumentType::Spot &&
+        request.side == QTrading::Dto::Trading::OrderSide::Sell) {
+        reject = Contracts::OrderRejectInfo{ Contracts::OrderRejectInfo::Code::SpotNoInventory, "no spot inventory" };
+        return false;
+    }
+
+    QTrading::dto::Order order{};
+    order.id = static_cast<int>(runtime_state.next_order_id++);
+    order.symbol = request.symbol;
+    order.quantity = request.quantity;
+    order.price = request.price;
+    order.side = request.side;
+    order.position_side = request.position_side;
+    order.reduce_only = request.reduce_only;
+    order.instrument_type = request.instrument_type;
+    order.client_order_id = request.client_order_id;
+    order.stp_mode = request.stp_mode;
+    order.close_position = request.close_position;
+    order.quote_order_qty = request.quote_order_qty;
+    runtime_state.orders.emplace_back(std::move(order));
+    return true;
+}
+
+void OrderEntryService::CancelOpenOrders(
+    State::BinanceExchangeRuntimeState& runtime_state,
+    QTrading::Dto::Trading::InstrumentType instrument_type,
+    const std::string& symbol)
+{
+    auto& orders = runtime_state.orders;
+    orders.erase(
+        std::remove_if(orders.begin(), orders.end(), [&](const QTrading::dto::Order& order) {
+            return order.symbol == symbol && order.instrument_type == instrument_type;
+        }),
+        orders.end());
 }
 
 } // namespace QTrading::Infra::Exchanges::BinanceSim::Domain

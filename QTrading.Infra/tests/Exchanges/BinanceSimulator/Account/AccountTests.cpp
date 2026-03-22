@@ -361,7 +361,7 @@ TEST(AccountTest, StrictModeRejectsUnknownSymbolOrderPlacement) {
     EXPECT_FALSE(account.place_order("UNKNOWNUSDT", 1.0, 100.0, OrderSide::Buy, PositionSide::Both));
     const auto rej = account.consume_last_order_reject_info();
     ASSERT_TRUE(rej.has_value());
-    EXPECT_EQ(rej->code, Account::OrderRejectInfo::Code::UnknownSymbol);
+    EXPECT_EQ(rej->code, Contracts::OrderRejectInfo::Code::UnknownSymbol);
 }
 
 TEST(AccountTest, StrictModeDomainApiRejectsUnknownSymbolOrderPlacement) {
@@ -374,7 +374,7 @@ TEST(AccountTest, StrictModeDomainApiRejectsUnknownSymbolOrderPlacement) {
     EXPECT_FALSE(account.perp.place_order("UNKNOWNUSDT", 1.0, OrderSide::Buy));
     const auto rej = account.consume_last_order_reject_info();
     ASSERT_TRUE(rej.has_value());
-    EXPECT_EQ(rej->code, Account::OrderRejectInfo::Code::UnknownSymbol);
+    EXPECT_EQ(rej->code, Contracts::OrderRejectInfo::Code::UnknownSymbol);
 }
 
 TEST(AccountTest, InstrumentFiltersRejectInvalidPriceTickAndRange) {
@@ -506,7 +506,7 @@ TEST(AccountTest, SpotQuoteOrderQtyRequiresTradeReferencePrice) {
     EXPECT_FALSE(account.spot.place_market_order_quote("BTCUSDT_SPOT", 100.0, OrderSide::Buy));
     auto rej = account.consume_last_order_reject_info();
     ASSERT_TRUE(rej.has_value());
-    EXPECT_EQ(rej->code, Account::OrderRejectInfo::Code::NotionalNoReferencePrice);
+    EXPECT_EQ(rej->code, Contracts::OrderRejectInfo::Code::NotionalNoReferencePrice);
 }
 
 TEST(AccountTest, SpotBaseFeeModeBuyUsesBaseCommissionAndNotionalCashflow) {
@@ -879,7 +879,7 @@ TEST(AccountTest, ClientOrderIdMustBeUniqueAmongOpenOrders) {
         "BTCUSDT", 1.0, 99.0, OrderSide::Sell, PositionSide::Both, false, "cid-1"));
     auto rej = account.consume_last_order_reject_info();
     ASSERT_TRUE(rej.has_value());
-    EXPECT_EQ(rej->code, Account::OrderRejectInfo::Code::DuplicateClientOrderId);
+    EXPECT_EQ(rej->code, Contracts::OrderRejectInfo::Code::DuplicateClientOrderId);
     EXPECT_EQ(account.get_all_open_orders().size(), 1u);
 }
 
@@ -898,7 +898,7 @@ TEST(AccountTest, StpExpireTakerRejectsCrossingIncomingOrder) {
         Account::SelfTradePreventionMode::ExpireTaker));
     auto rej = account.consume_last_order_reject_info();
     ASSERT_TRUE(rej.has_value());
-    EXPECT_EQ(rej->code, Account::OrderRejectInfo::Code::StpExpiredTaker);
+    EXPECT_EQ(rej->code, Contracts::OrderRejectInfo::Code::StpExpiredTaker);
     EXPECT_EQ(account.get_all_open_orders().size(), 1u);
     EXPECT_EQ(account.get_all_open_orders()[0].side, OrderSide::Buy);
 }
@@ -936,7 +936,7 @@ TEST(AccountTest, StpExpireBothCancelsRestingAndRejectsIncomingOrder) {
         Account::SelfTradePreventionMode::ExpireBoth));
     auto rej = account.consume_last_order_reject_info();
     ASSERT_TRUE(rej.has_value());
-    EXPECT_EQ(rej->code, Account::OrderRejectInfo::Code::StpExpiredBoth);
+    EXPECT_EQ(rej->code, Contracts::OrderRejectInfo::Code::StpExpiredBoth);
     EXPECT_TRUE(account.get_all_open_orders().empty());
 }
 
@@ -1199,7 +1199,7 @@ TEST(AccountTest, HedgeModeReduceOnlyOrderRejectedByDefault) {
     EXPECT_TRUE(account.get_all_open_orders().empty());
     auto reject = account.consume_last_order_reject_info();
     ASSERT_TRUE(reject.has_value());
-    EXPECT_EQ(reject->code, Account::OrderRejectInfo::Code::StrictHedgeReduceOnlyDisabled);
+    EXPECT_EQ(reject->code, Contracts::OrderRejectInfo::Code::StrictHedgeReduceOnlyDisabled);
 
     account.update_positions(partialMarketDataBTC(10000.0, 1000.0));
     const auto& positions = account.get_all_positions();

@@ -26,6 +26,7 @@ struct SnapshotState;
 }
 
 namespace QTrading::Infra::Exchanges::BinanceSim::Application {
+class OrderCommandKernel;
 class StepKernel;
 }
 
@@ -83,6 +84,7 @@ public:
     BinanceExchange& operator=(BinanceExchange&&) = delete;
 
 private:
+    friend class Application::OrderCommandKernel;
     friend class Application::StepKernel;
     friend class Output::SnapshotBuilder;
     friend class Output::EventCaptureBoundary;

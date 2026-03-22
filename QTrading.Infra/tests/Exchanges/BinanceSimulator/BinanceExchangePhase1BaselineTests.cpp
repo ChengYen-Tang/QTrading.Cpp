@@ -256,4 +256,97 @@ TEST_F(BinanceExchangeFixture, StatusSnapshotTracksReplayProgressAndTimestamp)
     EXPECT_NEAR(snapshot.progress_pct, 100.0, 1e-12);
 }
 
+TEST_F(BinanceExchangeFixture, SpotSellWithoutInventoryRejectsSynchronously)
+{
+    WriteCsv("btc.csv", {
+        {      0,100,100,100,100,100, 30000,100,1,0,0 },
+        {  60000,100,100,100,100,100, 90000,100,1,0,0 }
+    });
+
+    BinanceExchange exchange = MakeExchange({
+        { "BTCUSDT", (tmp_dir / "btc.csv").string() },
+    });
+    ASSERT_FALSE(exchange.spot.place_order(
+        "BTCUSDT",
+        1.0,
+        100.0,
+        QTrading::Dto::Trading::OrderSide::Sell));
+    EXPECT_TRUE(exchange.get_all_open_orders().empty());
+}
+
+// Baseline reference: BinanceExchangeFixture.DomainFacadeRoutesByInstrumentType
+TEST_F(BinanceExchangeFixture, SpotAndPerpSyncOrdersAreStoredByInstrumentType)
+{
+    WriteCsv("btc.csv", {
+        { 1000, 100,100,100,100,1000, 61000,100,1,0,0 }
+    });
+    WriteCsv("eth.csv", {
+        { 1000, 200,200,200,200,1000, 61000,100,1,0,0 }
+    });
+
+    BinanceExchange exchange = MakeExchange({
+        { "BTCUSDT", (tmp_dir / "btc.csv").string() },
+        { "ETHUSDT", (tmp_dir / "eth.csv").string() },
+    });
+
+    ASSERT_TRUE(exchange.spot.place_order("BTCUSDT", 1.0, 100.0, QTrading::Dto::Trading::OrderSide::Buy));
+    ASSERT_TRUE(exchange.perp.place_order("ETHUSDT", 2.0, 200.0, QTrading::Dto::Trading::OrderSide::Sell));
+
+    const auto& orders = exchange.get_all_open_orders();
+    ASSERT_EQ(orders.size(), 2u);
+    EXPECT_EQ(orders[0].instrument_type, QTrading::Dto::Trading::InstrumentType::Spot);
+    EXPECT_EQ(orders[1].instrument_type, QTrading::Dto::Trading::InstrumentType::Perp);
+}
+
+TEST_F(BinanceExchangeFixture, PerpCancelOpenOrdersRemovesPerpOrdersOnly)
+{
+    WriteCsv("btc.csv", {
+        { 1000, 100,100,100,100,1000, 61000,100,1,0,0 }
+    });
+    WriteCsv("eth.csv", {
+        { 1000, 200,200,200,200,1000, 61000,100,1,0,0 }
+    });
+
+    BinanceExchange exchange = MakeExchange({
+        { "BTCUSDT", (tmp_dir / "btc.csv").string() },
+        { "ETHUSDT", (tmp_dir / "eth.csv").string() },
+    });
+
+    ASSERT_TRUE(exchange.spot.place_order("BTCUSDT", 1.0, 100.0, QTrading::Dto::Trading::OrderSide::Buy));
+    ASSERT_TRUE(exchange.perp.place_order("BTCUSDT", 2.0, 100.0, QTrading::Dto::Trading::OrderSide::Buy));
+    ASSERT_TRUE(exchange.perp.place_order("ETHUSDT", 2.0, 200.0, QTrading::Dto::Trading::OrderSide::Buy));
+    ASSERT_EQ(exchange.get_all_open_orders().size(), 3u);
+
+    exchange.perp.cancel_open_orders("BTCUSDT");
+    const auto& orders = exchange.get_all_open_orders();
+    ASSERT_EQ(orders.size(), 2u);
+    EXPECT_EQ(orders[0].instrument_type, QTrading::Dto::Trading::InstrumentType::Spot);
+    EXPECT_EQ(orders[0].symbol, "BTCUSDT");
+    EXPECT_EQ(orders[1].symbol, "ETHUSDT");
+}
+
+TEST_F(BinanceExchangeFixture, PerpClosePositionOrderSetsClosePositionFlag)
+{
+    WriteCsv("btc.csv", {
+        { 1000, 100,100,100,100,1000, 61000,100,1,0,0 }
+    });
+
+    BinanceExchange exchange = MakeExchange({
+        { "BTCUSDT", (tmp_dir / "btc.csv").string() },
+    });
+
+    ASSERT_TRUE(exchange.perp.place_close_position_order(
+        "BTCUSDT",
+        QTrading::Dto::Trading::OrderSide::Sell,
+        QTrading::Dto::Trading::PositionSide::Long,
+        0.0,
+        "cid-close"));
+
+    const auto& orders = exchange.get_all_open_orders();
+    ASSERT_EQ(orders.size(), 1u);
+    EXPECT_TRUE(orders[0].close_position);
+    EXPECT_EQ(orders[0].position_side, QTrading::Dto::Trading::PositionSide::Long);
+    EXPECT_EQ(orders[0].client_order_id, "cid-close");
+}
+
 } // namespace

@@ -4659,7 +4659,7 @@ TEST_F(InfraLogTestFixture, RejectedAsyncAckCarriesRejectAndBinanceErrorDetails)
     StopLogger();
 
     EXPECT_EQ(rejected_ack.status, BinanceExchange::AsyncOrderAck::Status::Rejected);
-    EXPECT_EQ(rejected_ack.reject_code, Account::OrderRejectInfo::Code::SpotNoInventory);
+    EXPECT_EQ(rejected_ack.reject_code, Contracts::OrderRejectInfo::Code::SpotNoInventory);
     EXPECT_FALSE(rejected_ack.reject_message.empty());
     EXPECT_EQ(rejected_ack.binance_error_code, -2010);
     EXPECT_FALSE(rejected_ack.binance_error_message.empty());
@@ -4980,7 +4980,7 @@ TEST_F(InfraLogTestFixture, AsyncAckPendingResolvedAndRejectMappingStayStable)
     EXPECT_EQ(rejected_ack.submitted_step, pending_ack.submitted_step);
     EXPECT_EQ(rejected_ack.due_step, pending_ack.due_step);
     EXPECT_EQ(rejected_ack.resolved_step, 2u);
-    EXPECT_EQ(rejected_ack.reject_code, Account::OrderRejectInfo::Code::SpotNoInventory);
+    EXPECT_EQ(rejected_ack.reject_code, Contracts::OrderRejectInfo::Code::SpotNoInventory);
     EXPECT_EQ(rejected_ack.binance_error_code, -2010);
     EXPECT_FALSE(rejected_ack.binance_error_message.empty());
 
