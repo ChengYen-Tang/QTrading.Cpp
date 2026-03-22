@@ -156,4 +156,104 @@ TEST_F(BinanceExchangeFixture, ReplayExhaustedClosesAllPublicChannels)
     EXPECT_TRUE(exchange.get_order_channel()->IsClosed());
 }
 
+// Baseline observability alignment: no additional channel payload after exhaustion.
+TEST_F(BinanceExchangeFixture, ReplayExhaustedKeepsChannelsClosedOnSubsequentSteps)
+{
+    WriteCsv("btc.csv", {
+        { 1000, 100,100,100,100,1000, 61000,100,1,0,0 }
+    });
+
+    BinanceExchange exchange = MakeExchange({
+        { "BTCUSDT", (tmp_dir / "btc.csv").string() },
+    });
+
+    ASSERT_TRUE(exchange.step());
+    (void)exchange.get_market_channel()->Receive();
+
+    ASSERT_FALSE(exchange.step());
+    ASSERT_TRUE(exchange.get_market_channel()->IsClosed());
+    ASSERT_TRUE(exchange.get_position_channel()->IsClosed());
+    ASSERT_TRUE(exchange.get_order_channel()->IsClosed());
+
+    EXPECT_FALSE(exchange.step());
+    EXPECT_FALSE(exchange.get_market_channel()->TryReceive().has_value());
+    EXPECT_FALSE(exchange.get_position_channel()->TryReceive().has_value());
+    EXPECT_FALSE(exchange.get_order_channel()->TryReceive().has_value());
+}
+
+// Baseline reference: BinanceExchangeFixture.StatusSnapshotPriceIncludesTradeMarkAndIndex
+TEST_F(BinanceExchangeFixture, StatusSnapshotCarriesLatestTradePriceContext)
+{
+    WriteCsv("btc.csv", {
+        { 1000, 100,101,99,123.5,1000, 61000,100,1,0,0 }
+    });
+
+    BinanceExchange exchange = MakeExchange({
+        { "BTCUSDT", (tmp_dir / "btc.csv").string() },
+    });
+
+    ASSERT_TRUE(exchange.step());
+    BinanceExchange::StatusSnapshot snapshot{};
+    exchange.FillStatusSnapshot(snapshot);
+
+    ASSERT_EQ(snapshot.prices.size(), 1u);
+    EXPECT_EQ(snapshot.prices[0].symbol, "BTCUSDT");
+    EXPECT_TRUE(snapshot.prices[0].has_trade_price);
+    EXPECT_TRUE(snapshot.prices[0].has_price);
+    EXPECT_DOUBLE_EQ(snapshot.prices[0].trade_price, 123.5);
+    EXPECT_DOUBLE_EQ(snapshot.prices[0].price, 123.5);
+    EXPECT_FALSE(snapshot.prices[0].has_mark_price);
+    EXPECT_FALSE(snapshot.prices[0].has_index_price);
+}
+
+// Baseline reference: BinanceExchangeFixture.StatusSnapshotExposesDualLedgerTotals
+TEST_F(BinanceExchangeFixture, StatusSnapshotExposesMinimalDualLedgerBalances)
+{
+    WriteCsv("btc.csv", {
+        { 1000, 100,100,100,100,1000, 61000,100,1,0,0 }
+    });
+
+    Account::AccountInitConfig init{};
+    init.spot_initial_cash = 600.0;
+    init.perp_initial_wallet = 400.0;
+    BinanceExchange exchange(
+        { { "BTCUSDT", (tmp_dir / "btc.csv").string() } },
+        nullptr,
+        init);
+
+    BinanceExchange::StatusSnapshot snapshot{};
+    exchange.FillStatusSnapshot(snapshot);
+    EXPECT_DOUBLE_EQ(snapshot.spot_cash_balance, 600.0);
+    EXPECT_DOUBLE_EQ(snapshot.perp_wallet_balance, 400.0);
+    EXPECT_DOUBLE_EQ(snapshot.total_cash_balance, 1000.0);
+    EXPECT_DOUBLE_EQ(snapshot.total_ledger_value, 1000.0);
+}
+
+TEST_F(BinanceExchangeFixture, StatusSnapshotTracksReplayProgressAndTimestamp)
+{
+    WriteCsv("btc.csv", {
+        { 1000, 100,100,100,100,1000, 61000,100,1,0,0 },
+        { 2000, 101,101,101,101,1000, 62000,100,1,0,0 }
+    });
+
+    BinanceExchange exchange = MakeExchange({
+        { "BTCUSDT", (tmp_dir / "btc.csv").string() },
+    });
+
+    BinanceExchange::StatusSnapshot snapshot{};
+    exchange.FillStatusSnapshot(snapshot);
+    EXPECT_EQ(snapshot.ts_exchange, 0u);
+    EXPECT_NEAR(snapshot.progress_pct, 0.0, 1e-12);
+
+    ASSERT_TRUE(exchange.step());
+    exchange.FillStatusSnapshot(snapshot);
+    EXPECT_EQ(snapshot.ts_exchange, 1000u);
+    EXPECT_NEAR(snapshot.progress_pct, 50.0, 1e-12);
+
+    ASSERT_TRUE(exchange.step());
+    exchange.FillStatusSnapshot(snapshot);
+    EXPECT_EQ(snapshot.ts_exchange, 2000u);
+    EXPECT_NEAR(snapshot.progress_pct, 100.0, 1e-12);
+}
+
 } // namespace

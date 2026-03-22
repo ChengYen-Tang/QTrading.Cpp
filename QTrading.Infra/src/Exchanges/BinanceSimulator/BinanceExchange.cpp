@@ -4,7 +4,9 @@
 
 #include "Exchanges/BinanceSimulator/Application/StepKernel.hpp"
 #include "Exchanges/BinanceSimulator/Bootstrap/BinanceExchangeBootstrap.hpp"
+#include "Exchanges/BinanceSimulator/Output/SnapshotBuilder.hpp"
 #include "Exchanges/BinanceSimulator/State/BinanceExchangeRuntimeState.hpp"
+#include "Exchanges/BinanceSimulator/State/SnapshotState.hpp"
 #include "Exchanges/BinanceSimulator/State/StepKernelState.hpp"
 #include "Exchanges/BinanceSimulator/Support/BinanceExchangeSkeletonSupport.hpp"
 #include "Queue/ChannelFactory.hpp"
@@ -18,8 +20,12 @@ BinanceExchange::BinanceExchange(const std::vector<SymbolDataset>& datasets,
       account(*this),
       account_(std::make_shared<Account>(account_init)),
       runtime_state_(std::make_unique<State::BinanceExchangeRuntimeState>()),
-      step_kernel_state_(std::make_unique<State::StepKernelState>())
+      step_kernel_state_(std::make_unique<State::StepKernelState>()),
+      snapshot_state_(std::make_unique<State::SnapshotState>())
 {
+    // Phase-1/2/3 bootstrap:
+    // - build replay state, channels, and initial status snapshot
+    // - logger is intentionally unused in the current skeleton stage
     static_cast<void>(logger);
     initialize_step_kernel_state_(datasets, run_id);
     initialize_channels_();
@@ -31,6 +37,7 @@ BinanceExchange::~BinanceExchange() = default;
 
 bool BinanceExchange::step()
 {
+    // Facade-only forwarding keeps public API stable while kernel evolves.
     return Application::StepKernel(*this).run_step();
 }
 
@@ -51,7 +58,8 @@ void BinanceExchange::close()
 
 void BinanceExchange::FillStatusSnapshot(StatusSnapshot& out) const
 {
-    out = runtime_state_->last_status_snapshot;
+    // Snapshot read path is centralized in Output::SnapshotBuilder.
+    Output::SnapshotBuilder::Fill(*this, out);
 }
 
 void BinanceExchange::apply_simulation_config(const SimulationConfig& config)
@@ -77,6 +85,7 @@ const Account& BinanceExchange::account_state() const noexcept
 
 void BinanceExchange::initialize_channels_()
 {
+    // Contract: market channel bounded; position/order channels unbounded.
     market_channel = QTrading::Utils::Queue::ChannelFactory::CreateBoundedChannel<MultiKlinePtr>(
         8, QTrading::Utils::Queue::OverflowPolicy::DropOldest);
     position_channel = QTrading::Utils::Queue::ChannelFactory::CreateUnboundedChannel<std::vector<QTrading::dto::Position>>();
@@ -85,6 +94,7 @@ void BinanceExchange::initialize_channels_()
 
 void BinanceExchange::initialize_step_kernel_state_(const std::vector<SymbolDataset>& datasets, uint64_t run_id)
 {
+    // One-time replay state construction; no per-step allocations here.
     step_kernel_state_->run_id = run_id;
     step_kernel_state_->symbols.reserve(datasets.size());
     step_kernel_state_->market_data.reserve(datasets.size());
@@ -106,6 +116,9 @@ void BinanceExchange::initialize_step_kernel_state_(const std::vector<SymbolData
 
     step_kernel_state_->symbols_shared =
         std::make_shared<const std::vector<std::string>>(step_kernel_state_->symbols);
+    snapshot_state_->symbols_shared = step_kernel_state_->symbols_shared;
+    snapshot_state_->last_trade_price_by_symbol.assign(step_kernel_state_->symbols.size(), 0.0);
+    snapshot_state_->has_last_trade_price_by_symbol.assign(step_kernel_state_->symbols.size(), 0);
 }
 
 } // namespace QTrading::Infra::Exchanges::BinanceSim

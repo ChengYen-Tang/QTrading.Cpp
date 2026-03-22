@@ -7,8 +7,11 @@
 
 namespace QTrading::Infra::Exchanges::BinanceSim {
 
+/// Minimal account skeleton used by rebuilt facade phases.
+/// Only read-path balances are implemented; trading mutations are deferred.
 class Account {
 public:
+    /// Constructor input that keeps backward compatibility with legacy callers.
     struct AccountInitConfig {
         double init_balance{ 1'000'000.0 };
         double spot_initial_cash{ 1'000'000.0 };
@@ -16,6 +19,7 @@ public:
         int vip_level{ 0 };
     };
 
+    /// Enumerates self-trade-prevention options preserved on API signatures.
     enum class SelfTradePreventionMode {
         None = 0,
         ExpireTaker = 1,
@@ -23,6 +27,7 @@ public:
         ExpireBoth = 3,
     };
 
+    /// Reject taxonomy placeholder retained for API contract compatibility.
     struct OrderRejectInfo {
         enum class Code {
             None = 0,
@@ -32,13 +37,17 @@ public:
     };
 
     Account() = default;
+    /// Initializes spot/perp balance ledgers from bootstrap config.
     explicit Account(const AccountInitConfig& init)
         : spot_balance_(make_balance_(init.spot_initial_cash)),
           perp_balance_(make_balance_(init.perp_initial_wallet)),
           total_cash_balance_(init.spot_initial_cash + init.perp_initial_wallet) {}
 
+    /// Returns immutable spot balance snapshot.
     QTrading::Dto::Account::BalanceSnapshot get_spot_balance() const { return spot_balance_; }
+    /// Returns immutable perp balance snapshot.
     QTrading::Dto::Account::BalanceSnapshot get_perp_balance() const { return perp_balance_; }
+    /// Returns aggregate cash across ledgers.
     double get_total_cash_balance() const { return total_cash_balance_; }
 
 private:

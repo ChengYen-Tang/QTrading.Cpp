@@ -5,6 +5,7 @@ namespace QTrading::Infra::Exchanges::BinanceSim::Bootstrap {
 std::vector<Contracts::SymbolDataset> ToDatasets(
     const std::vector<std::pair<std::string, std::string>>& symbol_csv)
 {
+    // Compatibility helper for constructors still using pair-based input.
     std::vector<Contracts::SymbolDataset> datasets;
     datasets.reserve(symbol_csv.size());
     for (const auto& [symbol, csv] : symbol_csv) {
@@ -23,6 +24,7 @@ Contracts::StatusSnapshot BuildInitialStatusSnapshot(
     const Account::AccountInitConfig& init,
     const Config::SimulationConfig& simulation_config)
 {
+    // Keep the initial observable snapshot deterministic and cheap.
     Contracts::StatusSnapshot snapshot{};
     snapshot.wallet_balance = init.spot_initial_cash + init.perp_initial_wallet;
     snapshot.margin_balance = snapshot.wallet_balance;

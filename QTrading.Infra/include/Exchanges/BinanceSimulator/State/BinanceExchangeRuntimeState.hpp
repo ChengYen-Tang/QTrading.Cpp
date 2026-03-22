@@ -12,6 +12,8 @@
 
 namespace QTrading::Infra::Exchanges::BinanceSim::State {
 
+/// Non-step-core runtime state retained by the facade.
+/// Holds account/order/channel-adjacent data that is not part of replay cursors.
 struct BinanceExchangeRuntimeState {
     std::vector<QTrading::dto::Position> positions;
     std::vector<QTrading::dto::Order> orders;

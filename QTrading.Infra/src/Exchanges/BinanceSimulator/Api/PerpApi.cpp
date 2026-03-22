@@ -7,6 +7,7 @@ bool PerpApi::place_order(const std::string&, double, double,
     QTrading::Dto::Trading::OrderSide, QTrading::Dto::Trading::PositionSide, bool,
     const std::string&, Account::SelfTradePreventionMode)
 {
+    // Explicit stub while preserving outward facade behavior.
     Support::ThrowNotImplemented("BinanceExchange::PerpApi::place_order(limit)");
 }
 

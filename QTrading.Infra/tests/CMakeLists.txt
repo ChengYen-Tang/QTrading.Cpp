@@ -25,7 +25,11 @@ gtest_discover_tests(QTrading.Infra.Tests)
 string(CONCAT QTRADING_INFRA_BASELINE_SEMANTICS_GATE_FILTER
   "BinanceExchangeFixture.SymbolsSynchronisedWithHoles:"
   "BinanceExchangeFixture.StepSuccessPublishesMarketChannel:"
-  "BinanceExchangeFixture.ReplayExhaustedClosesAllPublicChannels")
+  "BinanceExchangeFixture.ReplayExhaustedClosesAllPublicChannels:"
+  "BinanceExchangeFixture.ReplayExhaustedKeepsChannelsClosedOnSubsequentSteps:"
+  "BinanceExchangeFixture.StatusSnapshotCarriesLatestTradePriceContext:"
+  "BinanceExchangeFixture.StatusSnapshotExposesMinimalDualLedgerBalances:"
+  "BinanceExchangeFixture.StatusSnapshotTracksReplayProgressAndTimestamp")
 
 add_test(
   NAME QTrading.Infra.BaselineSemanticsGate

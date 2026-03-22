@@ -7,6 +7,8 @@
 namespace QTrading::Infra::Exchanges::BinanceSim::Application {
 namespace {
 
+// Removes heap entries invalidated by cursor advances.
+// This keeps timestamp extraction deterministic without rebuilding the heap.
 void drop_stale_heap_entries(State::StepKernelState& state)
 {
     while (!state.next_ts_heap.empty()) {
@@ -25,6 +27,8 @@ void drop_stale_heap_entries(State::StepKernelState& state)
 
 MarketReplayKernel::StepFrame MarketReplayKernel::Next(State::StepKernelState& state)
 {
+    // Build one MultiKline DTO for the minimum timestamp and advance all
+    // symbols that match this timestamp.
     StepFrame out{};
     drop_stale_heap_entries(state);
     if (state.next_ts_heap.empty()) {

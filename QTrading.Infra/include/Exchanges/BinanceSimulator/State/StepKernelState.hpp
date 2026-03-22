@@ -13,7 +13,11 @@
 
 namespace QTrading::Infra::Exchanges::BinanceSim::State {
 
+/// Mutable state owned by StepKernel/MarketReplayKernel.
+/// This struct is the replay hot-path state; keeping it compact/allocation-light
+/// is a target direction, while some transitional diagnostics are still present.
 struct StepKernelState {
+    /// Transitional diagnostics retained for facade compatibility.
     Contracts::CoreMode core_mode{ Contracts::CoreMode::LegacyOnly };
     bool force_legacy_only{ true };
     std::optional<Contracts::StepCompareDiagnostic> last_step_compare_diagnostic;
@@ -25,10 +29,12 @@ struct StepKernelState {
     std::optional<Contracts::ReferenceFundingResolverDiagnostic> last_reference_funding_resolver_diagnostic;
     uint64_t run_id{ 0 };
 
+    /// Heap item for timestamp merge across symbols.
     struct HeapItem {
         uint64_t ts{ 0 };
         size_t sym_id{ 0 };
     };
+    /// Min-heap comparator (smallest timestamp, then symbol id).
     struct HeapItemGreater {
         bool operator()(const HeapItem& a, const HeapItem& b) const noexcept
         {
@@ -39,6 +45,7 @@ struct StepKernelState {
         }
     };
 
+    /// Fixed replay symbol universe and associated market data.
     std::vector<std::string> symbols;
     std::shared_ptr<const std::vector<std::string>> symbols_shared;
     std::vector<MarketData> market_data;

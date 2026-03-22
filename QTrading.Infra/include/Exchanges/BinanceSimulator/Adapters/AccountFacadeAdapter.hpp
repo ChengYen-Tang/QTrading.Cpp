@@ -8,6 +8,8 @@ class Account;
 
 namespace QTrading::Infra::Exchanges::BinanceSim::Adapters {
 
+/// Thin adapter that maps facade account API calls to Account methods.
+/// Exists to keep facade/application layers decoupled from account internals.
 class AccountFacadeAdapter final {
 public:
     static QTrading::Dto::Account::BalanceSnapshot GetSpotBalance(const Account& account);

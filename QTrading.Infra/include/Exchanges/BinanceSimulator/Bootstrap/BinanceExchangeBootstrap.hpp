@@ -19,8 +19,10 @@ namespace QTrading::Infra::Exchanges::BinanceSim::Bootstrap {
 
 using MultiKlinePtr = std::shared_ptr<QTrading::Dto::Market::Binance::MultiKlineDto>;
 
+/// Converts legacy pair-style dataset input into structured SymbolDataset objects.
 std::vector<Contracts::SymbolDataset> ToDatasets(
     const std::vector<std::pair<std::string, std::string>>& symbol_csv);
+/// Builds the initial status snapshot used before the first successful step.
 Contracts::StatusSnapshot BuildInitialStatusSnapshot(
     const Account::AccountInitConfig& init,
     const Config::SimulationConfig& simulation_config);

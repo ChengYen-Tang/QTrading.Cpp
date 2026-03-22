@@ -22,6 +22,7 @@ double AccountFacadeAdapter::GetTotalCashBalance(const Account& account)
 
 bool AccountFacadeAdapter::TransferSpotToPerp(Account&, double)
 {
+    // Transfer semantics are intentionally deferred to later rebuild phases.
     Support::ThrowNotImplemented("AccountFacadeAdapter::TransferSpotToPerp");
 }
 

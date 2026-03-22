@@ -5,6 +5,7 @@ namespace QTrading::Infra::Exchanges::BinanceSim::Api {
 
 QTrading::Dto::Account::BalanceSnapshot AccountApi::get_spot_balance() const
 {
+    // Adapter call keeps API surface stable while internals evolve.
     return Adapters::AccountFacadeAdapter::GetSpotBalance(owner_.account_state());
 }
 

@@ -6,6 +6,7 @@ namespace QTrading::Infra::Exchanges::BinanceSim::Api {
 bool SpotApi::place_order(const std::string&, double, double,
     QTrading::Dto::Trading::OrderSide, bool, const std::string&, Account::SelfTradePreventionMode)
 {
+    // Explicitly throws to keep missing feature visible while API stays stable.
     Support::ThrowNotImplemented("BinanceExchange::SpotApi::place_order(limit)");
 }
 
