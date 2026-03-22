@@ -4,6 +4,7 @@
 
 #include "Exchanges/BinanceSimulator/Bootstrap/BinanceExchangeBootstrap.hpp"
 #include "Exchanges/BinanceSimulator/State/BinanceExchangeRuntimeState.hpp"
+#include "Exchanges/BinanceSimulator/State/StepKernelState.hpp"
 #include "Exchanges/BinanceSimulator/Support/BinanceExchangeSkeletonSupport.hpp"
 #include "Queue/ChannelFactory.hpp"
 
@@ -15,11 +16,12 @@ BinanceExchange::BinanceExchange(const std::vector<SymbolDataset>& datasets,
       perp(*this),
       account(*this),
       account_(std::make_shared<Account>(account_init)),
-      runtime_state_(std::make_unique<State::BinanceExchangeRuntimeState>())
+      runtime_state_(std::make_unique<State::BinanceExchangeRuntimeState>()),
+      step_kernel_state_(std::make_unique<State::StepKernelState>())
 {
     static_cast<void>(logger);
     static_cast<void>(datasets);
-    runtime_state_->run_id = run_id;
+    step_kernel_state_->run_id = run_id;
     initialize_channels_();
     runtime_state_->last_status_snapshot =
         Bootstrap::BuildInitialStatusSnapshot(account_init, runtime_state_->simulation_config);
@@ -75,7 +77,8 @@ const Account& BinanceExchange::account_state() const noexcept
 
 void BinanceExchange::initialize_channels_()
 {
-    market_channel = QTrading::Utils::Queue::ChannelFactory::CreateUnboundedChannel<MultiKlinePtr>();
+    market_channel = QTrading::Utils::Queue::ChannelFactory::CreateBoundedChannel<MultiKlinePtr>(
+        8, QTrading::Utils::Queue::OverflowPolicy::DropOldest);
     position_channel = QTrading::Utils::Queue::ChannelFactory::CreateUnboundedChannel<std::vector<QTrading::dto::Position>>();
     order_channel = QTrading::Utils::Queue::ChannelFactory::CreateUnboundedChannel<std::vector<QTrading::dto::Order>>();
 }

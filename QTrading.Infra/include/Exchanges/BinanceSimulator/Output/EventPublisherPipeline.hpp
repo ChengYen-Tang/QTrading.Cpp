@@ -3,7 +3,7 @@
 #include "Exchanges/BinanceSimulator/BinanceExchange.hpp"
 #include "Exchanges/BinanceSimulator/Output/LegacyEventEnvelopeEmitter.hpp"
 
-namespace QTrading::Infra::Exchanges::BinanceSim {
+namespace QTrading::Infra::Exchanges::BinanceSim::Output {
 
 class BinanceExchange::IEventPublisher {
 public:
@@ -92,4 +92,4 @@ private:
     std::atomic<bool> stop_{ false };
 };
 
-} // namespace QTrading::Infra::Exchanges::BinanceSim
+} // namespace QTrading::Infra::Exchanges::BinanceSim::Output

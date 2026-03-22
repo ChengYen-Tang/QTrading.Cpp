@@ -2,7 +2,7 @@
 
 #include "Exchanges/BinanceSimulator/BinanceExchange.hpp"
 
-namespace QTrading::Infra::Exchanges::BinanceSim {
+namespace QTrading::Infra::Exchanges::BinanceSim::Output {
 
 class BinanceExchange::EventCaptureBoundary final {
 public:
@@ -40,4 +40,4 @@ public:
     }
 };
 
-} // namespace QTrading::Infra::Exchanges::BinanceSim
+} // namespace QTrading::Infra::Exchanges::BinanceSim::Output

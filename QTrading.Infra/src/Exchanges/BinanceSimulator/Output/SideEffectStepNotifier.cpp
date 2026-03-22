@@ -1,6 +1,6 @@
 #include "Exchanges/BinanceSimulator/Output/SideEffectStepNotifier.hpp"
 
-namespace QTrading::Infra::Exchanges::BinanceSim {
+namespace QTrading::Infra::Exchanges::BinanceSim::Output {
 
 BinanceExchange::SideEffectStepSnapshot BinanceExchange::SideEffectStepNotifier::Initialize(
     const QTrading::Infra::Logging::StepLogContext& step_log_ctx,
@@ -23,4 +23,4 @@ void BinanceExchange::SideEffectStepNotifier::DispatchExternalHook(
     }
 }
 
-} // namespace QTrading::Infra::Exchanges::BinanceSim
+} // namespace QTrading::Infra::Exchanges::BinanceSim::Output

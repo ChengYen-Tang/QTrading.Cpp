@@ -2,7 +2,7 @@
 
 #include "Diagnostics/Trace.hpp"
 
-namespace QTrading::Infra::Exchanges::BinanceSim {
+namespace QTrading::Infra::Exchanges::BinanceSim::Output {
 
 BinanceExchange::PositionOrderSnapshotGate::ChangeDecision
 BinanceExchange::PositionOrderSnapshotGate::EvaluateAndPublish(BinanceExchange& owner,
@@ -72,4 +72,4 @@ void BinanceExchange::PositionOrderSnapshotGate::CommitSnapshotsAndVersion(
     owner.last_account_version_ = cur_ver;
 }
 
-} // namespace QTrading::Infra::Exchanges::BinanceSim
+} // namespace QTrading::Infra::Exchanges::BinanceSim::Output

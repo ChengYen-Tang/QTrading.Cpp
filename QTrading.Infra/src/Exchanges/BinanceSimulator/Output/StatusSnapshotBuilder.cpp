@@ -2,7 +2,7 @@
 
 #include <algorithm>
 
-namespace QTrading::Infra::Exchanges::BinanceSim {
+namespace QTrading::Infra::Exchanges::BinanceSim::Output {
 
 namespace {
 
@@ -118,4 +118,4 @@ void BinanceExchange::StatusSnapshotBuilder::Fill(const BinanceExchange& owner,
     out.total_ledger_value_optimistic = out.total_ledger_value_base * (1.0 + total_band);
 }
 
-} // namespace QTrading::Infra::Exchanges::BinanceSim
+} // namespace QTrading::Infra::Exchanges::BinanceSim::Output

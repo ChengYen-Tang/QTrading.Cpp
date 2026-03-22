@@ -19,13 +19,14 @@
 #include "Exchanges/IExchange.h"
 #include "Logger.hpp"
 
+namespace QTrading::Infra::Exchanges::BinanceSim::State {
+struct BinanceExchangeRuntimeState;
+struct StepKernelState;
+}
+
 namespace QTrading::Infra::Exchanges::BinanceSim {
 
 using MultiKlinePtr = std::shared_ptr<QTrading::Dto::Market::Binance::MultiKlineDto>;
-
-namespace State {
-struct BinanceExchangeRuntimeState;
-}
 
 class BinanceExchange final : public QTrading::Infra::Exchanges::IExchange<MultiKlinePtr> {
 public:
@@ -66,6 +67,7 @@ private:
 
     std::shared_ptr<Account> account_;
     std::unique_ptr<State::BinanceExchangeRuntimeState> runtime_state_;
+    std::unique_ptr<State::StepKernelState> step_kernel_state_;
 };
 
 } // namespace QTrading::Infra::Exchanges::BinanceSim

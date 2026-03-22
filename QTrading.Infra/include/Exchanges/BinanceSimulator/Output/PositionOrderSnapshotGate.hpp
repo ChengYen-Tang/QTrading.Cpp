@@ -2,7 +2,7 @@
 
 #include "Exchanges/BinanceSimulator/BinanceExchange.hpp"
 
-namespace QTrading::Infra::Exchanges::BinanceSim {
+namespace QTrading::Infra::Exchanges::BinanceSim::Output {
 
 class BinanceExchange::PositionOrderSnapshotGate final {
 public:
@@ -25,4 +25,4 @@ public:
         const ChangeDecision& decision);
 };
 
-} // namespace QTrading::Infra::Exchanges::BinanceSim
+} // namespace QTrading::Infra::Exchanges::BinanceSim::Output

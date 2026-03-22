@@ -2,7 +2,7 @@
 
 #include "Exchanges/BinanceSimulator/BinanceExchange.hpp"
 
-namespace QTrading::Infra::Exchanges::BinanceSim {
+namespace QTrading::Infra::Exchanges::BinanceSim::Output {
 
 class BinanceExchange::SideEffectStepNotifier final {
 public:
@@ -15,4 +15,4 @@ public:
         const SideEffectStepSnapshot& snapshot);
 };
 
-} // namespace QTrading::Infra::Exchanges::BinanceSim
+} // namespace QTrading::Infra::Exchanges::BinanceSim::Output
