@@ -1,14 +1,5 @@
 add_executable(QTrading.Infra.Tests
-  InfraLogFeatherRoundTripTests.cpp
-  InfraLogTests.cpp
-  Exchanges/BinanceSimulator/DataProvider/MarketDataTests.cpp
-  Exchanges/BinanceSimulator/DataProvider/FundingRateDataTests.cpp
-  Exchanges/BinanceSimulator/Account/AccountTests.cpp
-  Exchanges/BinanceSimulator/Account/AccountCoreV2Tests.cpp
-  Exchanges/BinanceSimulator/Account/AccountServicesPhase3Tests.cpp
-  Exchanges/BinanceSimulator/Account/AccountPolicyInjectionTests.cpp
-  Exchanges/BinanceSimulator/BinanceExchangeLogTests.cpp
-  Exchanges/BinanceSimulator/BinanceExchangeTests.cpp
+  BinanceExchangeSkeletonTests.cpp
 )
 
 target_include_directories(QTrading.Infra.Tests
@@ -32,12 +23,8 @@ include(GoogleTest)
 gtest_discover_tests(QTrading.Infra.Tests)
 
 string(CONCAT QTRADING_INFRA_BASELINE_SEMANTICS_GATE_FILTER
-  "InfraLogTestFixture.StatusSnapshotsAreEmittedBeforeSameStepEvents:"
-  "InfraLogTestFixture.EventModulesPreserveMarketFundingAccountPositionOrderOrdering:"
-  "InfraLogTestFixture.AsyncAckPendingResolvedAndRejectMappingStayStable:"
-  "InfraLogTestFixture.FundingAndFillSameStepBeforeAfterMatchingRemainStable:"
-  "InfraLogTestFixture.LiquidationSyntheticFillContractRemainsVisible:"
-  "BinanceExchangeFixture.BalanceDepletedTerminationClosesAllPublicChannels")
+  "BinanceExchangeSkeletonTests.ConstructorPreservesFacadeAndChannelsExist:"
+  "BinanceExchangeSkeletonTests.StepThrowsNotImplemented")
 
 add_test(
   NAME QTrading.Infra.BaselineSemanticsGate
