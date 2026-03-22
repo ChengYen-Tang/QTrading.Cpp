@@ -32,6 +32,14 @@
 #include "Logger.hpp"
 
 namespace QTrading::Infra::Exchanges::BinanceSim {
+    namespace Application {
+        class LegacyStepBackend;
+        class StepKernel;
+    }
+    namespace Output {
+        class EventEnvelopePublisher;
+        class LegacyEventEnvelopeEmitter;
+    }
 
     using MultiKlinePtr = std::shared_ptr<QTrading::Dto::Market::Binance::MultiKlineDto>;
 
@@ -132,6 +140,25 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
             double get_symbol_leverage(const std::string& symbol) const;
 
         private:
+            bool place_limit_sync_via_order_entry_service_(Account& account,
+                const std::string& symbol,
+                double quantity,
+                double price,
+                QTrading::Dto::Trading::OrderSide side,
+                QTrading::Dto::Trading::PositionSide position_side,
+                bool reduce_only,
+                const std::string& client_order_id,
+                Account::SelfTradePreventionMode stp_mode);
+
+            bool place_market_sync_via_order_entry_service_(Account& account,
+                const std::string& symbol,
+                double quantity,
+                QTrading::Dto::Trading::OrderSide side,
+                QTrading::Dto::Trading::PositionSide position_side,
+                bool reduce_only,
+                const std::string& client_order_id,
+                Account::SelfTradePreventionMode stp_mode);
+
             BinanceExchange& owner_;
         };
 
@@ -568,6 +595,10 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
         /// @brief Fill a lightweight snapshot for status reporting.
         void FillStatusSnapshot(StatusSnapshot& out) const;
     private:
+        friend class Application::LegacyStepBackend;
+        friend class Application::StepKernel;
+        friend class Output::EventEnvelopePublisher;
+        friend class Output::LegacyEventEnvelopeEmitter;
         std::shared_ptr<QTrading::Log::Logger> logger;        ///< Logger for account/order/position events.
         QTrading::Log::Logger::ModuleId account_module_id_{ QTrading::Log::Logger::kInvalidModuleId };
         QTrading::Log::Logger::ModuleId position_module_id_{ QTrading::Log::Logger::kInvalidModuleId };
@@ -727,12 +758,11 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
         class ReferencePriceResolver;
         class FundingTimelineResolver;
         class TradingSessionCoreV2;
-        class BinanceExchangeFacadeBridge;
         class StatusSnapshotBuilder;
+        class PositionOrderSnapshotGate;
+        class SideEffectStepNotifier;
         class SimulatorRiskOverlayEngine;
-        class CoreDispatchFacade;
         class LegacyCoreSessionAdapter;
-        class NewCoreSessionAdapter;
         class ExchangeSession;
         std::unique_ptr<IEventPublisher> event_publisher_;
         std::unique_ptr<LegacyAccountFacadeBridge> account_facade_bridge_;
@@ -853,9 +883,12 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
             double spot_inventory_value,
             std::vector<DomainFillEvent>&& fill_events,
             uint64_t cur_ver);
-        bool run_step_session_();
-        RunStepResult dispatch_step_(CoreMode mode);
         StepCompareSnapshot build_step_compare_snapshot_(const RunStepResult& result) const;
+        StepCompareDiagnostic build_step_compare_diagnostic_(
+            CoreMode mode,
+            const RunStepResult& legacy_result,
+            const RunStepResult& candidate_result,
+            const char* candidate_unavailable_reason) const;
         std::optional<std::string> compare_step_snapshots_(
             const StepCompareSnapshot& legacy_snapshot,
             const StepCompareSnapshot& candidate_snapshot) const;
@@ -872,15 +905,11 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
             const EventPublishCompareSnapshot& legacy_snapshot,
             const EventPublishCompareSnapshot& candidate_snapshot) const;
         void record_event_publish_diagnostic_(EventPublishCompareDiagnostic diag);
-        void emit_legacy_rows_from_event_envelope_(EventEnvelope&& envelope);
+        RunStepResult run_legacy_session_step_();
         void install_default_side_effect_adapters_();
-
-        void publish_log_task_(EventEnvelope&& task);
         void enqueue_deferred_order_locked_(uint64_t due_step, std::function<void(Account&, uint64_t)> fn);
         size_t flush_deferred_orders_with_count_locked_(uint64_t step_seq);
-        void flush_deferred_orders_locked_(uint64_t step_seq);
         void push_async_order_ack_locked_(AsyncOrderAck ack);
-        static std::pair<int, std::string> map_binance_reject_(const std::optional<Account::OrderRejectInfo>& reject);
         bool interpolate_mark_price_(size_t sym_id, uint64_t ts, double& out_price) const;
         bool interpolate_index_price_(size_t sym_id, uint64_t ts, double& out_price) const;
         bool resolve_mark_price_with_source_(size_t sym_id,

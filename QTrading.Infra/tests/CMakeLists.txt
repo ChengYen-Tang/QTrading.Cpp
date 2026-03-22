@@ -7,24 +7,13 @@ add_executable(QTrading.Infra.Tests
   Exchanges/BinanceSimulator/Account/AccountCoreV2Tests.cpp
   Exchanges/BinanceSimulator/Account/AccountServicesPhase3Tests.cpp
   Exchanges/BinanceSimulator/Account/AccountPolicyInjectionTests.cpp
-  Exchanges/BinanceSimulator/Calibration/CalibrationMetricsTests.cpp
   Exchanges/BinanceSimulator/BinanceExchangeLogTests.cpp
   Exchanges/BinanceSimulator/BinanceExchangeTests.cpp
-  Exchanges/BinanceSimulator/PerformanceGuardrailTests.cpp
-  Exchanges/BinanceSimulator/Diagnostics/Compare/DiagnosticReportFormatterTests.cpp
-  Exchanges/BinanceSimulator/Diagnostics/Compare/PerformanceCiGateTests.cpp
-  Exchanges/BinanceSimulator/Diagnostics/Compare/PerformanceEvidenceFormatterTests.cpp
-  Exchanges/BinanceSimulator/Diagnostics/Compare/DifferentialReplayRunnerTests.cpp
-  Exchanges/BinanceSimulator/Diagnostics/Compare/LegacyLogRowCompareTests.cpp
-  Exchanges/BinanceSimulator/Diagnostics/Compare/ReplayCompareCiGateTests.cpp
-  Exchanges/BinanceSimulator/Diagnostics/Compare/ReplayCompareTestHarnessTests.cpp
-  Exchanges/BinanceSimulator/Diagnostics/Compare/StepCompareModelTests.cpp
-  Exchanges/BinanceSimulator/Diagnostics/Compare/V2ReplayScenarioPackTests.cpp
-  Exchanges/BinanceSimulator/Observability/CompareNamespaceAliasTests.cpp
 )
 
 target_include_directories(QTrading.Infra.Tests
   PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/../include
     ${CMAKE_CURRENT_SOURCE_DIR}/../../QTrading.Logging/include
     ${CMAKE_CURRENT_SOURCE_DIR}/../../QTrading.Utils/include
@@ -41,3 +30,19 @@ target_link_libraries(QTrading.Infra.Tests
 
 include(GoogleTest)
 gtest_discover_tests(QTrading.Infra.Tests)
+
+string(CONCAT QTRADING_INFRA_BASELINE_SEMANTICS_GATE_FILTER
+  "InfraLogTestFixture.StatusSnapshotsAreEmittedBeforeSameStepEvents:"
+  "InfraLogTestFixture.EventModulesPreserveMarketFundingAccountPositionOrderOrdering:"
+  "InfraLogTestFixture.AsyncAckPendingResolvedAndRejectMappingStayStable:"
+  "InfraLogTestFixture.FundingAndFillSameStepBeforeAfterMatchingRemainStable:"
+  "InfraLogTestFixture.LiquidationSyntheticFillContractRemainsVisible:"
+  "BinanceExchangeFixture.BalanceDepletedTerminationClosesAllPublicChannels")
+
+add_test(
+  NAME QTrading.Infra.BaselineSemanticsGate
+  COMMAND $<TARGET_FILE:QTrading.Infra.Tests> --gtest_filter=${QTRADING_INFRA_BASELINE_SEMANTICS_GATE_FILTER}
+)
+set_tests_properties(QTrading.Infra.BaselineSemanticsGate PROPERTIES
+  LABELS "BASELINE_SEMANTICS_GATE"
+)

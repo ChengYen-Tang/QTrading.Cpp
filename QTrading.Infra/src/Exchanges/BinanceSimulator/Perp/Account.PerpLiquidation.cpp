@@ -1,4 +1,5 @@
 #include "Exchanges/BinanceSimulator/Account/Account.hpp"
+#include "Exchanges/BinanceSimulator/Domain/LiquidationEligibilityDecision.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -123,15 +124,12 @@ void Account::apply_perp_liquidation_(double taker_fee, bool& open_orders_change
     constexpr double kWarningZoneRatio = 1.05;
     constexpr double kWarningReductionFraction = 0.15;
     constexpr int kMaxLiquidationStepsPerTick = 8;
-    const auto in_warning_zone = [&](const QTrading::Dto::Account::BalanceSnapshot& s) -> bool {
-        return (s.MaintenanceMargin > 0.0) &&
-            (s.MarginBalance >= s.MaintenanceMargin) &&
-            (s.MarginBalance < s.MaintenanceMargin * kWarningZoneRatio);
-    };
-
-    bool distressed = snapshot.MarginBalance < snapshot.MaintenanceMargin;
-    bool warning_zone = in_warning_zone(snapshot);
-    if (!warning_zone && !distressed) {
+    auto entry_decision = QTrading::Infra::Exchanges::BinanceSim::Domain::LiquidationEligibility::Evaluate(
+        snapshot,
+        kWarningZoneRatio);
+    bool distressed = entry_decision.distressed;
+    bool warning_zone = entry_decision.warning_zone;
+    if (!entry_decision.should_run) {
         return;
     }
     positions_changed = true;
@@ -155,8 +153,11 @@ void Account::apply_perp_liquidation_(double taker_fee, bool& open_orders_change
             mark_open_orders_dirty_();
         }
         snapshot = get_perp_balance();
-        distressed = snapshot.MarginBalance < snapshot.MaintenanceMargin;
-        warning_zone = in_warning_zone(snapshot);
+        entry_decision = QTrading::Infra::Exchanges::BinanceSim::Domain::LiquidationEligibility::Evaluate(
+            snapshot,
+            kWarningZoneRatio);
+        distressed = entry_decision.distressed;
+        warning_zone = entry_decision.warning_zone;
     }
 
     // Phase 2: staged partial liquidation.
@@ -165,11 +166,15 @@ void Account::apply_perp_liquidation_(double taker_fee, bool& open_orders_change
     for (int step = 0; step < kMaxLiquidationStepsPerTick; ++step) {
         snapshot = get_perp_balance();
         if (!has_open_perp_position_()) break;
-        const bool step_distressed = snapshot.MarginBalance < snapshot.MaintenanceMargin;
-        if (!step_distressed) {
-            if (!(warning_zone && step == 0)) {
-                break;
-            }
+        const auto step_decision = QTrading::Infra::Exchanges::BinanceSim::Domain::LiquidationEligibility::Evaluate(
+            snapshot,
+            kWarningZoneRatio);
+        const bool step_distressed = step_decision.distressed;
+        if (!QTrading::Infra::Exchanges::BinanceSim::Domain::LiquidationEligibility::ShouldContinueStagedStep(
+            step_distressed,
+            warning_zone,
+            step)) {
+            break;
         }
 
         int worst_idx = -1;

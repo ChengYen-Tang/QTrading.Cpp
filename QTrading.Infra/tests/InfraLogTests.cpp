@@ -9,6 +9,7 @@
 
 #include "Exchanges/BinanceSimulator/BinanceExchange.hpp"
 #include "Global.hpp"
+#include "BaselineSemanticsInputPinning.hpp"
 #include "InfraLogTestFixture.hpp"
 
 namespace {
@@ -4720,6 +4721,477 @@ TEST_F(InfraLogTestFixture, AcceptedAsyncAckAppearsBeforeSnapshotAndEventVisibil
     const auto order_event_rows = FilterRowsByModule(QTrading::Log::LogModule::OrderEvent);
     ASSERT_EQ(order_rows.size(), 1u);
     ASSERT_EQ(order_event_rows.size(), 1u);
+}
+
+TEST_F(InfraLogTestFixture, StatusSnapshotsAreEmittedBeforeSameStepEvents)
+{
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using QTrading::Log::FileLogger::FeatherV2::AccountEventDto;
+    using QTrading::Log::FileLogger::FeatherV2::FundingEventDto;
+    using QTrading::Log::FileLogger::FeatherV2::MarketEventDto;
+    using QTrading::Log::FileLogger::FeatherV2::OrderEventDto;
+    using QTrading::Log::FileLogger::FeatherV2::PositionEventDto;
+
+    SCOPED_TRACE(::testing::Message()
+        << "baseline_pin id=" << QTrading::Infra::Tests::BaselineSemanticsPinning::kStatusSnapshotsBeforeEvents.id
+        << " run_id=" << QTrading::Infra::Tests::BaselineSemanticsPinning::kStatusSnapshotsBeforeEvents.run_id
+        << " baseline_input_version=" << QTrading::Infra::Tests::BaselineSemanticsPinning::kBaselineInputVersion
+        << " seed=" << QTrading::Infra::Tests::BaselineSemanticsPinning::kPinnedDeterministicSeed
+        << " scenario=status_snapshots_before_same_step_events");
+    WriteBinanceCsv(
+        tmp_dir / QTrading::Infra::Tests::BaselineSemanticsPinning::kStatusSnapshotsBeforeEventsTradeCsv,
+        { { 0u, 100.0, 100.0, 100.0, 100.0, 100.0, 30000u, 100.0, 1, 0.0, 0.0 } });
+
+    {
+        BinanceExchange exchange(
+            { { "BTCUSDT", (tmp_dir / QTrading::Infra::Tests::BaselineSemanticsPinning::kStatusSnapshotsBeforeEventsTradeCsv).string() } },
+            logger,
+            1000.0,
+            0,
+            QTrading::Infra::Tests::BaselineSemanticsPinning::kStatusSnapshotsBeforeEvents.run_id);
+        auto market_channel = exchange.get_market_channel();
+
+        ASSERT_TRUE(exchange.perp.place_order("BTCUSDT", 1.0, 90.0, OrderSide::Buy));
+        ASSERT_TRUE(exchange.step());
+        ASSERT_TRUE(market_channel->Receive().has_value());
+    }
+
+    StopLogger();
+
+    const auto account_snapshot_rows = FilterRowsByModule(QTrading::Log::LogModule::Account);
+    const auto position_snapshot_rows = FilterRowsByModule(QTrading::Log::LogModule::Position);
+    const auto order_snapshot_rows = FilterRowsByModule(QTrading::Log::LogModule::Order);
+    ASSERT_FALSE(account_snapshot_rows.empty());
+
+    std::vector<size_t> snapshot_arrivals;
+    for (const auto& row : account_snapshot_rows) {
+        snapshot_arrivals.push_back(row.arrival_index);
+    }
+    for (const auto& row : position_snapshot_rows) {
+        snapshot_arrivals.push_back(row.arrival_index);
+    }
+    for (const auto& row : order_snapshot_rows) {
+        snapshot_arrivals.push_back(row.arrival_index);
+    }
+    ASSERT_FALSE(snapshot_arrivals.empty());
+
+    std::vector<size_t> step1_event_arrivals;
+    for (const auto& row : FilterRowsByModule(QTrading::Log::LogModule::MarketEvent)) {
+        const auto* payload = RowPayloadCast<MarketEventDto>(row.row);
+        ASSERT_NE(payload, nullptr);
+        if (payload->step_seq == 1u) {
+            step1_event_arrivals.push_back(row.arrival_index);
+        }
+    }
+    for (const auto& row : FilterRowsByModule(QTrading::Log::LogModule::FundingEvent)) {
+        const auto* payload = RowPayloadCast<FundingEventDto>(row.row);
+        ASSERT_NE(payload, nullptr);
+        if (payload->step_seq == 1u) {
+            step1_event_arrivals.push_back(row.arrival_index);
+        }
+    }
+    for (const auto& row : FilterRowsByModule(QTrading::Log::LogModule::AccountEvent)) {
+        const auto* payload = RowPayloadCast<AccountEventDto>(row.row);
+        ASSERT_NE(payload, nullptr);
+        if (payload->step_seq == 1u) {
+            step1_event_arrivals.push_back(row.arrival_index);
+        }
+    }
+    for (const auto& row : FilterRowsByModule(QTrading::Log::LogModule::PositionEvent)) {
+        const auto* payload = RowPayloadCast<PositionEventDto>(row.row);
+        ASSERT_NE(payload, nullptr);
+        if (payload->step_seq == 1u) {
+            step1_event_arrivals.push_back(row.arrival_index);
+        }
+    }
+    for (const auto& row : FilterRowsByModule(QTrading::Log::LogModule::OrderEvent)) {
+        const auto* payload = RowPayloadCast<OrderEventDto>(row.row);
+        ASSERT_NE(payload, nullptr);
+        if (payload->step_seq == 1u) {
+            step1_event_arrivals.push_back(row.arrival_index);
+        }
+    }
+
+    ASSERT_FALSE(step1_event_arrivals.empty());
+    const auto last_snapshot_arrival = *std::max_element(snapshot_arrivals.begin(), snapshot_arrivals.end());
+    const auto first_event_arrival = *std::min_element(step1_event_arrivals.begin(), step1_event_arrivals.end());
+    EXPECT_LT(last_snapshot_arrival, first_event_arrival);
+}
+
+TEST_F(InfraLogTestFixture, EventModulesPreserveMarketFundingAccountPositionOrderOrdering)
+{
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using QTrading::Log::FileLogger::FeatherV2::AccountEventDto;
+    using QTrading::Log::FileLogger::FeatherV2::FundingEventDto;
+    using QTrading::Log::FileLogger::FeatherV2::MarketEventDto;
+    using QTrading::Log::FileLogger::FeatherV2::OrderEventDto;
+    using QTrading::Log::FileLogger::FeatherV2::PositionEventDto;
+
+    SCOPED_TRACE(::testing::Message()
+        << "baseline_pin id=" << QTrading::Infra::Tests::BaselineSemanticsPinning::kEventModuleOrdering.id
+        << " run_id=" << QTrading::Infra::Tests::BaselineSemanticsPinning::kEventModuleOrdering.run_id
+        << " baseline_input_version=" << QTrading::Infra::Tests::BaselineSemanticsPinning::kBaselineInputVersion
+        << " seed=" << QTrading::Infra::Tests::BaselineSemanticsPinning::kPinnedDeterministicSeed
+        << " scenario=event_module_ordering_market_funding_account_position_order");
+    WriteBinanceCsv(
+        tmp_dir / QTrading::Infra::Tests::BaselineSemanticsPinning::kEventModuleOrderingTradeCsv,
+        {
+            { 0u, 100.0, 100.0, 100.0, 100.0, 1000.0, 30000u, 1000.0, 1, 0.0, 0.0 },
+            { 60000u, 101.0, 101.0, 101.0, 101.0, 1000.0, 90000u, 1010.0, 1, 0.0, 0.0 }
+        });
+    WriteFundingCsv(
+        tmp_dir / QTrading::Infra::Tests::BaselineSemanticsPinning::kEventModuleOrderingFundingCsv,
+        { { 60000u, 0.0001, 101.0 } });
+
+    {
+        BinanceExchange exchange(
+            { BinanceExchange::SymbolDataset{
+                "BTCUSDT",
+                (tmp_dir / QTrading::Infra::Tests::BaselineSemanticsPinning::kEventModuleOrderingTradeCsv).string(),
+                (tmp_dir / QTrading::Infra::Tests::BaselineSemanticsPinning::kEventModuleOrderingFundingCsv).string() } },
+            logger,
+            1000.0,
+            0,
+            QTrading::Infra::Tests::BaselineSemanticsPinning::kEventModuleOrdering.run_id);
+        auto market_channel = exchange.get_market_channel();
+
+        ASSERT_TRUE(exchange.perp.place_order("BTCUSDT", 1.0, OrderSide::Buy));
+        ASSERT_TRUE(exchange.step());
+        ASSERT_TRUE(market_channel->Receive().has_value());
+        ASSERT_TRUE(exchange.perp.place_order("BTCUSDT", 0.5, OrderSide::Buy));
+        ASSERT_TRUE(exchange.step());
+        ASSERT_TRUE(market_channel->Receive().has_value());
+    }
+
+    StopLogger();
+
+    std::vector<ArrivedRowView> market_rows;
+    std::vector<ArrivedRowView> funding_rows;
+    std::vector<ArrivedRowView> account_rows;
+    std::vector<ArrivedRowView> position_rows;
+    std::vector<ArrivedRowView> order_rows;
+    for (const auto& row_view : DrainAndSortRowsByArrival()) {
+        if (row_view.row->module_id == ModuleId(QTrading::Log::LogModule::MarketEvent)) {
+            const auto* payload = RowPayloadCast<MarketEventDto>(row_view.row);
+            ASSERT_NE(payload, nullptr);
+            if (payload->step_seq == 2u) {
+                market_rows.push_back(row_view);
+            }
+        }
+        else if (row_view.row->module_id == ModuleId(QTrading::Log::LogModule::FundingEvent)) {
+            const auto* payload = RowPayloadCast<FundingEventDto>(row_view.row);
+            ASSERT_NE(payload, nullptr);
+            if (payload->step_seq == 2u) {
+                funding_rows.push_back(row_view);
+            }
+        }
+        else if (row_view.row->module_id == ModuleId(QTrading::Log::LogModule::AccountEvent)) {
+            const auto* payload = RowPayloadCast<AccountEventDto>(row_view.row);
+            ASSERT_NE(payload, nullptr);
+            if (payload->step_seq == 2u) {
+                account_rows.push_back(row_view);
+            }
+        }
+        else if (row_view.row->module_id == ModuleId(QTrading::Log::LogModule::PositionEvent)) {
+            const auto* payload = RowPayloadCast<PositionEventDto>(row_view.row);
+            ASSERT_NE(payload, nullptr);
+            if (payload->step_seq == 2u) {
+                position_rows.push_back(row_view);
+            }
+        }
+        else if (row_view.row->module_id == ModuleId(QTrading::Log::LogModule::OrderEvent)) {
+            const auto* payload = RowPayloadCast<OrderEventDto>(row_view.row);
+            ASSERT_NE(payload, nullptr);
+            if (payload->step_seq == 2u) {
+                order_rows.push_back(row_view);
+            }
+        }
+    }
+
+    ASSERT_EQ(market_rows.size(), 1u);
+    ASSERT_EQ(funding_rows.size(), 1u);
+    ASSERT_FALSE(account_rows.empty());
+    ASSERT_FALSE(position_rows.empty());
+    ASSERT_FALSE(order_rows.empty());
+    EXPECT_LT(market_rows.back().arrival_index, funding_rows.front().arrival_index);
+    EXPECT_LT(funding_rows.back().arrival_index, account_rows.front().arrival_index);
+    EXPECT_LT(account_rows.back().arrival_index, position_rows.front().arrival_index);
+    EXPECT_LT(position_rows.back().arrival_index, order_rows.front().arrival_index);
+}
+
+TEST_F(InfraLogTestFixture, AsyncAckPendingResolvedAndRejectMappingStayStable)
+{
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using QTrading::Log::FileLogger::FeatherV2::OrderEventDto;
+    using QTrading::Log::FileLogger::FeatherV2::OrderEventType;
+
+    SCOPED_TRACE(::testing::Message()
+        << "baseline_pin id=" << QTrading::Infra::Tests::BaselineSemanticsPinning::kAsyncAckRejectMapping.id
+        << " run_id=" << QTrading::Infra::Tests::BaselineSemanticsPinning::kAsyncAckRejectMapping.run_id
+        << " baseline_input_version=" << QTrading::Infra::Tests::BaselineSemanticsPinning::kBaselineInputVersion
+        << " seed=" << QTrading::Infra::Tests::BaselineSemanticsPinning::kPinnedDeterministicSeed
+        << " scenario=async_ack_pending_resolved_reject_mapping");
+    WriteBinanceCsv(
+        tmp_dir / QTrading::Infra::Tests::BaselineSemanticsPinning::kAsyncAckRejectMappingTradeCsv,
+        {
+            { 0u, 100.0, 100.0, 100.0, 100.0, 100.0, 30000u, 100.0, 1, 0.0, 0.0 },
+            { 60000u, 100.0, 100.0, 100.0, 100.0, 100.0, 90000u, 100.0, 1, 0.0, 0.0 }
+        });
+
+    BinanceExchange::AsyncOrderAck pending_ack{};
+    BinanceExchange::AsyncOrderAck rejected_ack{};
+    {
+        BinanceExchange exchange(
+            { { "BTCUSDT", (tmp_dir / QTrading::Infra::Tests::BaselineSemanticsPinning::kAsyncAckRejectMappingTradeCsv).string() } },
+            logger,
+            1000.0,
+            0,
+            QTrading::Infra::Tests::BaselineSemanticsPinning::kAsyncAckRejectMapping.run_id);
+        exchange.set_order_latency_bars(1);
+        auto market_channel = exchange.get_market_channel();
+
+        ASSERT_TRUE(exchange.step());
+        ASSERT_TRUE(market_channel->Receive().has_value());
+        ASSERT_TRUE(exchange.spot.place_order("BTCUSDT", 1.0, 100.0, OrderSide::Sell));
+
+        auto pending = exchange.drain_async_order_acks();
+        ASSERT_EQ(pending.size(), 1u);
+        pending_ack = pending.front();
+
+        ASSERT_TRUE(exchange.step());
+        ASSERT_TRUE(market_channel->Receive().has_value());
+        auto resolved = exchange.drain_async_order_acks();
+        ASSERT_EQ(resolved.size(), 1u);
+        rejected_ack = resolved.front();
+    }
+
+    StopLogger();
+
+    ASSERT_EQ(pending_ack.status, BinanceExchange::AsyncOrderAck::Status::Pending);
+    EXPECT_EQ(pending_ack.submitted_step, 1u);
+    EXPECT_EQ(pending_ack.due_step, 2u);
+    EXPECT_EQ(pending_ack.resolved_step, 0u);
+
+    ASSERT_EQ(rejected_ack.status, BinanceExchange::AsyncOrderAck::Status::Rejected);
+    EXPECT_EQ(rejected_ack.request_id, pending_ack.request_id);
+    EXPECT_EQ(rejected_ack.submitted_step, pending_ack.submitted_step);
+    EXPECT_EQ(rejected_ack.due_step, pending_ack.due_step);
+    EXPECT_EQ(rejected_ack.resolved_step, 2u);
+    EXPECT_EQ(rejected_ack.reject_code, Account::OrderRejectInfo::Code::SpotNoInventory);
+    EXPECT_EQ(rejected_ack.binance_error_code, -2010);
+    EXPECT_FALSE(rejected_ack.binance_error_message.empty());
+
+    for (const auto& row_view : FilterRowsByModule(QTrading::Log::LogModule::OrderEvent)) {
+        const auto* payload = RowPayloadCast<OrderEventDto>(row_view.row);
+        ASSERT_NE(payload, nullptr);
+        EXPECT_NE(payload->event_type, static_cast<int32_t>(OrderEventType::Accepted));
+        EXPECT_NE(payload->event_type, static_cast<int32_t>(OrderEventType::Filled));
+    }
+}
+
+TEST_F(InfraLogTestFixture, FundingAndFillSameStepBeforeAfterMatchingRemainStable)
+{
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using QTrading::Log::FileLogger::FeatherV2::FundingEventDto;
+
+    SCOPED_TRACE(::testing::Message()
+        << "baseline_pin id=" << QTrading::Infra::Tests::BaselineSemanticsPinning::kFundingFillSameStepBeforeMatching.id
+        << " run_id=" << QTrading::Infra::Tests::BaselineSemanticsPinning::kFundingFillSameStepBeforeMatching.run_id
+        << " baseline_input_version=" << QTrading::Infra::Tests::BaselineSemanticsPinning::kBaselineInputVersion
+        << " seed=" << QTrading::Infra::Tests::BaselineSemanticsPinning::kPinnedDeterministicSeed
+        << " scenario=funding_fill_same_step_before_matching");
+    SCOPED_TRACE(::testing::Message()
+        << "baseline_pin id=" << QTrading::Infra::Tests::BaselineSemanticsPinning::kFundingFillSameStepAfterMatching.id
+        << " run_id=" << QTrading::Infra::Tests::BaselineSemanticsPinning::kFundingFillSameStepAfterMatching.run_id
+        << " baseline_input_version=" << QTrading::Infra::Tests::BaselineSemanticsPinning::kBaselineInputVersion
+        << " seed=" << QTrading::Infra::Tests::BaselineSemanticsPinning::kPinnedDeterministicSeed
+        << " scenario=funding_fill_same_step_after_matching");
+    WriteBinanceCsv(
+        tmp_dir / QTrading::Infra::Tests::BaselineSemanticsPinning::kFundingFillSameStepTradeCsv,
+        {
+            { 0u, 100.0, 100.0, 100.0, 100.0, 1000.0, 30000u, 1000.0, 1, 0.0, 0.0 },
+            { 60000u, 200.0, 200.0, 200.0, 200.0, 1000.0, 90000u, 2000.0, 1, 0.0, 0.0 }
+        });
+    WriteFundingCsv(
+        tmp_dir / QTrading::Infra::Tests::BaselineSemanticsPinning::kFundingFillSameStepFundingCsv,
+        { { 60000u, 0.001, 100.0 } });
+
+    auto run_timing = [&](BinanceExchange::FundingApplyTiming timing, uint64_t run_id) -> double {
+        BinanceExchange::StatusSnapshot snap{};
+        BinanceExchange exchange(
+            { { "BTCUSDT", (tmp_dir / QTrading::Infra::Tests::BaselineSemanticsPinning::kFundingFillSameStepTradeCsv).string(),
+                std::optional<std::string>((tmp_dir / QTrading::Infra::Tests::BaselineSemanticsPinning::kFundingFillSameStepFundingCsv).string()) } },
+            logger,
+            1000.0,
+            0,
+            run_id);
+        exchange.set_funding_apply_timing(timing);
+        auto market_channel = exchange.get_market_channel();
+
+        if (!exchange.perp.place_order("BTCUSDT", 1.0, OrderSide::Buy)) {
+            ADD_FAILURE() << "failed to place first perp order";
+            return 0.0;
+        }
+        if (!exchange.step()) {
+            ADD_FAILURE() << "failed to step first bar";
+            return 0.0;
+        }
+        if (!market_channel->Receive().has_value()) {
+            ADD_FAILURE() << "missing first market payload";
+            return 0.0;
+        }
+
+        if (!exchange.perp.place_order("BTCUSDT", 1.0, OrderSide::Buy)) {
+            ADD_FAILURE() << "failed to place second perp order";
+            return 0.0;
+        }
+        if (!exchange.step()) {
+            ADD_FAILURE() << "failed to step second bar";
+            return 0.0;
+        }
+        if (!market_channel->Receive().has_value()) {
+            ADD_FAILURE() << "missing second market payload";
+            return 0.0;
+        }
+        exchange.FillStatusSnapshot(snap);
+        return snap.wallet_balance;
+    };
+
+    const double before_wallet = run_timing(
+        BinanceExchange::FundingApplyTiming::BeforeMatching,
+        QTrading::Infra::Tests::BaselineSemanticsPinning::kFundingFillSameStepBeforeMatching.run_id);
+    const double after_wallet = run_timing(
+        BinanceExchange::FundingApplyTiming::AfterMatching,
+        QTrading::Infra::Tests::BaselineSemanticsPinning::kFundingFillSameStepAfterMatching.run_id);
+
+    StopLogger();
+
+    const auto funding_rows = FilterRowsByModule(QTrading::Log::LogModule::FundingEvent);
+    std::vector<FundingEventDto> before_events;
+    std::vector<FundingEventDto> after_events;
+    for (const auto& row_view : funding_rows) {
+        const auto* payload = RowPayloadCast<FundingEventDto>(row_view.row);
+        ASSERT_NE(payload, nullptr);
+        if (payload->run_id == QTrading::Infra::Tests::BaselineSemanticsPinning::kFundingFillSameStepBeforeMatching.run_id) {
+            before_events.push_back(*payload);
+        }
+        if (payload->run_id == QTrading::Infra::Tests::BaselineSemanticsPinning::kFundingFillSameStepAfterMatching.run_id) {
+            after_events.push_back(*payload);
+        }
+    }
+
+    ASSERT_EQ(before_events.size(), 1u);
+    ASSERT_EQ(after_events.size(), 1u);
+    EXPECT_EQ(before_events.front().funding_time, 60000u);
+    EXPECT_EQ(after_events.front().funding_time, 60000u);
+    EXPECT_NEAR(before_events.front().quantity, 1.0, 1e-12);
+    EXPECT_NEAR(after_events.front().quantity, 2.0, 1e-12);
+    EXPECT_NEAR(before_events.front().funding, -0.1, 1e-12);
+    EXPECT_NEAR(after_events.front().funding, -0.2, 1e-12);
+    EXPECT_NEAR(before_wallet - after_wallet, 0.1, 1e-6);
+}
+
+TEST_F(InfraLogTestFixture, LiquidationSyntheticFillContractRemainsVisible)
+{
+    using QTrading::Dto::Market::Binance::TradeKlineDto;
+    using QTrading::Dto::Trading::OrderSide;
+    using QTrading::Dto::Trading::PositionSide;
+    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using QTrading::Log::FileLogger::FeatherV2::AccountEventDto;
+    using QTrading::Log::FileLogger::FeatherV2::PositionEventDto;
+
+    SCOPED_TRACE(::testing::Message()
+        << "baseline_pin id=" << QTrading::Infra::Tests::BaselineSemanticsPinning::kLiquidationSyntheticFillContract.id
+        << " run_id=" << QTrading::Infra::Tests::BaselineSemanticsPinning::kLiquidationSyntheticFillContract.run_id
+        << " baseline_input_version=" << QTrading::Infra::Tests::BaselineSemanticsPinning::kBaselineInputVersion
+        << " seed=" << QTrading::Infra::Tests::BaselineSemanticsPinning::kPinnedDeterministicSeed
+        << " scenario=liquidation_synthetic_fill_contract_visibility");
+    WriteBinanceCsv(
+        tmp_dir / QTrading::Infra::Tests::BaselineSemanticsPinning::kLiquidationSyntheticFillTradeCsv,
+        { { 0u, 1.0, 1.0, 1.0, 1.0, 10000.0, 30000u, 10000.0, 1, 0.0, 0.0 } });
+    WriteBinanceCsv(
+        tmp_dir / QTrading::Infra::Tests::BaselineSemanticsPinning::kLiquidationSyntheticFillMarkCsv,
+        { { 0u, 1.0, 1.0, 1.0, 1.0, 10000.0, 30000u, 10000.0, 1, 0.0, 0.0 } });
+
+    auto account = std::make_shared<Account>(350000.0, 0);
+    account->set_symbol_leverage("BTCUSDT", 75.0);
+    ASSERT_TRUE(account->place_order("BTCUSDT", 5000.0, 500.0, OrderSide::Buy, PositionSide::Both));
+    TradeKlineDto open_kline{};
+    open_kline.OpenPrice = 500.0;
+    open_kline.HighPrice = 500.0;
+    open_kline.LowPrice = 500.0;
+    open_kline.ClosePrice = 500.0;
+    open_kline.Volume = 10000.0;
+    account->update_positions(
+        std::unordered_map<std::string, TradeKlineDto>{ { "BTCUSDT", open_kline } },
+        std::unordered_map<std::string, double>{ { "BTCUSDT", 500.0 } });
+
+    {
+        BinanceExchange exchange(
+            { BinanceExchange::SymbolDataset{
+                "BTCUSDT",
+                (tmp_dir / QTrading::Infra::Tests::BaselineSemanticsPinning::kLiquidationSyntheticFillTradeCsv).string(),
+                std::nullopt,
+                (tmp_dir / QTrading::Infra::Tests::BaselineSemanticsPinning::kLiquidationSyntheticFillMarkCsv).string() } },
+            logger,
+            account,
+            QTrading::Infra::Tests::BaselineSemanticsPinning::kLiquidationSyntheticFillContract.run_id);
+        auto market_channel = exchange.get_market_channel();
+
+        ASSERT_TRUE(exchange.step());
+        ASSERT_TRUE(market_channel->Receive().has_value());
+        EXPECT_TRUE(exchange.get_all_positions().empty());
+    }
+
+    StopLogger();
+
+    const auto account_rows = FilterRowsByModule(QTrading::Log::LogModule::AccountEvent);
+    const auto position_rows = FilterRowsByModule(QTrading::Log::LogModule::PositionEvent);
+    const auto order_event_rows = FilterRowsByModule(QTrading::Log::LogModule::OrderEvent);
+    ASSERT_FALSE(account_rows.empty());
+    ASSERT_FALSE(position_rows.empty());
+
+    constexpr int64_t kSyntheticLiquidationOrderId = -999999;
+    bool has_liq_order_event = false;
+    bool has_liq_account_event = false;
+    bool has_liq_position_event = false;
+    for (const auto& row_view : order_event_rows) {
+        const auto* payload = RowPayloadCast<QTrading::Log::FileLogger::FeatherV2::OrderEventDto>(row_view.row);
+        ASSERT_NE(payload, nullptr);
+        if (payload->step_seq == 1u &&
+            payload->symbol == "BTCUSDT" &&
+            payload->order_id == kSyntheticLiquidationOrderId) {
+            has_liq_order_event = true;
+        }
+    }
+    for (const auto& row_view : account_rows) {
+        const auto* payload = RowPayloadCast<AccountEventDto>(row_view.row);
+        ASSERT_NE(payload, nullptr);
+        if (payload->step_seq == 1u &&
+            payload->symbol == "BTCUSDT" &&
+            payload->source_order_id == kSyntheticLiquidationOrderId) {
+            has_liq_account_event = true;
+        }
+    }
+    for (const auto& row_view : position_rows) {
+        const auto* payload = RowPayloadCast<PositionEventDto>(row_view.row);
+        ASSERT_NE(payload, nullptr);
+        if (payload->step_seq == 1u &&
+            payload->symbol == "BTCUSDT" &&
+            payload->source_order_id == kSyntheticLiquidationOrderId) {
+            has_liq_position_event = true;
+        }
+    }
+
+    // Prefer direct order_id assertion when OrderEvent exists; otherwise rely on
+    // source_order_id contract exposed via AccountEvent/PositionEvent.
+    EXPECT_TRUE(has_liq_order_event || (has_liq_account_event && has_liq_position_event));
+    EXPECT_TRUE(has_liq_account_event);
+    EXPECT_TRUE(has_liq_position_event);
 }
 
 TEST_F(InfraLogTestFixture, MarketEventAndFundingEventKeepExistingArrivalOrderWithinSingleStep)

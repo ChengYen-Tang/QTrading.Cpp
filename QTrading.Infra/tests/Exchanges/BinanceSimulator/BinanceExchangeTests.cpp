@@ -7,6 +7,7 @@
 #include <cstdlib>
 
 #include "Exchanges/BinanceSimulator/BinanceExchange.hpp"
+#include "BaselineSemanticsInputPinning.hpp"
 
 using namespace QTrading::Infra::Exchanges::BinanceSim;
 using namespace QTrading::Dto::Market::Binance;
@@ -759,6 +760,47 @@ TEST_F(BinanceExchangeFixture, TradingSessionCoreV2DiagnosticTracksStepLifecycle
     EXPECT_FALSE(eos->progressed);
     EXPECT_TRUE(eos->terminated);
     EXPECT_TRUE(eos->terminated_end_of_stream);
+}
+
+TEST_F(BinanceExchangeFixture, BalanceDepletedTerminationClosesAllPublicChannels)
+{
+    SCOPED_TRACE(::testing::Message()
+        << "baseline_pin id=" << QTrading::Infra::Tests::BaselineSemanticsPinning::kBalanceDepletionClosesPublicChannels.id
+        << " run_id=" << QTrading::Infra::Tests::BaselineSemanticsPinning::kBalanceDepletionClosesPublicChannels.run_id
+        << " baseline_input_version=" << QTrading::Infra::Tests::BaselineSemanticsPinning::kBaselineInputVersion
+        << " seed=" << QTrading::Infra::Tests::BaselineSemanticsPinning::kPinnedDeterministicSeed
+        << " scenario=balance_depletion_closes_public_channels");
+    writeCsv(QTrading::Infra::Tests::BaselineSemanticsPinning::kBalanceDepletionTradeCsv, {
+        {      0,100,100,100,100,1000, 30000,100,1,0,0 }
+        });
+
+    Account::AccountInitConfig cfg{};
+    cfg.perp_initial_wallet = 0.0;
+    cfg.spot_initial_cash = 0.0;
+
+    BinanceExchange ex(
+        { { "BTCUSDT", (tmpDir / QTrading::Infra::Tests::BaselineSemanticsPinning::kBalanceDepletionTradeCsv).string() } },
+        logger,
+        cfg,
+        QTrading::Infra::Tests::BaselineSemanticsPinning::kBalanceDepletionClosesPublicChannels.run_id);
+    auto mCh = ex.get_market_channel();
+    auto pCh = ex.get_position_channel();
+    auto oCh = ex.get_order_channel();
+
+    EXPECT_FALSE(ex.step());
+
+    auto diag = ex.consume_last_trading_session_core_v2_diagnostic();
+    ASSERT_TRUE(diag.has_value());
+    EXPECT_TRUE(diag->terminated);
+    EXPECT_TRUE(diag->terminated_balance_depleted);
+    EXPECT_FALSE(diag->terminated_end_of_stream);
+
+    EXPECT_TRUE(mCh->IsClosed());
+    EXPECT_TRUE(pCh->IsClosed());
+    EXPECT_TRUE(oCh->IsClosed());
+    EXPECT_FALSE(mCh->TryReceive().has_value());
+    EXPECT_FALSE(pCh->TryReceive().has_value());
+    EXPECT_FALSE(oCh->TryReceive().has_value());
 }
 
 TEST_F(BinanceExchangeFixture, TradingSessionCoreV2DeferredAndAsyncAckOrchestrationRemainStable)

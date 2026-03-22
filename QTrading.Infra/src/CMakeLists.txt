@@ -21,19 +21,17 @@ add_library(QTrading.Infra.Library STATIC
   Exchanges/BinanceSimulator/Perp/Account.PerpApi.cpp
   Exchanges/BinanceSimulator/Perp/PerpLedgerEngine.cpp
   Exchanges/BinanceSimulator/Perp/BinanceExchange.PerpApi.cpp
+  Exchanges/BinanceSimulator/Domain/BinanceRejectSurface.cpp
+  Exchanges/BinanceSimulator/Domain/OrderEntryService.cpp
   Data/Binance/MarketData.cpp
   Data/Binance/FundingRateData.cpp
-  Exchanges/BinanceSimulator/Calibration/CalibrationMetrics.cpp
-  Exchanges/BinanceSimulator/Diagnostics/Compare/BinanceCompareBridge.cpp
-  Exchanges/BinanceSimulator/Diagnostics/Compare/DiagnosticReportFormatter.cpp
-  Exchanges/BinanceSimulator/Diagnostics/Compare/PerformanceCiGate.cpp
-  Exchanges/BinanceSimulator/Diagnostics/Compare/PerformanceEvidenceFormatter.cpp
-  Exchanges/BinanceSimulator/Diagnostics/Compare/DifferentialReplayRunner.cpp
-  Exchanges/BinanceSimulator/Diagnostics/Compare/LegacyLogRowCompare.cpp
-  Exchanges/BinanceSimulator/Diagnostics/Compare/ReplayCompareCiGate.cpp
-  Exchanges/BinanceSimulator/Diagnostics/Compare/ReplayCompareTestHarness.cpp
-  Exchanges/BinanceSimulator/Diagnostics/Compare/StepCompareModel.cpp
-  Exchanges/BinanceSimulator/Diagnostics/Compare/V2ReplayScenarioPack.cpp
+  Exchanges/BinanceSimulator/Application/LegacyStepBackend.cpp
+  Exchanges/BinanceSimulator/Application/StepKernel.cpp
+  Exchanges/BinanceSimulator/Output/EventEnvelopePublisher.cpp
+  Exchanges/BinanceSimulator/Output/LegacyEventEnvelopeEmitter.cpp
+  Exchanges/BinanceSimulator/Output/PositionOrderSnapshotGate.cpp
+  Exchanges/BinanceSimulator/Output/SideEffectStepNotifier.cpp
+  Exchanges/BinanceSimulator/Output/StatusSnapshotBuilder.cpp
   Exchanges/BinanceSimulator/BinanceExchange.cpp
 )
 

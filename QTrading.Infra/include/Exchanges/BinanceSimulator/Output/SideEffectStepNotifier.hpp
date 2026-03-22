@@ -1,0 +1,18 @@
+#pragma once
+
+#include "Exchanges/BinanceSimulator/BinanceExchange.hpp"
+
+namespace QTrading::Infra::Exchanges::BinanceSim {
+
+class BinanceExchange::SideEffectStepNotifier final {
+public:
+    static SideEffectStepSnapshot Initialize(
+        const QTrading::Infra::Logging::StepLogContext& step_log_ctx,
+        uint64_t state_version);
+
+    static void DispatchExternalHook(
+        BinanceExchange& owner,
+        const SideEffectStepSnapshot& snapshot);
+};
+
+} // namespace QTrading::Infra::Exchanges::BinanceSim

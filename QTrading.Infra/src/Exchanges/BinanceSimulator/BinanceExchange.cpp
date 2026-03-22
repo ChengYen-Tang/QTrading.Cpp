@@ -1,4 +1,15 @@
 #include "Exchanges/BinanceSimulator/BinanceExchange.hpp"
+#include "Exchanges/BinanceSimulator/Application/StepKernel.hpp"
+#include "Exchanges/BinanceSimulator/Output/EventCaptureBoundary.hpp"
+#include "Exchanges/BinanceSimulator/Output/EventEnvelopePublisher.hpp"
+#include "Exchanges/BinanceSimulator/Output/EventPublisherPipeline.hpp"
+#include "Exchanges/BinanceSimulator/Output/LegacyEventEnvelopeEmitter.hpp"
+#include "Exchanges/BinanceSimulator/Output/PositionOrderSnapshotGate.hpp"
+#include "Exchanges/BinanceSimulator/Output/SideEffectStepNotifier.hpp"
+#include "Exchanges/BinanceSimulator/Output/StatusSnapshotBuilder.hpp"
+#include "Exchanges/BinanceSimulator/Domain/FundingEligibilityDecision.hpp"
+#include "Exchanges/BinanceSimulator/Domain/FundingApplyOrchestration.hpp"
+#include "Exchanges/BinanceSimulator/Domain/BinanceRejectSurface.hpp"
 #include "Enum/LogModule.hpp"
 #include "Dto/AccountLog.hpp"
 #include "Diagnostics/Trace.hpp"
@@ -212,12 +223,6 @@ size_t lower_bound_funding_ts(const FundingRateData& data, uint64_t ts)
 
 } // namespace
 
-class BinanceExchange::IEventPublisher {
-public:
-    virtual ~IEventPublisher() = default;
-    virtual void publish(EventEnvelope&& task) = 0;
-};
-
 class BinanceExchange::LegacyAccountFacadeBridge final {
 public:
     struct RouteDecision {
@@ -272,121 +277,6 @@ private:
     std::shared_ptr<Account> legacy_;
     std::shared_ptr<AccountCoreV2> v2_;
     std::shared_ptr<Account> v2_account_alias_;
-};
-
-class BinanceExchange::NullEventPublisher final : public BinanceExchange::IEventPublisher {
-public:
-    void publish(EventEnvelope&&) override {}
-};
-
-class BinanceExchange::LegacyEventPublisher final : public BinanceExchange::IEventPublisher {
-public:
-    explicit LegacyEventPublisher(BinanceExchange& owner)
-        : owner_(owner) {}
-
-    void publish(EventEnvelope&& task) override
-    {
-        owner_.emit_legacy_rows_from_event_envelope_(std::move(task));
-    }
-
-private:
-    BinanceExchange& owner_;
-};
-
-class BinanceExchange::AsyncEventPublisher final : public BinanceExchange::IEventPublisher {
-public:
-    explicit AsyncEventPublisher(std::unique_ptr<BinanceExchange::IEventPublisher> downstream)
-        : downstream_(std::move(downstream))
-    {
-        worker_thread_ = std::thread([this]() { worker_(); });
-    }
-
-    ~AsyncEventPublisher() override
-    {
-        {
-            std::lock_guard<std::mutex> lk(mtx_);
-            stop_.store(true, std::memory_order_release);
-        }
-        cv_.notify_all();
-        if (worker_thread_.joinable()) {
-            worker_thread_.join();
-        }
-    }
-
-    void publish(EventEnvelope&& task) override
-    {
-        if (!downstream_) {
-            return;
-        }
-        {
-            std::lock_guard<std::mutex> lk(mtx_);
-            queue_.emplace_back(std::move(task));
-        }
-        cv_.notify_one();
-    }
-
-private:
-    void worker_()
-    {
-        while (true) {
-            EventEnvelope task;
-            {
-                std::unique_lock<std::mutex> lk(mtx_);
-                cv_.wait(lk, [this]() {
-                    return stop_.load(std::memory_order_acquire) || !queue_.empty();
-                    });
-                if (stop_.load(std::memory_order_acquire) && queue_.empty()) {
-                    return;
-                }
-                task = std::move(queue_.front());
-                queue_.pop_front();
-            }
-            downstream_->publish(std::move(task));
-        }
-    }
-
-    std::unique_ptr<BinanceExchange::IEventPublisher> downstream_;
-    std::mutex mtx_;
-    std::condition_variable cv_;
-    std::deque<EventEnvelope> queue_;
-    std::thread worker_thread_;
-    std::atomic<bool> stop_{ false };
-};
-
-class BinanceExchange::EventCaptureBoundary final {
-public:
-    struct Input {
-        QTrading::Infra::Logging::StepLogContext ctx{};
-        std::vector<DomainMarketEvent> market_events;
-        std::vector<DomainFundingEvent> funding_events;
-        AccountSnapshotEvent account_snapshot{};
-        PositionSnapshotEvent position_snapshot{};
-        OrderSnapshotEvent order_snapshot{};
-        std::vector<DomainFillEvent> fill_events;
-        uint64_t cur_ver{ 0 };
-    };
-
-    static EventEnvelope Build(Input&& input)
-    {
-        EventEnvelope envelope{};
-        envelope.ctx = input.ctx;
-        envelope.market_events = std::move(input.market_events);
-        envelope.funding_events = std::move(input.funding_events);
-        envelope.account_snapshot = input.account_snapshot;
-        envelope.position_snapshot = std::move(input.position_snapshot);
-        envelope.order_snapshot = std::move(input.order_snapshot);
-        envelope.account_events.reserve(input.fill_events.size());
-        envelope.position_events.reserve(input.fill_events.size());
-        envelope.order_events.reserve(input.fill_events.size());
-        for (const auto& fill : input.fill_events) {
-            envelope.account_events.push_back(AccountDomainEvent{ fill });
-            envelope.position_events.push_back(PositionDomainEvent{ fill });
-            envelope.order_events.push_back(OrderDomainEvent{ fill });
-        }
-        envelope.fill_events = std::move(input.fill_events);
-        envelope.cur_ver = input.cur_ver;
-        return envelope;
-    }
 };
 
 class BinanceExchange::MarketReplayEngineV2 final {
@@ -493,43 +383,9 @@ public:
         bool reduce_only);
 };
 
-class BinanceExchange::StatusSnapshotBuilder final {
-public:
-    static void Fill(const BinanceExchange& owner, BinanceExchange::StatusSnapshot& out);
-};
-
-class BinanceExchange::CoreDispatchFacade final {
-public:
-    static RunStepResult RunStep(BinanceExchange& owner, CoreMode mode)
-    {
-        return owner.dispatch_step_(mode);
-    }
-};
-
-class BinanceExchange::BinanceExchangeFacadeBridge final {
-public:
-    static RunStepResult RunSessionStep(BinanceExchange& owner, CoreMode effective_mode)
-    {
-        return CoreDispatchFacade::RunStep(owner, effective_mode);
-    }
-};
-
 class BinanceExchange::LegacyCoreSessionAdapter final {
 public:
     static RunStepResult Run(BinanceExchange& owner);
-};
-
-class BinanceExchange::NewCoreSessionAdapter final {
-public:
-    static RunStepResult Run(BinanceExchange&)
-    {
-        RunStepResult result{};
-        // Milestone 1 skeleton: new core path is wired but intentionally disabled.
-        result.progressed = false;
-        result.fallback_to_legacy = true;
-        result.compare_snapshot_ready = false;
-        return result;
-    }
 };
 
 class BinanceExchange::ExchangeSession final {
@@ -549,6 +405,11 @@ BinanceExchange::RunStepResult BinanceExchange::LegacyCoreSessionAdapter::Run(Bi
     result.progressed = ExchangeSession(owner).Run();
     result.compare_snapshot_ready = true;
     return result;
+}
+
+BinanceExchange::RunStepResult BinanceExchange::run_legacy_session_step_()
+{
+    return LegacyCoreSessionAdapter::Run(*this);
 }
 
 /// @brief Simulator for Binance futures exchange.
@@ -849,51 +710,6 @@ BinanceExchange::~BinanceExchange()
 {
 }
 
-void BinanceExchange::publish_log_task_(EventEnvelope&& task)
-{
-    if (!event_publisher_) {
-        return;
-    }
-    const EventPublishMode mode = event_publish_mode_.load(std::memory_order_acquire);
-    if (mode == EventPublishMode::DualPublishCompare) {
-        EventPublishCompareDiagnostic diag{};
-        diag.mode = mode;
-        diag.compared = true;
-        diag.legacy = build_event_publish_compare_snapshot_(task);
-        diag.candidate = build_event_publish_compare_snapshot_(task);
-        const auto mismatch = compare_event_publish_snapshots_(diag.legacy, diag.candidate);
-        diag.matched = !mismatch.has_value();
-        if (mismatch.has_value()) {
-            diag.reason = *mismatch;
-        }
-        record_event_publish_diagnostic_(std::move(diag));
-    }
-    event_publisher_->publish(std::move(task));
-}
-
-void BinanceExchange::emit_legacy_rows_from_event_envelope_(EventEnvelope&& envelope)
-{
-    log_status_snapshot(
-        envelope.account_snapshot.perp_balance,
-        envelope.account_snapshot.spot_balance,
-        envelope.account_snapshot.total_cash_balance,
-        envelope.account_snapshot.spot_inventory_value,
-        envelope.position_snapshot.positions,
-        envelope.order_snapshot.orders,
-        envelope.cur_ver);
-    log_events(envelope.ctx,
-        envelope.market_events,
-        envelope.position_snapshot.positions,
-        envelope.order_snapshot.orders,
-        envelope.funding_events,
-        envelope.account_snapshot.perp_balance,
-        envelope.account_snapshot.spot_balance,
-        envelope.account_snapshot.total_cash_balance,
-        envelope.account_snapshot.spot_inventory_value,
-        std::move(envelope.fill_events),
-        envelope.cur_ver);
-}
-
 QTrading::Dto::Account::BalanceSnapshot BinanceExchange::AccountApi::get_spot_balance() const
 {
     std::lock_guard<std::mutex> lk(owner_.account_mtx_);
@@ -929,7 +745,7 @@ bool BinanceExchange::AccountApi::transfer_perp_to_spot(double amount)
 bool BinanceExchange::step()
 {
     QTR_TRACE("ex", "step begin");
-    return run_step_session_();
+    return Application::StepKernel(*this).run();
 }
 
 void BinanceExchange::set_core_mode(CoreMode mode)
@@ -937,24 +753,26 @@ void BinanceExchange::set_core_mode(CoreMode mode)
     const CoreMode requested_mode = CoreModePolicy::normalize(mode);
     core_mode_.store(requested_mode, std::memory_order_release);
     const bool force_legacy_only = force_legacy_only_.load(std::memory_order_acquire);
-    const CoreMode effective_mode = force_legacy_only ? CoreMode::LegacyOnly : requested_mode;
+    const CoreMode effective_mode = CoreMode::LegacyOnly;
 
     SessionReplayCoexistenceDiagnostic coexistence_diag{};
     coexistence_diag.requested_mode = requested_mode;
     coexistence_diag.effective_mode = effective_mode;
     coexistence_diag.production_default_legacy_only = false;
     coexistence_diag.force_legacy_only = force_legacy_only;
-    coexistence_diag.shadow_compare_enabled = (effective_mode == CoreMode::NewCoreShadow);
-    coexistence_diag.v2_explicit_enabled = (effective_mode == CoreMode::NewCorePrimary);
-    coexistence_diag.compare_artifact_enabled = coexistence_diag.shadow_compare_enabled;
+    coexistence_diag.shadow_compare_enabled = false;
+    coexistence_diag.v2_explicit_enabled = false;
+    coexistence_diag.compare_artifact_enabled = false;
     coexistence_diag.fail_close_protected = true;
-    coexistence_diag.fallback_to_legacy = (effective_mode == CoreMode::LegacyOnly) &&
-        (requested_mode != CoreMode::LegacyOnly);
+    coexistence_diag.fallback_to_legacy = force_legacy_only || (requested_mode != CoreMode::LegacyOnly);
     if (force_legacy_only && requested_mode != CoreMode::LegacyOnly) {
-        coexistence_diag.reason = "force legacy-only flag enabled; coerced session/replay mode to LegacyOnly.";
+        coexistence_diag.reason = "hard-prune legacy-only step core active with force legacy-only flag.";
+    }
+    else if (requested_mode != CoreMode::LegacyOnly) {
+        coexistence_diag.reason = "hard-prune legacy-only step core active; non-legacy request coerced to legacy.";
     }
     else {
-        coexistence_diag.reason = "session/replay coexistence mode updated.";
+        coexistence_diag.reason = "hard-prune legacy-only step core active.";
     }
 
     AccountFacadeBridgeDiagnostic diag{};
@@ -1097,128 +915,6 @@ BinanceExchange::consume_last_event_publish_diagnostic()
     return out;
 }
 
-bool BinanceExchange::run_step_session_()
-{
-    const CoreMode requested_mode = core_mode_.load(std::memory_order_acquire);
-    const bool force_legacy_only = force_legacy_only_.load(std::memory_order_acquire);
-    const CoreMode effective_mode = force_legacy_only ? CoreMode::LegacyOnly : requested_mode;
-    auto result = BinanceExchangeFacadeBridge::RunSessionStep(*this, effective_mode);
-
-    SessionReplayCoexistenceDiagnostic diag{};
-    diag.requested_mode = requested_mode;
-    diag.effective_mode = effective_mode;
-    diag.production_default_legacy_only = false;
-    diag.force_legacy_only = force_legacy_only;
-    diag.shadow_compare_enabled = (effective_mode == CoreMode::NewCoreShadow);
-    diag.v2_explicit_enabled = (effective_mode == CoreMode::NewCorePrimary);
-    diag.compare_artifact_enabled = diag.shadow_compare_enabled;
-    diag.fallback_to_legacy = result.fallback_to_legacy || (force_legacy_only && requested_mode != CoreMode::LegacyOnly);
-    diag.fail_close_protected = true;
-    if (force_legacy_only && requested_mode != CoreMode::LegacyOnly) {
-        diag.reason = "force legacy-only flag active during step; executing legacy path.";
-    }
-    else if (result.fallback_to_legacy) {
-        diag.reason = "v2 path signaled fallback; legacy path executed.";
-    }
-    else {
-        diag.reason = "session/replay step executed.";
-    }
-    record_session_replay_coexistence_diagnostic_(std::move(diag));
-
-    BinanceExchangeFacadeBridgeDiagnostic facade_diag{};
-    facade_diag.requested_mode = requested_mode;
-    facade_diag.effective_mode = effective_mode;
-    facade_diag.progressed = result.progressed;
-    facade_diag.fallback_to_legacy = result.fallback_to_legacy || (force_legacy_only && requested_mode != CoreMode::LegacyOnly);
-    facade_diag.used_v2_session_core = (effective_mode == CoreMode::NewCorePrimary) && !facade_diag.fallback_to_legacy;
-    facade_diag.preserve_capture_boundary = true;
-    facade_diag.preserve_log_batch_boundary = true;
-    facade_diag.preserve_timestamp_semantics = true;
-    {
-        std::lock_guard<std::mutex> lk(state_mtx_);
-        facade_diag.step_seq = log_ctx_.step_seq;
-        facade_diag.ts_exchange = last_step_ts_;
-    }
-    if (facade_diag.fallback_to_legacy) {
-        facade_diag.reason = "Facade bridge routed to legacy-compatible session path.";
-    }
-    else {
-        facade_diag.reason = "Facade bridge preserved legacy contract boundaries.";
-    }
-    record_binance_exchange_facade_bridge_diagnostic_(std::move(facade_diag));
-    return result.progressed;
-}
-
-BinanceExchange::RunStepResult BinanceExchange::dispatch_step_(CoreMode mode)
-{
-    switch (mode) {
-    case CoreMode::LegacyOnly:
-        return LegacyCoreSessionAdapter::Run(*this);
-
-    case CoreMode::NewCoreShadow:
-    {
-        auto legacy_result = LegacyCoreSessionAdapter::Run(*this);
-        StepCompareDiagnostic diagnostic{};
-        diagnostic.mode = mode;
-        diagnostic.legacy = build_step_compare_snapshot_(legacy_result);
-
-        const auto new_core_result = NewCoreSessionAdapter::Run(*this);
-        if (new_core_result.compare_snapshot_ready) {
-            diagnostic.compared = true;
-            diagnostic.candidate = build_step_compare_snapshot_(new_core_result);
-            const auto mismatch_reason =
-                compare_step_snapshots_(diagnostic.legacy, diagnostic.candidate);
-            diagnostic.matched = !mismatch_reason.has_value();
-            if (mismatch_reason.has_value()) {
-                diagnostic.reason = *mismatch_reason;
-            }
-        }
-        else {
-            diagnostic.compared = false;
-            diagnostic.matched = true;
-            diagnostic.reason = "New core compare snapshot unavailable; shadow mode kept legacy result.";
-        }
-        record_compare_diagnostic_(std::move(diagnostic));
-        return legacy_result;
-    }
-
-    case CoreMode::NewCorePrimary:
-    {
-        const auto new_core_result = NewCoreSessionAdapter::Run(*this);
-        if (new_core_result.progressed && !new_core_result.fallback_to_legacy) {
-            return new_core_result;
-        }
-
-        auto legacy_result = LegacyCoreSessionAdapter::Run(*this);
-        legacy_result.fallback_to_legacy = true;
-
-        StepCompareDiagnostic diagnostic{};
-        diagnostic.mode = mode;
-        diagnostic.legacy = build_step_compare_snapshot_(legacy_result);
-        if (new_core_result.compare_snapshot_ready) {
-            diagnostic.compared = true;
-            diagnostic.candidate = build_step_compare_snapshot_(new_core_result);
-            const auto mismatch_reason =
-                compare_step_snapshots_(diagnostic.legacy, diagnostic.candidate);
-            diagnostic.matched = !mismatch_reason.has_value();
-            if (mismatch_reason.has_value()) {
-                diagnostic.reason = *mismatch_reason;
-            }
-        }
-        else {
-            diagnostic.compared = false;
-            diagnostic.matched = true;
-            diagnostic.reason = "New core primary unavailable; fell back to legacy path.";
-        }
-        record_compare_diagnostic_(std::move(diagnostic));
-        return legacy_result;
-    }
-
-    default:
-        return LegacyCoreSessionAdapter::Run(*this);
-    }
-}
-
 BinanceExchange::StepCompareSnapshot BinanceExchange::build_step_compare_snapshot_(
     const RunStepResult& result) const
 {
@@ -1245,6 +941,33 @@ BinanceExchange::StepCompareSnapshot BinanceExchange::build_step_compare_snapsho
     }
 
     return snapshot;
+}
+
+BinanceExchange::StepCompareDiagnostic BinanceExchange::build_step_compare_diagnostic_(
+    CoreMode mode,
+    const RunStepResult& legacy_result,
+    const RunStepResult& candidate_result,
+    const char* candidate_unavailable_reason) const
+{
+    StepCompareDiagnostic diagnostic{};
+    diagnostic.mode = mode;
+    diagnostic.legacy = build_step_compare_snapshot_(legacy_result);
+    if (candidate_result.compare_snapshot_ready) {
+        diagnostic.compared = true;
+        diagnostic.candidate = build_step_compare_snapshot_(candidate_result);
+        const auto mismatch_reason =
+            compare_step_snapshots_(diagnostic.legacy, diagnostic.candidate);
+        diagnostic.matched = !mismatch_reason.has_value();
+        if (mismatch_reason.has_value()) {
+            diagnostic.reason = *mismatch_reason;
+        }
+    }
+    else {
+        diagnostic.compared = false;
+        diagnostic.matched = true;
+        diagnostic.reason = candidate_unavailable_reason ? candidate_unavailable_reason : std::string{};
+    }
+    return diagnostic;
 }
 
 std::optional<std::string> BinanceExchange::compare_step_snapshots_(
@@ -1704,18 +1427,14 @@ bool BinanceExchange::ExchangeSession::Run()
         owner_.collect_funding_events_unlocked_(ts, funding_events);
     };
 
-    if (apply_timing == FundingApplyTiming::BeforeMatching) {
-        apply_funding();
-        build_market();
-        apply_basis_risk_guard();
-        update_positions();
-    }
-    else {
-        build_market();
-        apply_basis_risk_guard();
-        update_positions();
-        apply_funding();
-    }
+    Domain::FundingApplyOrchestration::Execute(
+        apply_timing == FundingApplyTiming::BeforeMatching,
+        apply_funding,
+        [&]() {
+            build_market();
+            apply_basis_risk_guard();
+            update_positions();
+        });
 
     {
         std::lock_guard<std::mutex> lk(owner_.account_mtx_);
@@ -1730,11 +1449,8 @@ bool BinanceExchange::ExchangeSession::Run()
     }
 
     step_log_ctx.ts_local = now_ms();
-    SideEffectStepSnapshot side_effect_snapshot{};
-    side_effect_snapshot.run_id = step_log_ctx.run_id;
-    side_effect_snapshot.step_seq = step_log_ctx.step_seq;
-    side_effect_snapshot.ts_exchange = step_log_ctx.ts_exchange;
-    side_effect_snapshot.state_version = cur_ver;
+    SideEffectStepSnapshot side_effect_snapshot =
+        SideEffectStepNotifier::Initialize(step_log_ctx, cur_ver);
 
     QTR_TRACE("ex", "market_channel Send begin");
     if (owner_.market_channel_publisher_) {
@@ -1747,46 +1463,10 @@ bool BinanceExchange::ExchangeSession::Run()
     }
     QTR_TRACE("ex", "market_channel Send end");
 
-    bool pos_changed = false;
-    bool ord_changed = false;
-    if (cur_ver != owner_.last_account_version_ && curP && curO) {
-        const bool pos_unchanged = owner_.last_pos_snapshot_
-            ? BinanceExchange::vec_equal(*curP, *owner_.last_pos_snapshot_)
-            : curP->empty();
-        const bool ord_unchanged = owner_.last_ord_snapshot_
-            ? BinanceExchange::vec_equal(*curO, *owner_.last_ord_snapshot_)
-            : curO->empty();
+    const auto snapshot_decision = PositionOrderSnapshotGate::EvaluateAndPublish(
+        owner_, cur_ver, curP, curO, side_effect_snapshot);
 
-        if (!pos_unchanged) {
-            QTR_TRACE("ex", "position_channel Send");
-            if (owner_.position_channel_publisher_) {
-                owner_.position_channel_publisher_(*curP);
-                side_effect_snapshot.position_published = true;
-            }
-            else if (owner_.position_channel) {
-                owner_.position_channel->Send(*curP);
-                side_effect_snapshot.position_published = true;
-            }
-            pos_changed = true;
-        }
-
-        if (!ord_unchanged) {
-            QTR_TRACE("ex", "order_channel Send");
-            if (owner_.order_channel_publisher_) {
-                owner_.order_channel_publisher_(*curO);
-                side_effect_snapshot.order_published = true;
-            }
-            else if (owner_.order_channel) {
-                owner_.order_channel->Send(*curO);
-                side_effect_snapshot.order_published = true;
-            }
-            ord_changed = true;
-        }
-    }
-
-    if (owner_.external_side_effect_hook_) {
-        owner_.external_side_effect_hook_(side_effect_snapshot);
-    }
+    SideEffectStepNotifier::DispatchExternalHook(owner_, side_effect_snapshot);
 
     if (owner_.logger) {
         EventCaptureBoundary::Input capture_input{};
@@ -1801,18 +1481,11 @@ bool BinanceExchange::ExchangeSession::Run()
         capture_input.order_snapshot.orders = curO;
         capture_input.fill_events = std::move(fill_events);
         capture_input.cur_ver = cur_ver;
-        owner_.publish_log_task_(EventCaptureBoundary::Build(std::move(capture_input)));
+        Output::EventEnvelopePublisher(owner_).publish(EventCaptureBoundary::Build(std::move(capture_input)));
     }
 
-    if (cur_ver != owner_.last_account_version_) {
-        if (pos_changed) {
-            owner_.last_pos_snapshot_ = curP;
-        }
-        if (ord_changed) {
-            owner_.last_ord_snapshot_ = curO;
-        }
-        owner_.last_account_version_ = cur_ver;
-    }
+    PositionOrderSnapshotGate::CommitSnapshotsAndVersion(
+        owner_, cur_ver, curP, curO, snapshot_decision);
 
     {
         std::lock_guard<std::mutex> lk(owner_.account_mtx_);
@@ -1897,63 +1570,9 @@ size_t BinanceExchange::flush_deferred_orders_with_count_locked_(uint64_t step_s
     return executed;
 }
 
-void BinanceExchange::flush_deferred_orders_locked_(uint64_t step_seq)
-{
-    (void)flush_deferred_orders_with_count_locked_(step_seq);
-}
-
 void BinanceExchange::push_async_order_ack_locked_(AsyncOrderAck ack)
 {
     async_order_acks_.push_back(std::move(ack));
-}
-
-std::pair<int, std::string> BinanceExchange::map_binance_reject_(const std::optional<Account::OrderRejectInfo>& reject)
-{
-    using Code = Account::OrderRejectInfo::Code;
-    if (!reject.has_value() || reject->code == Code::None) {
-        return { 0, {} };
-    }
-
-    switch (reject->code) {
-    case Code::UnknownSymbol:
-        return { -1121, "Invalid symbol." };
-    case Code::InvalidQuantity:
-        return { -4003, "Quantity less than zero." };
-    case Code::DuplicateClientOrderId:
-        return { -4111, "DUPLICATED_CLIENT_TRAN_ID" };
-    case Code::StpExpiredTaker:
-    case Code::StpExpiredBoth:
-        return { -2010, "Order would trigger self-trade prevention." };
-    case Code::SpotHedgeModeUnsupported:
-    case Code::HedgeModePositionSideRequired:
-        return { -4061, "Order's position side does not match user's setting." };
-    case Code::StrictHedgeReduceOnlyDisabled:
-    case Code::ReduceOnlyNoReduciblePosition:
-        return { -2022, "ReduceOnly Order is rejected." };
-    case Code::PriceFilterBelowMin:
-    case Code::PriceFilterAboveMax:
-    case Code::PriceFilterInvalidTick:
-        return { -1013, "Filter failure: PRICE_FILTER" };
-    case Code::LotSizeBelowMinQty:
-    case Code::LotSizeAboveMaxQty:
-    case Code::LotSizeInvalidStep:
-        return { -1013, "Filter failure: LOT_SIZE" };
-    case Code::NotionalNoReferencePrice:
-    case Code::NotionalBelowMin:
-    case Code::NotionalAboveMax:
-        return { -1013, "Filter failure: NOTIONAL" };
-    case Code::PercentPriceAboveBound:
-    case Code::PercentPriceBelowBound:
-        return { -1013, "Filter failure: PERCENT_PRICE" };
-    case Code::SpotInsufficientCash:
-    case Code::SpotNoInventory:
-    case Code::SpotQuantityExceedsInventory:
-    case Code::SpotNoLongPositionToClose:
-    default:
-        break;
-    }
-
-    return { -2010, "NEW_ORDER_REJECTED" };
 }
 
 /// @brief Get a snapshot of all current positions.
@@ -2910,7 +2529,12 @@ void BinanceExchange::collect_funding_events_unlocked_(uint64_t ts, std::vector<
                 ++diag.mark_source_interpolated_count;
             }
 
-            if (FundingTimelineResolver::IsDuplicate(*this, i, fr.FundingTime, fr.Rate)) {
+            const auto funding_decision = Domain::FundingEligibilityDecision::Decide(
+                FundingTimelineResolver::IsDuplicate(*this, i, fr.FundingTime, fr.Rate),
+                mark_resolution.has_price,
+                static_cast<bool>(account_engine_));
+
+            if (funding_decision == Domain::FundingDecisionAction::SkipDuplicate) {
                 ++diag.funding_rows_skipped_duplicate;
                 DomainFundingEvent skip{};
                 skip.symbol = symbols_[i];
@@ -2930,7 +2554,7 @@ void BinanceExchange::collect_funding_events_unlocked_(uint64_t ts, std::vector<
             }
 
             std::vector<Account::FundingApplyResult> applied;
-            if (mark_resolution.has_price && account_engine_) {
+            if (funding_decision == Domain::FundingDecisionAction::Apply) {
                 applied = account_engine_->apply_funding(
                     symbols_[i], fr.FundingTime, fr.Rate, mark_resolution.price);
                 if (i < has_last_applied_funding_.size()) {
@@ -2939,7 +2563,7 @@ void BinanceExchange::collect_funding_events_unlocked_(uint64_t ts, std::vector<
                     last_applied_funding_rate_by_symbol_[i] = fr.Rate;
                 }
             }
-            else if (!mark_resolution.has_price) {
+            else if (funding_decision == Domain::FundingDecisionAction::SkipNoMark) {
                 ++funding_skipped_no_mark_total_;
                 ++diag.funding_rows_skipped_no_mark;
                 DomainFundingEvent skip;
@@ -3345,101 +2969,6 @@ bool BinanceExchange::perp_opening_blocked_by_basis_stress_account_locked_(
 void BinanceExchange::FillStatusSnapshot(StatusSnapshot& out) const
 {
     StatusSnapshotBuilder::Fill(*this, out);
-}
-
-void BinanceExchange::StatusSnapshotBuilder::Fill(const BinanceExchange& owner,
-    BinanceExchange::StatusSnapshot& out)
-{
-    double uncertainty_bps = 0.0;
-    double mark_index_diag_bps = 0.0;
-    {
-        std::lock_guard<std::mutex> lk(owner.account_mtx_);
-        uncertainty_bps = owner.uncertainty_band_bps_;
-        if (owner.account_engine_) {
-            const auto perp_bal = owner.account_engine_->get_perp_balance();
-            const auto spot_bal = owner.account_engine_->get_spot_balance();
-            const auto positions = owner.account_engine_->get_all_positions();
-            const double spot_inventory_value = spot_inventory_value_from_positions(positions);
-            const double spot_ledger_value = spot_bal.WalletBalance + spot_inventory_value;
-            const double total_cash_balance = owner.account_engine_->get_total_cash_balance();
-            const double total_ledger_value = perp_bal.Equity + spot_ledger_value;
-
-            out.wallet_balance = perp_bal.WalletBalance;
-            out.margin_balance = perp_bal.MarginBalance;
-            out.available_balance = perp_bal.AvailableBalance;
-            out.unrealized_pnl = perp_bal.UnrealizedPnl;
-            out.total_unrealized_pnl = owner.account_engine_->total_unrealized_pnl();
-            out.perp_wallet_balance = perp_bal.WalletBalance;
-            out.perp_margin_balance = perp_bal.MarginBalance;
-            out.perp_available_balance = perp_bal.AvailableBalance;
-            out.spot_cash_balance = spot_bal.WalletBalance;
-            out.spot_available_balance = spot_bal.AvailableBalance;
-            out.spot_inventory_value = spot_inventory_value;
-            out.spot_ledger_value = spot_ledger_value;
-            out.total_cash_balance = total_cash_balance;
-            out.total_ledger_value = total_ledger_value;
-            out.total_ledger_value_base = total_ledger_value;
-            const double band = std::max(0.0, uncertainty_bps) / 10000.0;
-            out.total_ledger_value_conservative = total_ledger_value * (1.0 - band);
-            out.total_ledger_value_optimistic = total_ledger_value * (1.0 + band);
-        }
-        else {
-            out.wallet_balance = 0.0;
-            out.margin_balance = 0.0;
-            out.available_balance = 0.0;
-            out.unrealized_pnl = 0.0;
-            out.total_unrealized_pnl = 0.0;
-            out.perp_wallet_balance = 0.0;
-            out.perp_margin_balance = 0.0;
-            out.perp_available_balance = 0.0;
-            out.spot_cash_balance = 0.0;
-            out.spot_available_balance = 0.0;
-            out.spot_inventory_value = 0.0;
-            out.spot_ledger_value = 0.0;
-            out.total_cash_balance = 0.0;
-            out.total_ledger_value = 0.0;
-            out.total_ledger_value_base = 0.0;
-            out.total_ledger_value_conservative = 0.0;
-            out.total_ledger_value_optimistic = 0.0;
-        }
-    }
-
-    {
-        std::lock_guard<std::mutex> state_lk(owner.state_mtx_);
-        mark_index_diag_bps = std::max(0.0, owner.last_mark_index_max_abs_basis_bps_);
-        out.ts_exchange = owner.last_step_ts_;
-        out.progress_pct = owner.progress_pct_unlocked_();
-        out.basis_warning_symbols = owner.simulator_risk_overlay_.warning_symbols;
-        out.basis_stress_symbols = owner.simulator_risk_overlay_.stress_symbols;
-        out.prices.clear();
-        out.prices.reserve(owner.symbols_.size());
-        for (size_t i = 0; i < owner.symbols_.size(); ++i) {
-            StatusSnapshot::PriceSnapshot snap;
-            snap.symbol = owner.symbols_[i];
-            snap.trade_price = owner.last_close_by_symbol_[i];
-            snap.has_trade_price = owner.has_last_close_[i] != 0;
-            snap.price = snap.trade_price;
-            snap.has_price = snap.has_trade_price;
-            snap.mark_price = (i < owner.last_mark_by_symbol_.size()) ? owner.last_mark_by_symbol_[i] : 0.0;
-            snap.has_mark_price = (i < owner.has_last_mark_.size()) && (owner.has_last_mark_[i] != 0);
-            snap.mark_price_source = (i < owner.last_mark_source_by_symbol_.size())
-                ? owner.last_mark_source_by_symbol_[i]
-                : static_cast<int32_t>(ReferencePriceSource::None);
-            snap.index_price = (i < owner.last_index_by_symbol_.size()) ? owner.last_index_by_symbol_[i] : 0.0;
-            snap.has_index_price = (i < owner.has_last_index_.size()) && (owner.has_last_index_[i] != 0);
-            snap.index_price_source = (i < owner.last_index_source_by_symbol_.size())
-                ? owner.last_index_source_by_symbol_[i]
-                : static_cast<int32_t>(ReferencePriceSource::None);
-            out.prices.emplace_back(std::move(snap));
-        }
-        out.funding_applied_events = owner.funding_applied_events_total_;
-        out.funding_skipped_no_mark = owner.funding_skipped_no_mark_total_;
-    }
-    out.basis_stress_blocked_orders = owner.simulator_risk_overlay_.stress_blocked_orders.load(std::memory_order_relaxed);
-    out.uncertainty_band_bps = std::max(0.0, uncertainty_bps) + std::max(0.0, mark_index_diag_bps);
-    const double total_band = out.uncertainty_band_bps / 10000.0;
-    out.total_ledger_value_conservative = out.total_ledger_value_base * (1.0 - total_band);
-    out.total_ledger_value_optimistic = out.total_ledger_value_base * (1.0 + total_band);
 }
 
 double BinanceExchange::progress_pct_() const
