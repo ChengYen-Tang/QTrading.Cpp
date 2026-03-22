@@ -4,14 +4,14 @@
 
 namespace QTrading::Infra::Exchanges::BinanceSim::Output {
 
-BinanceExchange::PositionOrderSnapshotGate::ChangeDecision
-BinanceExchange::PositionOrderSnapshotGate::EvaluateAndPublish(BinanceExchange& owner,
+PositionOrderSnapshotChangeDecision
+PositionOrderSnapshotGate::EvaluateAndPublish(BinanceExchange& owner,
     uint64_t cur_ver,
-    const PositionSnapshotPtr& cur_positions,
-    const OrderSnapshotPtr& cur_orders,
-    SideEffectStepSnapshot& side_effect_snapshot)
+    const BinanceExchange::PositionSnapshotPtr& cur_positions,
+    const BinanceExchange::OrderSnapshotPtr& cur_orders,
+    BinanceExchange::SideEffectStepSnapshot& side_effect_snapshot)
 {
-    ChangeDecision decision{};
+    PositionOrderSnapshotChangeDecision decision{};
     decision.version_changed = (cur_ver != owner.last_account_version_);
     if (!decision.version_changed || !cur_positions || !cur_orders) {
         return decision;
@@ -53,12 +53,12 @@ BinanceExchange::PositionOrderSnapshotGate::EvaluateAndPublish(BinanceExchange& 
     return decision;
 }
 
-void BinanceExchange::PositionOrderSnapshotGate::CommitSnapshotsAndVersion(
+void PositionOrderSnapshotGate::CommitSnapshotsAndVersion(
     BinanceExchange& owner,
     uint64_t cur_ver,
-    const PositionSnapshotPtr& cur_positions,
-    const OrderSnapshotPtr& cur_orders,
-    const ChangeDecision& decision)
+    const BinanceExchange::PositionSnapshotPtr& cur_positions,
+    const BinanceExchange::OrderSnapshotPtr& cur_orders,
+    const PositionOrderSnapshotChangeDecision& decision)
 {
     if (!decision.version_changed) {
         return;

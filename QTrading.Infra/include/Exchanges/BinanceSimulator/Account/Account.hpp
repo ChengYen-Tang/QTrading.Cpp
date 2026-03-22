@@ -4,6 +4,8 @@
 #include <string>
 
 #include "Dto/Account/BalanceSnapshot.hpp"
+#include "Exchanges/BinanceSimulator/Contracts/AccountInitConfig.hpp"
+#include "Exchanges/BinanceSimulator/Contracts/OrderRejectInfo.hpp"
 
 namespace QTrading::Infra::Exchanges::BinanceSim {
 
@@ -11,13 +13,7 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
 /// Only read-path balances are implemented; trading mutations are deferred.
 class Account {
 public:
-    /// Constructor input that keeps backward compatibility with legacy callers.
-    struct AccountInitConfig {
-        double init_balance{ 1'000'000.0 };
-        double spot_initial_cash{ 1'000'000.0 };
-        double perp_initial_wallet{ 0.0 };
-        int vip_level{ 0 };
-    };
+    using AccountInitConfig = Contracts::AccountInitConfig;
 
     /// Enumerates self-trade-prevention options preserved on API signatures.
     enum class SelfTradePreventionMode {
@@ -25,15 +21,6 @@ public:
         ExpireTaker = 1,
         ExpireMaker = 2,
         ExpireBoth = 3,
-    };
-
-    /// Reject taxonomy placeholder retained for API contract compatibility.
-    struct OrderRejectInfo {
-        enum class Code {
-            None = 0,
-            Unknown = 1,
-            NotImplemented = 2,
-        };
     };
 
     Account() = default;

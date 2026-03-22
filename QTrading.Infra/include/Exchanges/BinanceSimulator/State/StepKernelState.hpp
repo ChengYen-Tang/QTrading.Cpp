@@ -10,6 +10,7 @@
 #include "Data/Binance/MarketData.hpp"
 #include "Exchanges/BinanceSimulator/Contracts/BinanceExchangeDiagnostics.hpp"
 #include "Exchanges/BinanceSimulator/Contracts/BinanceExchangeRuntimeTypes.hpp"
+#include "Exchanges/BinanceSimulator/State/StepKernelHeapTypes.hpp"
 
 namespace QTrading::Infra::Exchanges::BinanceSim::State {
 
@@ -29,22 +30,6 @@ struct StepKernelState {
     std::optional<Contracts::ReferenceFundingResolverDiagnostic> last_reference_funding_resolver_diagnostic;
     uint64_t run_id{ 0 };
 
-    /// Heap item for timestamp merge across symbols.
-    struct HeapItem {
-        uint64_t ts{ 0 };
-        size_t sym_id{ 0 };
-    };
-    /// Min-heap comparator (smallest timestamp, then symbol id).
-    struct HeapItemGreater {
-        bool operator()(const HeapItem& a, const HeapItem& b) const noexcept
-        {
-            if (a.ts != b.ts) {
-                return a.ts > b.ts;
-            }
-            return a.sym_id > b.sym_id;
-        }
-    };
-
     /// Fixed replay symbol universe and associated market data.
     std::vector<std::string> symbols;
     std::shared_ptr<const std::vector<std::string>> symbols_shared;
@@ -52,7 +37,7 @@ struct StepKernelState {
     std::vector<size_t> replay_cursor;
     std::vector<uint64_t> next_ts_by_symbol;
     std::vector<uint8_t> has_next_ts;
-    std::priority_queue<HeapItem, std::vector<HeapItem>, HeapItemGreater> next_ts_heap;
+    std::priority_queue<StepKernelHeapItem, std::vector<StepKernelHeapItem>, StepKernelHeapItemGreater> next_ts_heap;
     uint64_t step_seq{ 0 };
     bool channels_closed{ false };
 };

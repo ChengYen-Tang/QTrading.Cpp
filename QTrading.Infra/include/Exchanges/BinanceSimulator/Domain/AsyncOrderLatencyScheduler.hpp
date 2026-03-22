@@ -5,20 +5,16 @@
 #include <functional>
 #include <optional>
 
+#include "Exchanges/BinanceSimulator/Domain/AsyncOrderScheduleTicket.hpp"
+
 namespace QTrading::Infra::Exchanges::BinanceSim::Domain {
 
 class AsyncOrderLatencyScheduler final {
 public:
-    struct ScheduleTicket {
-        uint64_t request_id{ 0 };
-        uint64_t submitted_step{ 0 };
-        uint64_t due_step{ 0 };
-    };
+    using PendingAckEmitter = std::function<void(const AsyncOrderScheduleTicket&)>;
+    using DeferredEnqueuer = std::function<void(const AsyncOrderScheduleTicket&)>;
 
-    using PendingAckEmitter = std::function<void(const ScheduleTicket&)>;
-    using DeferredEnqueuer = std::function<void(const ScheduleTicket&)>;
-
-    static std::optional<ScheduleTicket> TrySchedule(
+    static std::optional<AsyncOrderScheduleTicket> TrySchedule(
         size_t order_latency_bars,
         uint64_t processed_steps,
         uint64_t& next_async_order_request_id,
@@ -29,7 +25,7 @@ public:
             return std::nullopt;
         }
 
-        ScheduleTicket ticket{};
+        AsyncOrderScheduleTicket ticket{};
         ticket.request_id = next_async_order_request_id++;
         ticket.submitted_step = processed_steps;
         ticket.due_step = processed_steps + static_cast<uint64_t>(order_latency_bars);

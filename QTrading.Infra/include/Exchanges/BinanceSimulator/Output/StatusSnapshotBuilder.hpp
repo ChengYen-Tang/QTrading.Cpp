@@ -4,9 +4,9 @@
 
 namespace QTrading::Infra::Exchanges::BinanceSim::Output {
 
-class BinanceExchange::StatusSnapshotBuilder final {
+class StatusSnapshotBuilder final {
 public:
-    static void Fill(const BinanceExchange& owner, BinanceExchange::StatusSnapshot& out);
+    static void Fill(const BinanceExchange& owner, Contracts::StatusSnapshot& out);
 };
 
 } // namespace QTrading::Infra::Exchanges::BinanceSim::Output

@@ -23,8 +23,8 @@ double spot_inventory_value_from_positions(const std::vector<dto::Position>& pos
 
 } // namespace
 
-void BinanceExchange::StatusSnapshotBuilder::Fill(const BinanceExchange& owner,
-    BinanceExchange::StatusSnapshot& out)
+void StatusSnapshotBuilder::Fill(const BinanceExchange& owner,
+    Contracts::StatusSnapshot& out)
 {
     double uncertainty_bps = 0.0;
     double mark_index_diag_bps = 0.0;
@@ -90,7 +90,7 @@ void BinanceExchange::StatusSnapshotBuilder::Fill(const BinanceExchange& owner,
         out.prices.clear();
         out.prices.reserve(owner.symbols_.size());
         for (size_t i = 0; i < owner.symbols_.size(); ++i) {
-            StatusSnapshot::PriceSnapshot snap;
+            Contracts::StatusPriceSnapshot snap;
             snap.symbol = owner.symbols_[i];
             snap.trade_price = owner.last_close_by_symbol_[i];
             snap.has_trade_price = owner.has_last_close_[i] != 0;

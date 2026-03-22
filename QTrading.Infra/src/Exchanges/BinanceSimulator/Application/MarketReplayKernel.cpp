@@ -25,11 +25,11 @@ void drop_stale_heap_entries(State::StepKernelState& state)
 
 } // namespace
 
-MarketReplayKernel::StepFrame MarketReplayKernel::Next(State::StepKernelState& state)
+MarketReplayStepFrame MarketReplayKernel::Next(State::StepKernelState& state)
 {
     // Build one MultiKline DTO for the minimum timestamp and advance all
     // symbols that match this timestamp.
-    StepFrame out{};
+    MarketReplayStepFrame out{};
     drop_stale_heap_entries(state);
     if (state.next_ts_heap.empty()) {
         return out;
@@ -64,7 +64,7 @@ MarketReplayKernel::StepFrame MarketReplayKernel::Next(State::StepKernelState& s
         if (next < state.market_data[i].get_klines_count()) {
             const uint64_t next_ts = state.market_data[i].get_kline(next).Timestamp;
             state.next_ts_by_symbol[i] = next_ts;
-            state.next_ts_heap.push(State::StepKernelState::HeapItem{ next_ts, i });
+            state.next_ts_heap.push(State::StepKernelHeapItem{ next_ts, i });
         }
         else {
             state.has_next_ts[i] = 0;

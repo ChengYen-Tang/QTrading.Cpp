@@ -1,25 +1,15 @@
 #pragma once
 
 #include "Exchanges/BinanceSimulator/BinanceExchange.hpp"
+#include "Exchanges/BinanceSimulator/Output/EventCaptureInput.hpp"
 
 namespace QTrading::Infra::Exchanges::BinanceSim::Output {
 
-class BinanceExchange::EventCaptureBoundary final {
+class EventCaptureBoundary final {
 public:
-    struct Input {
-        QTrading::Infra::Logging::StepLogContext ctx{};
-        std::vector<DomainMarketEvent> market_events;
-        std::vector<DomainFundingEvent> funding_events;
-        AccountSnapshotEvent account_snapshot{};
-        PositionSnapshotEvent position_snapshot{};
-        OrderSnapshotEvent order_snapshot{};
-        std::vector<DomainFillEvent> fill_events;
-        uint64_t cur_ver{ 0 };
-    };
-
-    static EventEnvelope Build(Input&& input)
+    static BinanceExchange::EventEnvelope Build(EventCaptureInput&& input)
     {
-        EventEnvelope envelope{};
+        BinanceExchange::EventEnvelope envelope{};
         envelope.ctx = input.ctx;
         envelope.market_events = std::move(input.market_events);
         envelope.funding_events = std::move(input.funding_events);

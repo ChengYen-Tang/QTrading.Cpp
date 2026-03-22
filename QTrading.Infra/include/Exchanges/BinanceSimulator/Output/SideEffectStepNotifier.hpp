@@ -4,15 +4,15 @@
 
 namespace QTrading::Infra::Exchanges::BinanceSim::Output {
 
-class BinanceExchange::SideEffectStepNotifier final {
+class SideEffectStepNotifier final {
 public:
-    static SideEffectStepSnapshot Initialize(
+    static Contracts::SideEffectStepSnapshot Initialize(
         const QTrading::Infra::Logging::StepLogContext& step_log_ctx,
         uint64_t state_version);
 
     static void DispatchExternalHook(
         BinanceExchange& owner,
-        const SideEffectStepSnapshot& snapshot);
+        const Contracts::SideEffectStepSnapshot& snapshot);
 };
 
 } // namespace QTrading::Infra::Exchanges::BinanceSim::Output

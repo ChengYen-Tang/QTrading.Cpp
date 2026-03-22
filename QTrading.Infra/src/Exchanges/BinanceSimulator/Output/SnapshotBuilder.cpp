@@ -57,7 +57,7 @@ void SnapshotBuilder::Fill(const BinanceExchange& exchange, Contracts::StatusSna
     }
     out.prices.reserve(snapshot_state.symbols_shared->size());
     for (size_t i = 0; i < snapshot_state.symbols_shared->size(); ++i) {
-        Contracts::StatusSnapshot::PriceSnapshot price{};
+        Contracts::StatusPriceSnapshot price{};
         price.symbol = (*snapshot_state.symbols_shared)[i];
         if (i < snapshot_state.has_last_trade_price_by_symbol.size() &&
             snapshot_state.has_last_trade_price_by_symbol[i] != 0 &&

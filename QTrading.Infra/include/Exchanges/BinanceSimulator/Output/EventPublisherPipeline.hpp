@@ -5,25 +5,25 @@
 
 namespace QTrading::Infra::Exchanges::BinanceSim::Output {
 
-class BinanceExchange::IEventPublisher {
+class IEventPublisher {
 public:
     virtual ~IEventPublisher() = default;
-    virtual void publish(EventEnvelope&& task) = 0;
+    virtual void publish(BinanceExchange::EventEnvelope&& task) = 0;
 };
 
-class BinanceExchange::NullEventPublisher final : public BinanceExchange::IEventPublisher {
+class NullEventPublisher final : public IEventPublisher {
 public:
-    void publish(EventEnvelope&&) override {}
+    void publish(BinanceExchange::EventEnvelope&&) override {}
 };
 
-class BinanceExchange::LegacyEventPublisher final : public BinanceExchange::IEventPublisher {
+class LegacyEventPublisher final : public IEventPublisher {
 public:
     explicit LegacyEventPublisher(BinanceExchange& owner)
         : owner_(owner)
     {
     }
 
-    void publish(EventEnvelope&& task) override
+    void publish(BinanceExchange::EventEnvelope&& task) override
     {
         Output::LegacyEventEnvelopeEmitter(owner_).emit(std::move(task));
     }
@@ -32,9 +32,9 @@ private:
     BinanceExchange& owner_;
 };
 
-class BinanceExchange::AsyncEventPublisher final : public BinanceExchange::IEventPublisher {
+class AsyncEventPublisher final : public IEventPublisher {
 public:
-    explicit AsyncEventPublisher(std::unique_ptr<BinanceExchange::IEventPublisher> downstream)
+    explicit AsyncEventPublisher(std::unique_ptr<IEventPublisher> downstream)
         : downstream_(std::move(downstream))
     {
         worker_thread_ = std::thread([this]() { worker_(); });
@@ -52,7 +52,7 @@ public:
         }
     }
 
-    void publish(EventEnvelope&& task) override
+    void publish(BinanceExchange::EventEnvelope&& task) override
     {
         if (!downstream_) {
             return;
@@ -68,7 +68,7 @@ private:
     void worker_()
     {
         while (true) {
-            EventEnvelope task;
+            BinanceExchange::EventEnvelope task;
             {
                 std::unique_lock<std::mutex> lk(mtx_);
                 cv_.wait(lk, [this]() {
@@ -84,10 +84,10 @@ private:
         }
     }
 
-    std::unique_ptr<BinanceExchange::IEventPublisher> downstream_;
+    std::unique_ptr<IEventPublisher> downstream_;
     std::mutex mtx_;
     std::condition_variable cv_;
-    std::deque<EventEnvelope> queue_;
+    std::deque<BinanceExchange::EventEnvelope> queue_;
     std::thread worker_thread_;
     std::atomic<bool> stop_{ false };
 };

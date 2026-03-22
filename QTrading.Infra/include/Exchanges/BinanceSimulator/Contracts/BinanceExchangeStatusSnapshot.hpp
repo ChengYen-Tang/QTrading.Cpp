@@ -1,28 +1,14 @@
 #pragma once
 
 #include <cstdint>
-#include <string>
 #include <vector>
 
 #include "Exchanges/BinanceSimulator/Contracts/BinanceExchangeRuntimeTypes.hpp"
+#include "Exchanges/BinanceSimulator/Contracts/StatusPriceSnapshot.hpp"
 
 namespace QTrading::Infra::Exchanges::BinanceSim::Contracts {
 
 struct StatusSnapshot {
-    struct PriceSnapshot {
-        std::string symbol;
-        double price{ 0.0 };
-        bool has_price{ false };
-        double trade_price{ 0.0 };
-        bool has_trade_price{ false };
-        double mark_price{ 0.0 };
-        bool has_mark_price{ false };
-        int32_t mark_price_source{ static_cast<int32_t>(ReferencePriceSource::None) };
-        double index_price{ 0.0 };
-        bool has_index_price{ false };
-        int32_t index_price_source{ static_cast<int32_t>(ReferencePriceSource::None) };
-    };
-
     uint64_t ts_exchange{ 0 };
     double wallet_balance{ 0.0 };
     double margin_balance{ 0.0 };
@@ -48,7 +34,7 @@ struct StatusSnapshot {
     uint64_t funding_applied_events{ 0 };
     uint64_t funding_skipped_no_mark{ 0 };
     double progress_pct{ 0.0 };
-    std::vector<PriceSnapshot> prices;
+    std::vector<StatusPriceSnapshot> prices;
 };
 
 } // namespace QTrading::Infra::Exchanges::BinanceSim::Contracts
