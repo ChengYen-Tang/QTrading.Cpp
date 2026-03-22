@@ -24,6 +24,10 @@ struct BinanceExchangeRuntimeState;
 struct StepKernelState;
 }
 
+namespace QTrading::Infra::Exchanges::BinanceSim::Application {
+class StepKernel;
+}
+
 namespace QTrading::Infra::Exchanges::BinanceSim {
 
 using MultiKlinePtr = std::shared_ptr<QTrading::Dto::Market::Binance::MultiKlineDto>;
@@ -63,7 +67,10 @@ public:
     BinanceExchange& operator=(BinanceExchange&&) = delete;
 
 private:
+    friend class Application::StepKernel;
+
     void initialize_channels_();
+    void initialize_step_kernel_state_(const std::vector<SymbolDataset>& datasets, uint64_t run_id);
 
     std::shared_ptr<Account> account_;
     std::unique_ptr<State::BinanceExchangeRuntimeState> runtime_state_;

@@ -10,7 +10,7 @@ class StepKernel final {
 public:
     explicit StepKernel(BinanceExchange& exchange) noexcept;
 
-    bool run() const;
+    bool run_step() const;
 
 private:
     BinanceExchange& exchange_;

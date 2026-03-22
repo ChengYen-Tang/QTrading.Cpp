@@ -1,6 +1,10 @@
 add_library(QTrading.Infra.Library STATIC
   Exchanges/BinanceSimulator/Adapters/AccountFacadeAdapter.cpp
+  Data/Binance/MarketData.cpp
   Exchanges/BinanceSimulator/Bootstrap/BinanceExchangeBootstrap.cpp
+  Exchanges/BinanceSimulator/Application/MarketReplayKernel.cpp
+  Exchanges/BinanceSimulator/Application/TerminationPolicy.cpp
+  Exchanges/BinanceSimulator/Application/StepKernel.cpp
   Exchanges/BinanceSimulator/Support/BinanceExchangeSkeletonSupport.cpp
   Exchanges/BinanceSimulator/BinanceExchange.cpp
   Exchanges/BinanceSimulator/Api/SpotApi.cpp

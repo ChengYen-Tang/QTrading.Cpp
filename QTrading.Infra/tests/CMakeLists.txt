@@ -1,5 +1,5 @@
 add_executable(QTrading.Infra.Tests
-  BinanceExchangeSkeletonTests.cpp
+  Exchanges/BinanceSimulator/BinanceExchangePhase1BaselineTests.cpp
 )
 
 target_include_directories(QTrading.Infra.Tests
@@ -23,8 +23,9 @@ include(GoogleTest)
 gtest_discover_tests(QTrading.Infra.Tests)
 
 string(CONCAT QTRADING_INFRA_BASELINE_SEMANTICS_GATE_FILTER
-  "BinanceExchangeSkeletonTests.ConstructorPreservesFacadeAndChannelsExist:"
-  "BinanceExchangeSkeletonTests.StepThrowsNotImplemented")
+  "BinanceExchangeFixture.SymbolsSynchronisedWithHoles:"
+  "BinanceExchangeFixture.StepSuccessPublishesMarketChannel:"
+  "BinanceExchangeFixture.ReplayExhaustedClosesAllPublicChannels")
 
 add_test(
   NAME QTrading.Infra.BaselineSemanticsGate

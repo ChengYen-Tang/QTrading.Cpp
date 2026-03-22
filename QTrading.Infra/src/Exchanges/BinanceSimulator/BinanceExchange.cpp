@@ -2,6 +2,7 @@
 
 #include <utility>
 
+#include "Exchanges/BinanceSimulator/Application/StepKernel.hpp"
 #include "Exchanges/BinanceSimulator/Bootstrap/BinanceExchangeBootstrap.hpp"
 #include "Exchanges/BinanceSimulator/State/BinanceExchangeRuntimeState.hpp"
 #include "Exchanges/BinanceSimulator/State/StepKernelState.hpp"
@@ -20,8 +21,7 @@ BinanceExchange::BinanceExchange(const std::vector<SymbolDataset>& datasets,
       step_kernel_state_(std::make_unique<State::StepKernelState>())
 {
     static_cast<void>(logger);
-    static_cast<void>(datasets);
-    step_kernel_state_->run_id = run_id;
+    initialize_step_kernel_state_(datasets, run_id);
     initialize_channels_();
     runtime_state_->last_status_snapshot =
         Bootstrap::BuildInitialStatusSnapshot(account_init, runtime_state_->simulation_config);
@@ -31,7 +31,7 @@ BinanceExchange::~BinanceExchange() = default;
 
 bool BinanceExchange::step()
 {
-    Support::ThrowNotImplemented("BinanceExchange::step");
+    return Application::StepKernel(*this).run_step();
 }
 
 const std::vector<QTrading::dto::Position>& BinanceExchange::get_all_positions() const
@@ -81,6 +81,31 @@ void BinanceExchange::initialize_channels_()
         8, QTrading::Utils::Queue::OverflowPolicy::DropOldest);
     position_channel = QTrading::Utils::Queue::ChannelFactory::CreateUnboundedChannel<std::vector<QTrading::dto::Position>>();
     order_channel = QTrading::Utils::Queue::ChannelFactory::CreateUnboundedChannel<std::vector<QTrading::dto::Order>>();
+}
+
+void BinanceExchange::initialize_step_kernel_state_(const std::vector<SymbolDataset>& datasets, uint64_t run_id)
+{
+    step_kernel_state_->run_id = run_id;
+    step_kernel_state_->symbols.reserve(datasets.size());
+    step_kernel_state_->market_data.reserve(datasets.size());
+    step_kernel_state_->replay_cursor.assign(datasets.size(), 0);
+    step_kernel_state_->next_ts_by_symbol.assign(datasets.size(), 0);
+    step_kernel_state_->has_next_ts.assign(datasets.size(), 0);
+
+    for (size_t i = 0; i < datasets.size(); ++i) {
+        const auto& ds = datasets[i];
+        step_kernel_state_->symbols.push_back(ds.symbol);
+        step_kernel_state_->market_data.emplace_back(ds.symbol, ds.kline_csv);
+        if (step_kernel_state_->market_data.back().get_klines_count() > 0) {
+            const uint64_t ts = step_kernel_state_->market_data.back().get_kline(0).Timestamp;
+            step_kernel_state_->next_ts_by_symbol[i] = ts;
+            step_kernel_state_->has_next_ts[i] = 1;
+            step_kernel_state_->next_ts_heap.push(State::StepKernelState::HeapItem{ ts, i });
+        }
+    }
+
+    step_kernel_state_->symbols_shared =
+        std::make_shared<const std::vector<std::string>>(step_kernel_state_->symbols);
 }
 
 } // namespace QTrading::Infra::Exchanges::BinanceSim
