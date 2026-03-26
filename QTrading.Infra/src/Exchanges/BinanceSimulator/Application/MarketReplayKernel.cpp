@@ -83,6 +83,64 @@ MarketReplayStepFrame MarketReplayKernel::Next(State::StepKernelState& state)
             }
         }
 
+        if (i < state.has_next_mark_ts.size() && state.has_next_mark_ts[i]) {
+            const int32_t data_id = state.mark_data_id_by_symbol[i];
+            if (data_id < 0 || static_cast<size_t>(data_id) >= state.mark_data_pool.size()) {
+                state.has_next_mark_ts[i] = 0;
+            }
+            else {
+                auto& mark_data = state.mark_data_pool[static_cast<size_t>(data_id)];
+                size_t cursor = state.mark_cursor_by_symbol[i];
+                const size_t total = mark_data.get_klines_count();
+                while (cursor < total && mark_data.get_kline(cursor).Timestamp < ts) {
+                    ++cursor;
+                }
+                if (cursor < total && mark_data.get_kline(cursor).Timestamp == ts) {
+                    const auto& kline = mark_data.get_kline(cursor);
+                    dto->mark_klines_by_id[i] = QTrading::Dto::Market::Binance::ReferenceKlineDto::Point(
+                        kline.Timestamp,
+                        kline.ClosePrice);
+                    ++cursor;
+                }
+                state.mark_cursor_by_symbol[i] = cursor;
+                if (cursor < total) {
+                    state.next_mark_ts_by_symbol[i] = mark_data.get_kline(cursor).Timestamp;
+                }
+                else {
+                    state.has_next_mark_ts[i] = 0;
+                }
+            }
+        }
+
+        if (i < state.has_next_index_ts.size() && state.has_next_index_ts[i]) {
+            const int32_t data_id = state.index_data_id_by_symbol[i];
+            if (data_id < 0 || static_cast<size_t>(data_id) >= state.index_data_pool.size()) {
+                state.has_next_index_ts[i] = 0;
+            }
+            else {
+                auto& index_data = state.index_data_pool[static_cast<size_t>(data_id)];
+                size_t cursor = state.index_cursor_by_symbol[i];
+                const size_t total = index_data.get_klines_count();
+                while (cursor < total && index_data.get_kline(cursor).Timestamp < ts) {
+                    ++cursor;
+                }
+                if (cursor < total && index_data.get_kline(cursor).Timestamp == ts) {
+                    const auto& kline = index_data.get_kline(cursor);
+                    dto->index_klines_by_id[i] = QTrading::Dto::Market::Binance::ReferenceKlineDto::Point(
+                        kline.Timestamp,
+                        kline.ClosePrice);
+                    ++cursor;
+                }
+                state.index_cursor_by_symbol[i] = cursor;
+                if (cursor < total) {
+                    state.next_index_ts_by_symbol[i] = index_data.get_kline(cursor).Timestamp;
+                }
+                else {
+                    state.has_next_index_ts[i] = 0;
+                }
+            }
+        }
+
         if (i >= state.has_next_funding_ts.size() || !state.has_next_funding_ts[i]) {
             continue;
         }

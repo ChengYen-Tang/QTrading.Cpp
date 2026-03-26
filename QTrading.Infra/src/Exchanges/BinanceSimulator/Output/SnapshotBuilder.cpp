@@ -1,6 +1,8 @@
 #include "Exchanges/BinanceSimulator/Output/SnapshotBuilder.hpp"
 
 #include <algorithm>
+#include <cmath>
+#include <limits>
 
 #include "Exchanges/BinanceSimulator/BinanceExchange.hpp"
 #include "Exchanges/BinanceSimulator/State/BinanceExchangeRuntimeState.hpp"
@@ -9,6 +11,7 @@
 
 namespace QTrading::Infra::Exchanges::BinanceSim::Output {
 namespace {
+constexpr uint64_t kUnsetSnapshotTimestamp = std::numeric_limits<uint64_t>::max();
 
 double compute_spot_inventory_value(
     const State::BinanceExchangeRuntimeState& runtime_state,
@@ -90,6 +93,7 @@ void SnapshotBuilder::Fill(const BinanceExchange& exchange, Contracts::StatusSna
         return;
     }
     out.prices.reserve(snapshot_state.symbols_shared->size());
+    const double basis_warning_bps = std::max(0.0, runtime_state.simulation_config.basis_warning_bps);
     for (size_t i = 0; i < snapshot_state.symbols_shared->size(); ++i) {
         Contracts::StatusPriceSnapshot price{};
         price.symbol = (*snapshot_state.symbols_shared)[i];
@@ -100,6 +104,43 @@ void SnapshotBuilder::Fill(const BinanceExchange& exchange, Contracts::StatusSna
             price.has_trade_price = true;
             price.price = price.trade_price;
             price.has_price = true;
+        }
+        if (i < snapshot_state.has_last_mark_price_by_symbol.size() &&
+            snapshot_state.has_last_mark_price_by_symbol[i] != 0 &&
+            i < snapshot_state.last_mark_price_by_symbol.size()) {
+            price.mark_price = snapshot_state.last_mark_price_by_symbol[i];
+            price.has_mark_price = true;
+            if (i < snapshot_state.last_mark_price_source_by_symbol.size()) {
+                price.mark_price_source = snapshot_state.last_mark_price_source_by_symbol[i];
+            }
+        }
+        if (i < snapshot_state.has_last_index_price_by_symbol.size() &&
+            snapshot_state.has_last_index_price_by_symbol[i] != 0 &&
+            i < snapshot_state.last_index_price_by_symbol.size()) {
+            price.index_price = snapshot_state.last_index_price_by_symbol[i];
+            price.has_index_price = true;
+            if (i < snapshot_state.last_index_price_source_by_symbol.size()) {
+                price.index_price_source = snapshot_state.last_index_price_source_by_symbol[i];
+            }
+        }
+        const bool has_mark_ts = i < snapshot_state.last_mark_price_ts_by_symbol.size() &&
+            snapshot_state.last_mark_price_ts_by_symbol[i] != kUnsetSnapshotTimestamp;
+        const bool has_index_ts = i < snapshot_state.last_index_price_ts_by_symbol.size() &&
+            snapshot_state.last_index_price_ts_by_symbol[i] != kUnsetSnapshotTimestamp;
+        const bool mark_index_ts_coherent = has_mark_ts &&
+            has_index_ts &&
+            snapshot_state.last_mark_price_ts_by_symbol[i] == snapshot_state.last_index_price_ts_by_symbol[i] &&
+            snapshot_state.last_mark_price_ts_by_symbol[i] == snapshot_state.ts_exchange;
+
+        if (basis_warning_bps > 0.0 &&
+            price.has_mark_price &&
+            price.has_index_price &&
+            mark_index_ts_coherent &&
+            std::abs(price.index_price) > 1e-12) {
+            const double basis_bps = std::abs((price.mark_price - price.index_price) / price.index_price) * 10000.0;
+            if (basis_bps >= basis_warning_bps) {
+                ++out.basis_warning_symbols;
+            }
         }
         out.prices.emplace_back(std::move(price));
     }

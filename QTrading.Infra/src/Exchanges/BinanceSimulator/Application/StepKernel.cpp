@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -15,6 +16,7 @@
 #include "Exchanges/BinanceSimulator/Domain/FundingApplyOrchestration.hpp"
 #include "Exchanges/BinanceSimulator/Domain/FundingEligibilityDecision.hpp"
 #include "Exchanges/BinanceSimulator/Domain/MatchingEngine.hpp"
+#include "Exchanges/BinanceSimulator/Domain/ReferencePriceResolver.hpp"
 #include "Exchanges/BinanceSimulator/Output/ChannelPublisher.hpp"
 #include "Exchanges/BinanceSimulator/Output/StepObservableContext.hpp"
 #include "Exchanges/BinanceSimulator/State/BinanceExchangeRuntimeState.hpp"
@@ -83,6 +85,32 @@ void update_snapshot_state(
         snapshot_state.last_trade_price_by_symbol[i] = payload.trade_klines_by_id[i]->ClosePrice;
         snapshot_state.has_last_trade_price_by_symbol[i] = 1;
     }
+    const size_t mark_count = std::min(
+        payload.mark_klines_by_id.size(),
+        snapshot_state.last_mark_price_by_symbol.size());
+    for (size_t i = 0; i < mark_count; ++i) {
+        if (!payload.mark_klines_by_id[i].has_value()) {
+            continue;
+        }
+        snapshot_state.last_mark_price_by_symbol[i] = payload.mark_klines_by_id[i]->ClosePrice;
+        snapshot_state.has_last_mark_price_by_symbol[i] = 1;
+        snapshot_state.last_mark_price_ts_by_symbol[i] = payload.Timestamp;
+        snapshot_state.last_mark_price_source_by_symbol[i] =
+            static_cast<int32_t>(Contracts::ReferencePriceSource::Raw);
+    }
+    const size_t index_count = std::min(
+        payload.index_klines_by_id.size(),
+        snapshot_state.last_index_price_by_symbol.size());
+    for (size_t i = 0; i < index_count; ++i) {
+        if (!payload.index_klines_by_id[i].has_value()) {
+            continue;
+        }
+        snapshot_state.last_index_price_by_symbol[i] = payload.index_klines_by_id[i]->ClosePrice;
+        snapshot_state.has_last_index_price_by_symbol[i] = 1;
+        snapshot_state.last_index_price_ts_by_symbol[i] = payload.Timestamp;
+        snapshot_state.last_index_price_source_by_symbol[i] =
+            static_cast<int32_t>(Contracts::ReferencePriceSource::Raw);
+    }
 }
 
 bool order_equal(const QTrading::dto::Order& lhs, const QTrading::dto::Order& rhs)
@@ -149,11 +177,23 @@ bool apply_funding_for_step(
             continue;
         }
         const auto& funding = *market_payload.funding_by_id[i];
+        const std::optional<QTrading::Dto::Market::Binance::ReferenceKlineDto> raw_mark =
+            i < market_payload.mark_klines_by_id.size()
+            ? market_payload.mark_klines_by_id[i]
+            : std::optional<QTrading::Dto::Market::Binance::ReferenceKlineDto>{};
+        const auto mark_resolved = Domain::ReferencePriceResolver::ResolveFundingMark(funding, raw_mark);
         const bool is_duplicate = step_state.last_applied_funding_time_by_symbol[i] == funding.FundingTime;
         const auto action = Domain::FundingEligibilityDecision::Decide(
             is_duplicate,
-            funding.MarkPrice.has_value(),
+            mark_resolved.has_mark_price,
             true);
+        step_state.last_reference_funding_resolver_diagnostic = Contracts::ReferenceFundingResolverDiagnostic{
+            action == Domain::FundingDecisionAction::Apply,
+            mark_resolved.has_mark_price,
+            funding.FundingTime,
+            funding.Rate,
+            mark_resolved.mark_price_source
+        };
         if (action == Domain::FundingDecisionAction::SkipNoMark) {
             ++step_state.funding_skipped_no_mark_total;
             continue;
@@ -164,7 +204,7 @@ bool apply_funding_for_step(
         }
 
         const std::string& symbol = step_state.symbols[i];
-        const double mark = *funding.MarkPrice;
+        const double mark = mark_resolved.mark_price;
         for (const auto& position : runtime_state.positions) {
             if (position.instrument_type != QTrading::Dto::Trading::InstrumentType::Perp ||
                 position.symbol != symbol ||
@@ -360,7 +400,12 @@ void emit_market_funding_events(
         }
         const auto& funding = *payload.funding_by_id[i];
         const std::string& symbol = (*payload.symbols)[i];
-        if (!funding.MarkPrice.has_value()) {
+        const std::optional<QTrading::Dto::Market::Binance::ReferenceKlineDto> raw_mark =
+            i < payload.mark_klines_by_id.size()
+            ? payload.mark_klines_by_id[i]
+            : std::optional<QTrading::Dto::Market::Binance::ReferenceKlineDto>{};
+        const auto mark_resolved = Domain::ReferencePriceResolver::ResolveFundingMark(funding, raw_mark);
+        if (!mark_resolved.has_mark_price) {
             QTrading::Log::FileLogger::FeatherV2::FundingEventDto skipped{};
             skipped.run_id = ctx.run_id;
             skipped.step_seq = ctx.step_seq;
@@ -371,14 +416,14 @@ void emit_market_funding_events(
             skipped.funding_time = funding.FundingTime;
             skipped.rate = funding.Rate;
             skipped.has_mark_price = false;
-            skipped.mark_price_source = 0;
+            skipped.mark_price_source = static_cast<int32_t>(mark_resolved.mark_price_source);
             skipped.skip_reason = 1;
             skipped.position_id = -1;
             (void)logger->Log(step_state.log_module_funding_event_id, skipped);
             continue;
         }
 
-        const double mark = *funding.MarkPrice;
+        const double mark = mark_resolved.mark_price;
         for (const auto& position : runtime_state.positions) {
             if (position.instrument_type != QTrading::Dto::Trading::InstrumentType::Perp ||
                 position.symbol != symbol ||
@@ -396,7 +441,7 @@ void emit_market_funding_events(
             applied.rate = funding.Rate;
             applied.has_mark_price = true;
             applied.mark_price = mark;
-            applied.mark_price_source = 1;
+            applied.mark_price_source = static_cast<int32_t>(mark_resolved.mark_price_source);
             applied.skip_reason = 0;
             applied.position_id = position.id;
             applied.is_long = position.is_long;

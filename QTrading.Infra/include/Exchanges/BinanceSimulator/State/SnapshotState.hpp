@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "Dto/Market/Binance/MultiKline.hpp"
+#include "Exchanges/BinanceSimulator/Contracts/BinanceExchangeRuntimeTypes.hpp"
 
 namespace QTrading::Infra::Exchanges::BinanceSim::State {
 
@@ -23,6 +24,14 @@ struct SnapshotState {
     /// Latest trade close price observed per symbol.
     std::vector<double> last_trade_price_by_symbol;
     std::vector<uint8_t> has_last_trade_price_by_symbol;
+    std::vector<double> last_mark_price_by_symbol;
+    std::vector<uint8_t> has_last_mark_price_by_symbol;
+    std::vector<uint64_t> last_mark_price_ts_by_symbol;
+    std::vector<int32_t> last_mark_price_source_by_symbol;
+    std::vector<double> last_index_price_by_symbol;
+    std::vector<uint8_t> has_last_index_price_by_symbol;
+    std::vector<uint64_t> last_index_price_ts_by_symbol;
+    std::vector<int32_t> last_index_price_source_by_symbol;
     /// Last full market payload, kept for future output extensions.
     std::shared_ptr<QTrading::Dto::Market::Binance::MultiKlineDto> last_market_payload;
 };

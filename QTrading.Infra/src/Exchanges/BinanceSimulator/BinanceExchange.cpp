@@ -1,5 +1,6 @@
 #include "Exchanges/BinanceSimulator/BinanceExchange.hpp"
 
+#include <limits>
 #include <utility>
 
 #include "Exchanges/BinanceSimulator/Application/StepKernel.hpp"
@@ -98,11 +99,21 @@ void BinanceExchange::initialize_step_kernel_state_(const std::vector<SymbolData
     step_kernel_state_->symbol_to_id.reserve(datasets.size());
     step_kernel_state_->market_data.reserve(datasets.size());
     step_kernel_state_->funding_data_pool.reserve(datasets.size());
+    step_kernel_state_->mark_data_pool.reserve(datasets.size());
+    step_kernel_state_->index_data_pool.reserve(datasets.size());
     step_kernel_state_->replay_cursor.assign(datasets.size(), 0);
     step_kernel_state_->funding_data_id_by_symbol.assign(datasets.size(), -1);
+    step_kernel_state_->mark_data_id_by_symbol.assign(datasets.size(), -1);
+    step_kernel_state_->index_data_id_by_symbol.assign(datasets.size(), -1);
     step_kernel_state_->funding_cursor_by_symbol.assign(datasets.size(), 0);
+    step_kernel_state_->mark_cursor_by_symbol.assign(datasets.size(), 0);
+    step_kernel_state_->index_cursor_by_symbol.assign(datasets.size(), 0);
     step_kernel_state_->next_funding_ts_by_symbol.assign(datasets.size(), 0);
+    step_kernel_state_->next_mark_ts_by_symbol.assign(datasets.size(), 0);
+    step_kernel_state_->next_index_ts_by_symbol.assign(datasets.size(), 0);
     step_kernel_state_->has_next_funding_ts.assign(datasets.size(), 0);
+    step_kernel_state_->has_next_mark_ts.assign(datasets.size(), 0);
+    step_kernel_state_->has_next_index_ts.assign(datasets.size(), 0);
     step_kernel_state_->last_applied_funding_time_by_symbol.assign(datasets.size(), 0);
     step_kernel_state_->next_ts_by_symbol.assign(datasets.size(), 0);
     step_kernel_state_->has_next_ts.assign(datasets.size(), 0);
@@ -122,6 +133,26 @@ void BinanceExchange::initialize_step_kernel_state_(const std::vector<SymbolData
                 step_kernel_state_->has_next_funding_ts[i] = 1;
             }
         }
+        if (ds.mark_kline_csv.has_value() && !ds.mark_kline_csv->empty()) {
+            step_kernel_state_->mark_data_id_by_symbol[i] =
+                static_cast<int32_t>(step_kernel_state_->mark_data_pool.size());
+            step_kernel_state_->mark_data_pool.emplace_back(ds.symbol, *ds.mark_kline_csv);
+            const auto& mark_data = step_kernel_state_->mark_data_pool.back();
+            if (mark_data.get_klines_count() > 0) {
+                step_kernel_state_->next_mark_ts_by_symbol[i] = mark_data.get_kline(0).Timestamp;
+                step_kernel_state_->has_next_mark_ts[i] = 1;
+            }
+        }
+        if (ds.index_kline_csv.has_value() && !ds.index_kline_csv->empty()) {
+            step_kernel_state_->index_data_id_by_symbol[i] =
+                static_cast<int32_t>(step_kernel_state_->index_data_pool.size());
+            step_kernel_state_->index_data_pool.emplace_back(ds.symbol, *ds.index_kline_csv);
+            const auto& index_data = step_kernel_state_->index_data_pool.back();
+            if (index_data.get_klines_count() > 0) {
+                step_kernel_state_->next_index_ts_by_symbol[i] = index_data.get_kline(0).Timestamp;
+                step_kernel_state_->has_next_index_ts[i] = 1;
+            }
+        }
         if (step_kernel_state_->market_data.back().get_klines_count() > 0) {
             const uint64_t ts = step_kernel_state_->market_data.back().get_kline(0).Timestamp;
             step_kernel_state_->next_ts_by_symbol[i] = ts;
@@ -135,6 +166,22 @@ void BinanceExchange::initialize_step_kernel_state_(const std::vector<SymbolData
     snapshot_state_->symbols_shared = step_kernel_state_->symbols_shared;
     snapshot_state_->last_trade_price_by_symbol.assign(step_kernel_state_->symbols.size(), 0.0);
     snapshot_state_->has_last_trade_price_by_symbol.assign(step_kernel_state_->symbols.size(), 0);
+    snapshot_state_->last_mark_price_by_symbol.assign(step_kernel_state_->symbols.size(), 0.0);
+    snapshot_state_->has_last_mark_price_by_symbol.assign(step_kernel_state_->symbols.size(), 0);
+    snapshot_state_->last_mark_price_ts_by_symbol.assign(
+        step_kernel_state_->symbols.size(),
+        std::numeric_limits<uint64_t>::max());
+    snapshot_state_->last_mark_price_source_by_symbol.assign(
+        step_kernel_state_->symbols.size(),
+        static_cast<int32_t>(Contracts::ReferencePriceSource::None));
+    snapshot_state_->last_index_price_by_symbol.assign(step_kernel_state_->symbols.size(), 0.0);
+    snapshot_state_->has_last_index_price_by_symbol.assign(step_kernel_state_->symbols.size(), 0);
+    snapshot_state_->last_index_price_ts_by_symbol.assign(
+        step_kernel_state_->symbols.size(),
+        std::numeric_limits<uint64_t>::max());
+    snapshot_state_->last_index_price_source_by_symbol.assign(
+        step_kernel_state_->symbols.size(),
+        static_cast<int32_t>(Contracts::ReferencePriceSource::None));
 }
 
 } // namespace QTrading::Infra::Exchanges::BinanceSim

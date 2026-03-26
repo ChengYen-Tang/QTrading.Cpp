@@ -779,6 +779,177 @@ TEST_F(BinanceExchangeFixture, FundingTimestampParticipatesInStepTimelineInCurre
     EXPECT_EQ(step3->get()->Timestamp, 120000u);
 }
 
+TEST_F(BinanceExchangeFixture, FundingUsesRawMarkDatasetWhenFundingMarkMissingInCurrentKernel)
+{
+    WriteCsv("btc.csv", {
+        {      0, 100,100,100,100,1000, 30000,100,1,0,0 },
+        { 120000, 120,120,120,120,1000,150000,100,1,0,0 }
+    });
+    WriteCsv("btc_mark.csv", {
+        {  60000, 110,110,110,110,1000, 90000,100,1,0,0 }
+    });
+    WriteFundingCsv("btc_funding.csv", {
+        { 60000, 0.001, std::nullopt }
+    });
+
+    Account::AccountInitConfig init{};
+    init.spot_initial_cash = 0.0;
+    init.perp_initial_wallet = 1000.0;
+    BinanceExchange exchange(
+        { { "BTCUSDT",
+            (tmp_dir / "btc.csv").string(),
+            std::optional<std::string>((tmp_dir / "btc_funding.csv").string()),
+            std::optional<std::string>((tmp_dir / "btc_mark.csv").string()) } },
+        nullptr,
+        init);
+
+    ASSERT_TRUE(exchange.perp.place_order("BTCUSDT", 1.0, QTrading::Dto::Trading::OrderSide::Buy));
+    auto market_channel = exchange.get_market_channel();
+    ASSERT_TRUE(exchange.step());
+    (void)market_channel->Receive();
+    BinanceExchange::StatusSnapshot snapshot{};
+    exchange.FillStatusSnapshot(snapshot);
+    const double wallet_after_entry = snapshot.wallet_balance;
+
+    ASSERT_TRUE(exchange.step());
+    auto funding_step = market_channel->Receive();
+    ASSERT_TRUE(funding_step.has_value());
+    EXPECT_EQ(funding_step->get()->Timestamp, 60000u);
+    ASSERT_EQ(funding_step->get()->mark_klines_by_id.size(), 1u);
+    ASSERT_TRUE(funding_step->get()->mark_klines_by_id[0].has_value());
+
+    exchange.FillStatusSnapshot(snapshot);
+    EXPECT_NEAR(snapshot.wallet_balance - wallet_after_entry, -0.11, 1e-6);
+    EXPECT_EQ(snapshot.funding_skipped_no_mark, 0u);
+}
+
+TEST_F(BinanceExchangeFixture, FundingMarkMissingWithoutExactRawMarkStillSkipsInCurrentKernel)
+{
+    WriteCsv("btc.csv", {
+        {      0, 100,100,100,100,1000, 30000,100,1,0,0 },
+        { 120000, 120,120,120,120,1000,150000,100,1,0,0 }
+    });
+    WriteCsv("btc_mark.csv", {
+        {      0, 100,100,100,100,1000, 30000,100,1,0,0 },
+        { 120000, 120,120,120,120,1000,150000,100,1,0,0 }
+    });
+    WriteFundingCsv("btc_funding.csv", {
+        { 60000, 0.001, std::nullopt }
+    });
+
+    Account::AccountInitConfig init{};
+    init.spot_initial_cash = 0.0;
+    init.perp_initial_wallet = 1000.0;
+    BinanceExchange exchange(
+        { { "BTCUSDT",
+            (tmp_dir / "btc.csv").string(),
+            std::optional<std::string>((tmp_dir / "btc_funding.csv").string()),
+            std::optional<std::string>((tmp_dir / "btc_mark.csv").string()) } },
+        nullptr,
+        init);
+
+    ASSERT_TRUE(exchange.perp.place_order("BTCUSDT", 1.0, QTrading::Dto::Trading::OrderSide::Buy));
+    auto market_channel = exchange.get_market_channel();
+    ASSERT_TRUE(exchange.step());
+    (void)market_channel->Receive();
+    BinanceExchange::StatusSnapshot snapshot{};
+    exchange.FillStatusSnapshot(snapshot);
+    const double wallet_after_entry = snapshot.wallet_balance;
+
+    ASSERT_TRUE(exchange.step());
+    auto funding_step = market_channel->Receive();
+    ASSERT_TRUE(funding_step.has_value());
+    EXPECT_EQ(funding_step->get()->Timestamp, 60000u);
+    ASSERT_EQ(funding_step->get()->mark_klines_by_id.size(), 1u);
+    EXPECT_FALSE(funding_step->get()->mark_klines_by_id[0].has_value());
+
+    exchange.FillStatusSnapshot(snapshot);
+    EXPECT_NEAR(snapshot.wallet_balance - wallet_after_entry, 0.0, 1e-9);
+    EXPECT_GE(snapshot.funding_skipped_no_mark, 1u);
+}
+
+TEST_F(BinanceExchangeFixture, StatusSnapshotExposesRawMarkIndexAndBasisWarningInCurrentKernel)
+{
+    WriteCsv("btc.csv", {
+        {      0, 100,100,100,100,1000, 30000,100,1,0,0 }
+    });
+    WriteCsv("btc_mark.csv", {
+        {      0, 123,123,123,123,1000, 30000,100,1,0,0 }
+    });
+    WriteCsv("btc_index.csv", {
+        {      0, 121,121,121,121,1000, 30000,100,1,0,0 }
+    });
+
+    BinanceExchange exchange(
+        { { "BTCUSDT",
+            (tmp_dir / "btc.csv").string(),
+            std::nullopt,
+            std::optional<std::string>((tmp_dir / "btc_mark.csv").string()),
+            std::optional<std::string>((tmp_dir / "btc_index.csv").string()) } },
+        nullptr,
+        QTrading::Infra::Exchanges::BinanceSim::Support::BuildInitConfig(1000.0, 0));
+
+    auto cfg = exchange.simulation_config();
+    cfg.basis_warning_bps = 100.0;
+    exchange.apply_simulation_config(cfg);
+
+    ASSERT_TRUE(exchange.step());
+    (void)exchange.get_market_channel()->Receive();
+
+    BinanceExchange::StatusSnapshot snapshot{};
+    exchange.FillStatusSnapshot(snapshot);
+    ASSERT_EQ(snapshot.prices.size(), 1u);
+    const auto& price = snapshot.prices[0];
+    EXPECT_TRUE(price.has_mark_price);
+    EXPECT_NEAR(price.mark_price, 123.0, 1e-12);
+    EXPECT_EQ(price.mark_price_source,
+        static_cast<int32_t>(QTrading::Infra::Exchanges::BinanceSim::Contracts::ReferencePriceSource::Raw));
+    EXPECT_TRUE(price.has_index_price);
+    EXPECT_NEAR(price.index_price, 121.0, 1e-12);
+    EXPECT_EQ(price.index_price_source,
+        static_cast<int32_t>(QTrading::Infra::Exchanges::BinanceSim::Contracts::ReferencePriceSource::Raw));
+    EXPECT_EQ(snapshot.basis_warning_symbols, 1u);
+}
+
+TEST_F(BinanceExchangeFixture, StatusSnapshotSuppressesBasisWarningWhenMarkIndexTimestampsAreIncoherentInCurrentKernel)
+{
+    WriteCsv("btc.csv", {
+        {      0, 100,100,100,100,1000, 30000,100,1,0,0 },
+        {  60000, 101,101,101,101,1000, 90000,100,1,0,0 }
+    });
+    WriteCsv("btc_mark.csv", {
+        {      0, 123,123,123,123,1000, 30000,100,1,0,0 }
+    });
+    WriteCsv("btc_index.csv", {
+        {  60000, 121,121,121,121,1000, 90000,100,1,0,0 }
+    });
+
+    BinanceExchange exchange(
+        { { "BTCUSDT",
+            (tmp_dir / "btc.csv").string(),
+            std::nullopt,
+            std::optional<std::string>((tmp_dir / "btc_mark.csv").string()),
+            std::optional<std::string>((tmp_dir / "btc_index.csv").string()) } },
+        nullptr,
+        QTrading::Infra::Exchanges::BinanceSim::Support::BuildInitConfig(1000.0, 0));
+
+    auto cfg = exchange.simulation_config();
+    cfg.basis_warning_bps = 100.0;
+    exchange.apply_simulation_config(cfg);
+
+    ASSERT_TRUE(exchange.step());
+    (void)exchange.get_market_channel()->Receive();
+    ASSERT_TRUE(exchange.step());
+    (void)exchange.get_market_channel()->Receive();
+
+    BinanceExchange::StatusSnapshot snapshot{};
+    exchange.FillStatusSnapshot(snapshot);
+    ASSERT_EQ(snapshot.prices.size(), 1u);
+    EXPECT_TRUE(snapshot.prices[0].has_mark_price);
+    EXPECT_TRUE(snapshot.prices[0].has_index_price);
+    EXPECT_EQ(snapshot.basis_warning_symbols, 0u);
+}
+
 TEST_F(BinanceExchangeLogFixture, ReducedObservabilityStatusPrecedesEventRowsInCurrentKernel)
 {
     WriteCsv("btc.csv", {
@@ -882,6 +1053,66 @@ TEST_F(BinanceExchangeLogFixture, ReducedObservabilityFundingOnlyStepCarriesStep
     EXPECT_EQ(funding_payload->step_seq, 2u);
     EXPECT_EQ(funding_payload->ts_local, 60000u);
     EXPECT_EQ(funding_payload->symbol, "BTCUSDT");
+}
+
+TEST_F(BinanceExchangeLogFixture, FundingEventUsesResolvedRawMarkFallbackConsistentlyInCurrentKernel)
+{
+    WriteCsv("btc.csv", {
+        {      0, 100,100,100,100,1000, 30000,100,1,0,0 },
+        { 120000, 120,120,120,120,1000,150000,100,1,0,0 }
+    });
+    WriteCsv("btc_mark.csv", {
+        {  60000, 110,110,110,110,1000, 90000,100,1,0,0 }
+    });
+    WriteFundingCsv("btc_funding.csv", {
+        { 60000, 0.001, std::nullopt }
+    });
+
+    Account::AccountInitConfig init{};
+    init.spot_initial_cash = 0.0;
+    init.perp_initial_wallet = 1000.0;
+    BinanceExchange exchange(
+        { { "BTCUSDT",
+            (tmp_dir / "btc.csv").string(),
+            std::optional<std::string>((tmp_dir / "btc_funding.csv").string()),
+            std::optional<std::string>((tmp_dir / "btc_mark.csv").string()) } },
+        logger,
+        init,
+        123u);
+
+    ASSERT_TRUE(exchange.perp.place_order("BTCUSDT", 1.0, QTrading::Dto::Trading::OrderSide::Buy));
+    ASSERT_TRUE(exchange.step());
+    (void)exchange.get_market_channel()->Receive();
+    ASSERT_TRUE(exchange.step());
+    auto funding_step = exchange.get_market_channel()->Receive();
+    ASSERT_TRUE(funding_step.has_value());
+    EXPECT_EQ(funding_step->get()->Timestamp, 60000u);
+    StopLogger();
+
+    const auto funding_rows = FilterRowsByModule(QTrading::Log::LogModule::FundingEvent);
+    ASSERT_FALSE(funding_rows.empty());
+
+    const QTrading::Log::FileLogger::FeatherV2::FundingEventDto* matched_payload = nullptr;
+    for (const auto& row_view : funding_rows) {
+        ASSERT_NE(row_view.row, nullptr);
+        if (row_view.row->ts != 60000u) {
+            continue;
+        }
+        const auto* payload = RowPayloadCast<QTrading::Log::FileLogger::FeatherV2::FundingEventDto>(row_view.row);
+        if (payload == nullptr || payload->symbol != "BTCUSDT") {
+            continue;
+        }
+        matched_payload = payload;
+        break;
+    }
+
+    ASSERT_NE(matched_payload, nullptr);
+    EXPECT_TRUE(matched_payload->has_mark_price);
+    EXPECT_EQ(matched_payload->skip_reason, 0);
+    EXPECT_NEAR(matched_payload->mark_price, 110.0, 1e-12);
+    EXPECT_EQ(
+        matched_payload->mark_price_source,
+        static_cast<int32_t>(QTrading::Infra::Exchanges::BinanceSim::Contracts::ReferencePriceSource::Raw));
 }
 
 TEST_F(BinanceExchangeLogFixture, ReducedObservabilityStatusVersionGateDoesNotSuppressMarketEventsInCurrentKernel)
