@@ -97,6 +97,7 @@ void BinanceExchange::initialize_step_kernel_state_(const std::vector<SymbolData
     // One-time replay state construction; no per-step allocations here.
     step_kernel_state_->run_id = run_id;
     step_kernel_state_->symbols.reserve(datasets.size());
+    step_kernel_state_->symbol_to_id.reserve(datasets.size());
     step_kernel_state_->market_data.reserve(datasets.size());
     step_kernel_state_->replay_cursor.assign(datasets.size(), 0);
     step_kernel_state_->next_ts_by_symbol.assign(datasets.size(), 0);
@@ -105,6 +106,7 @@ void BinanceExchange::initialize_step_kernel_state_(const std::vector<SymbolData
     for (size_t i = 0; i < datasets.size(); ++i) {
         const auto& ds = datasets[i];
         step_kernel_state_->symbols.push_back(ds.symbol);
+        step_kernel_state_->symbol_to_id.emplace(ds.symbol, i);
         step_kernel_state_->market_data.emplace_back(ds.symbol, ds.kline_csv);
         if (step_kernel_state_->market_data.back().get_klines_count() > 0) {
             const uint64_t ts = step_kernel_state_->market_data.back().get_kline(0).Timestamp;

@@ -2,11 +2,14 @@
 
 #include <algorithm>
 #include <utility>
+#include <vector>
 
 #include "Exchanges/BinanceSimulator/Application/MarketReplayKernel.hpp"
 #include "Exchanges/BinanceSimulator/Application/OrderCommandKernel.hpp"
 #include "Exchanges/BinanceSimulator/Application/TerminationPolicy.hpp"
 #include "Exchanges/BinanceSimulator/BinanceExchange.hpp"
+#include "Exchanges/BinanceSimulator/Domain/FillSettlementEngine.hpp"
+#include "Exchanges/BinanceSimulator/Domain/MatchingEngine.hpp"
 #include "Exchanges/BinanceSimulator/Output/ChannelPublisher.hpp"
 #include "Exchanges/BinanceSimulator/Output/StepObservableContext.hpp"
 #include "Exchanges/BinanceSimulator/State/BinanceExchangeRuntimeState.hpp"
@@ -71,6 +74,98 @@ void update_snapshot_state(
     }
 }
 
+bool order_equal(const QTrading::dto::Order& lhs, const QTrading::dto::Order& rhs)
+{
+    return lhs.id == rhs.id &&
+        lhs.symbol == rhs.symbol &&
+        lhs.quantity == rhs.quantity &&
+        lhs.price == rhs.price &&
+        lhs.side == rhs.side &&
+        lhs.position_side == rhs.position_side &&
+        lhs.reduce_only == rhs.reduce_only &&
+        lhs.closing_position_id == rhs.closing_position_id &&
+        lhs.instrument_type == rhs.instrument_type &&
+        lhs.client_order_id == rhs.client_order_id &&
+        lhs.stp_mode == rhs.stp_mode &&
+        lhs.close_position == rhs.close_position &&
+        lhs.quote_order_qty == rhs.quote_order_qty &&
+        lhs.one_way_reverse == rhs.one_way_reverse;
+}
+
+bool position_equal(const QTrading::dto::Position& lhs, const QTrading::dto::Position& rhs)
+{
+    return lhs.id == rhs.id &&
+        lhs.order_id == rhs.order_id &&
+        lhs.symbol == rhs.symbol &&
+        lhs.quantity == rhs.quantity &&
+        lhs.entry_price == rhs.entry_price &&
+        lhs.is_long == rhs.is_long &&
+        lhs.unrealized_pnl == rhs.unrealized_pnl &&
+        lhs.notional == rhs.notional &&
+        lhs.initial_margin == rhs.initial_margin &&
+        lhs.maintenance_margin == rhs.maintenance_margin &&
+        lhs.fee == rhs.fee &&
+        lhs.leverage == rhs.leverage &&
+        lhs.fee_rate == rhs.fee_rate &&
+        lhs.instrument_type == rhs.instrument_type;
+}
+
+template <typename T, typename TEqual>
+bool vector_equal(const std::vector<T>& lhs, const std::vector<T>& rhs, TEqual equal)
+{
+    if (lhs.size() != rhs.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < lhs.size(); ++i) {
+        if (!equal(lhs[i], rhs[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void publish_position_order_channels(
+    BinanceExchange& exchange,
+    const State::BinanceExchangeRuntimeState& runtime_state,
+    State::StepKernelState& step_state)
+{
+    if (step_state.account_state_version == step_state.last_published_account_state_version) {
+        return;
+    }
+
+    const auto& orders = runtime_state.orders;
+    if (!step_state.has_published_orders) {
+        if (!orders.empty() && exchange.get_order_channel()) {
+            exchange.get_order_channel()->Send(orders);
+            step_state.last_published_orders = orders;
+            step_state.has_published_orders = true;
+        }
+    }
+    else if (!vector_equal(orders, step_state.last_published_orders, order_equal)) {
+        if (exchange.get_order_channel()) {
+            exchange.get_order_channel()->Send(orders);
+        }
+        step_state.last_published_orders = orders;
+    }
+
+    const auto& positions = runtime_state.positions;
+    if (!step_state.has_published_positions) {
+        if (!positions.empty() && exchange.get_position_channel()) {
+            exchange.get_position_channel()->Send(positions);
+            step_state.last_published_positions = positions;
+            step_state.has_published_positions = true;
+        }
+    }
+    else if (!vector_equal(positions, step_state.last_published_positions, position_equal)) {
+        if (exchange.get_position_channel()) {
+            exchange.get_position_channel()->Send(positions);
+        }
+        step_state.last_published_positions = positions;
+    }
+
+    step_state.last_published_account_state_version = step_state.account_state_version;
+}
+
 } // namespace
 
 StepKernel::StepKernel(BinanceExchange& exchange) noexcept
@@ -100,14 +195,27 @@ bool StepKernel::run_step() const
     ++step_state.step_seq;
     OrderCommandKernel(exchange_).FlushDeferredForStep(step_state.step_seq);
     runtime_state.last_status_snapshot.ts_exchange = frame.ts_exchange;
+    if (frame.market_payload) {
+        auto& fills = step_state.match_fills_scratch;
+        fills.reserve(runtime_state.orders.size());
+        Domain::MatchingEngine::RunStep(runtime_state, step_state, *frame.market_payload, fills);
+        if (!fills.empty()) {
+            ++step_state.account_state_version;
+        }
+        Domain::FillSettlementEngine::Apply(runtime_state, exchange_.account_state(), fills);
+    }
 
     Output::StepObservableContext observable_ctx{};
     observable_ctx.ts_exchange = frame.ts_exchange;
     observable_ctx.step_seq = step_state.step_seq;
     observable_ctx.replay_exhausted = false;
     observable_ctx.market_payload = std::move(frame.market_payload);
+    observable_ctx.position_snapshot = &runtime_state.positions;
+    observable_ctx.order_snapshot = &runtime_state.orders;
+    observable_ctx.account_state_version = step_state.account_state_version;
     update_snapshot_state(snapshot_state, step_state, observable_ctx);
     Output::ChannelPublisher::PublishStep(exchange_, observable_ctx);
+    publish_position_order_channels(exchange_, runtime_state, step_state);
     step_state.channels_closed = false;
     return true;
 }

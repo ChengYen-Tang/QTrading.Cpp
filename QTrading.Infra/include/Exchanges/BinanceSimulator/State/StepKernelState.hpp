@@ -5,11 +5,15 @@
 #include <optional>
 #include <queue>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "Data/Binance/MarketData.hpp"
+#include "Dto/Order.hpp"
+#include "Dto/Position.hpp"
 #include "Exchanges/BinanceSimulator/Contracts/BinanceExchangeDiagnostics.hpp"
 #include "Exchanges/BinanceSimulator/Contracts/BinanceExchangeRuntimeTypes.hpp"
+#include "Exchanges/BinanceSimulator/Domain/MatchingEngine.hpp"
 #include "Exchanges/BinanceSimulator/State/StepKernelHeapTypes.hpp"
 
 namespace QTrading::Infra::Exchanges::BinanceSim::State {
@@ -32,6 +36,7 @@ struct StepKernelState {
 
     /// Fixed replay symbol universe and associated market data.
     std::vector<std::string> symbols;
+    std::unordered_map<std::string, size_t> symbol_to_id;
     std::shared_ptr<const std::vector<std::string>> symbols_shared;
     std::vector<MarketData> market_data;
     std::vector<size_t> replay_cursor;
@@ -40,6 +45,17 @@ struct StepKernelState {
     std::priority_queue<StepKernelHeapItem, std::vector<StepKernelHeapItem>, StepKernelHeapItemGreater> next_ts_heap;
     uint64_t step_seq{ 0 };
     bool channels_closed{ false };
+    uint64_t account_state_version{ 0 };
+    uint64_t last_published_account_state_version{ 0 };
+    std::vector<QTrading::dto::Position> last_published_positions;
+    std::vector<QTrading::dto::Order> last_published_orders;
+    bool has_published_positions{ false };
+    bool has_published_orders{ false };
+    std::vector<Domain::MatchFill> match_fills_scratch;
+    std::vector<double> matching_liquidity_scratch;
+    std::vector<uint8_t> matching_has_liquidity_scratch;
+    std::vector<double> matching_reducible_long_scratch;
+    std::vector<double> matching_reducible_short_scratch;
 };
 
 } // namespace QTrading::Infra::Exchanges::BinanceSim::State

@@ -7,6 +7,39 @@
 #include "Exchanges/BinanceSimulator/State/SnapshotState.hpp"
 
 namespace QTrading::Infra::Exchanges::BinanceSim::Output {
+namespace {
+
+double compute_spot_inventory_value(
+    const State::BinanceExchangeRuntimeState& runtime_state,
+    const State::SnapshotState& snapshot_state)
+{
+    if (!snapshot_state.symbols_shared) {
+        return 0.0;
+    }
+
+    double total = 0.0;
+    for (const auto& position : runtime_state.positions) {
+        if (position.instrument_type != QTrading::Dto::Trading::InstrumentType::Spot || !position.is_long) {
+            continue;
+        }
+        double price = position.entry_price;
+        for (size_t i = 0; i < snapshot_state.symbols_shared->size(); ++i) {
+            if ((*snapshot_state.symbols_shared)[i] != position.symbol) {
+                continue;
+            }
+            if (i < snapshot_state.has_last_trade_price_by_symbol.size() &&
+                i < snapshot_state.last_trade_price_by_symbol.size() &&
+                snapshot_state.has_last_trade_price_by_symbol[i] != 0) {
+                price = snapshot_state.last_trade_price_by_symbol[i];
+            }
+            break;
+        }
+        total += position.quantity * price;
+    }
+    return total;
+}
+
+} // namespace
 
 void SnapshotBuilder::Fill(const BinanceExchange& exchange, Contracts::StatusSnapshot& out)
 {
@@ -20,7 +53,7 @@ void SnapshotBuilder::Fill(const BinanceExchange& exchange, Contracts::StatusSna
     const double total_cash_balance = exchange.account_state().get_total_cash_balance();
 
     const double uncertainty_bps = std::max(0.0, runtime_state.simulation_config.uncertainty_band_bps);
-    const double spot_inventory_value = 0.0;
+    const double spot_inventory_value = compute_spot_inventory_value(runtime_state, snapshot_state);
     const double spot_ledger_value = spot_balance.WalletBalance + spot_inventory_value;
     const double total_ledger_value = perp_balance.Equity + spot_ledger_value;
     const double band_ratio = uncertainty_bps / 10000.0;

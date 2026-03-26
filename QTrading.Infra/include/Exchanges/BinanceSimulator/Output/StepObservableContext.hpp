@@ -2,8 +2,11 @@
 
 #include <cstdint>
 #include <memory>
+#include <vector>
 
 #include "Dto/Market/Binance/MultiKline.hpp"
+#include "Dto/Order.hpp"
+#include "Dto/Position.hpp"
 
 namespace QTrading::Infra::Exchanges::BinanceSim::Output {
 
@@ -19,6 +22,12 @@ struct StepObservableContext {
     bool replay_exhausted{ false };
     /// Market payload prepared by replay kernel for this step.
     std::shared_ptr<QTrading::Dto::Market::Binance::MultiKlineDto> market_payload{};
+    /// Full position snapshot for this step (independent from channel gate).
+    const std::vector<QTrading::dto::Position>* position_snapshot{ nullptr };
+    /// Full order snapshot for this step (independent from channel gate).
+    const std::vector<QTrading::dto::Order>* order_snapshot{ nullptr };
+    /// Monotonic state version used by channel publish gate.
+    uint64_t account_state_version{ 0 };
 };
 
 } // namespace QTrading::Infra::Exchanges::BinanceSim::Output

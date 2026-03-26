@@ -7,6 +7,8 @@ add_library(QTrading.Infra.Library STATIC
   Exchanges/BinanceSimulator/Application/TerminationPolicy.cpp
   Exchanges/BinanceSimulator/Application/StepKernel.cpp
   Exchanges/BinanceSimulator/Domain/BinanceRejectSurface.cpp
+  Exchanges/BinanceSimulator/Domain/FillSettlementEngine.cpp
+  Exchanges/BinanceSimulator/Domain/MatchingEngine.cpp
   Exchanges/BinanceSimulator/Domain/OrderEntryService.cpp
   Exchanges/BinanceSimulator/Output/ChannelPublisher.cpp
   Exchanges/BinanceSimulator/Output/SnapshotBuilder.cpp

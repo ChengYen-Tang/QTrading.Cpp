@@ -118,7 +118,7 @@ bool OrderCommandKernel::PlacePerpClosePosition(const std::string& symbol, QTrad
     request.price = price;
     request.side = side;
     request.position_side = position_side;
-    request.reduce_only = false;
+    request.reduce_only = true;
     request.close_position = true;
     request.client_order_id = client_order_id;
     request.stp_mode = static_cast<int>(stp_mode);
@@ -128,7 +128,11 @@ bool OrderCommandKernel::PlacePerpClosePosition(const std::string& symbol, QTrad
 void OrderCommandKernel::CancelOpenOrders(
     QTrading::Dto::Trading::InstrumentType instrument_type, const std::string& symbol) const
 {
-    Domain::OrderEntryService::CancelOpenOrders(*exchange_.runtime_state_, instrument_type, symbol);
+    Domain::OrderEntryService::CancelOpenOrders(
+        *exchange_.runtime_state_,
+        *exchange_.step_kernel_state_,
+        instrument_type,
+        symbol);
 }
 
 void OrderCommandKernel::FlushDeferredForStep(uint64_t step_seq) const
@@ -143,6 +147,7 @@ void OrderCommandKernel::FlushDeferredForStep(uint64_t step_seq) const
         std::optional<Contracts::OrderRejectInfo> reject{};
         const bool accepted = Domain::OrderEntryService::Execute(
             *exchange_.runtime_state_,
+            exchange_.account_state(),
             *exchange_.step_kernel_state_,
             deferred.request,
             reject);
@@ -190,6 +195,7 @@ bool OrderCommandKernel::submit_(const Contracts::OrderCommandRequest& request) 
     std::optional<Contracts::OrderRejectInfo> reject{};
     return Domain::OrderEntryService::Execute(
         *exchange_.runtime_state_,
+        exchange_.account_state(),
         *exchange_.step_kernel_state_,
         request,
         reject);
