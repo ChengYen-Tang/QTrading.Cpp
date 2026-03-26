@@ -57,7 +57,6 @@ struct StepKernelState {
     bool channels_closed{ false };
     uint64_t account_state_version{ 0 };
     uint64_t last_logged_status_version{ std::numeric_limits<uint64_t>::max() };
-    uint64_t last_logged_event_version{ std::numeric_limits<uint64_t>::max() };
     uint32_t log_module_account_id{ 0 };
     uint32_t log_module_market_event_id{ 0 };
     uint32_t log_module_funding_event_id{ 0 };

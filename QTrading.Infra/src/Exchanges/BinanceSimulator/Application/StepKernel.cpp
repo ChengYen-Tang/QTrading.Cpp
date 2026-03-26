@@ -430,8 +430,10 @@ void emit_reduced_step_logs(
         logger,
         observable_ctx.account_state_version,
         step_state);
+    // Reduced Phase-7/8 scope keeps only market/funding event modules.
+    // Baseline direction for unchanged versions is still "market/funding remain",
+    // so there is no separate version gate here in current kernel.
     emit_market_funding_events(step_state, runtime_state, observable_ctx, logger);
-    step_state.last_logged_event_version = observable_ctx.account_state_version;
 }
 
 } // namespace

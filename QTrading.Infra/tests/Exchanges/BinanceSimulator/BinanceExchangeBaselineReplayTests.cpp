@@ -5,6 +5,7 @@
 #include <limits>
 #include <optional>
 #include <tuple>
+#include <unordered_map>
 #include <vector>
 
 #include "InfraLogTestFixture.hpp"
@@ -808,11 +809,32 @@ TEST_F(BinanceExchangeLogFixture, ReducedObservabilityStatusPrecedesEventRowsInC
     const auto market_rows = FilterRowsByModule(QTrading::Log::LogModule::MarketEvent);
     ASSERT_FALSE(account_rows.empty());
     ASSERT_FALSE(market_rows.empty());
-    EXPECT_LT(account_rows.front().arrival_index, market_rows.front().arrival_index);
-
     const auto funding_rows = FilterRowsByModule(QTrading::Log::LogModule::FundingEvent);
     ASSERT_FALSE(funding_rows.empty());
-    EXPECT_LT(account_rows.front().arrival_index, funding_rows.front().arrival_index);
+
+    auto first_account_arrival_by_ts = std::unordered_map<uint64_t, size_t>{};
+    first_account_arrival_by_ts.reserve(account_rows.size());
+    for (const auto& row_view : account_rows) {
+        ASSERT_NE(row_view.row, nullptr);
+        const uint64_t ts = row_view.row->ts;
+        const auto it = first_account_arrival_by_ts.find(ts);
+        if (it == first_account_arrival_by_ts.end() || row_view.arrival_index < it->second) {
+            first_account_arrival_by_ts[ts] = row_view.arrival_index;
+        }
+    }
+
+    for (const auto& row_view : market_rows) {
+        ASSERT_NE(row_view.row, nullptr);
+        const auto it = first_account_arrival_by_ts.find(row_view.row->ts);
+        ASSERT_NE(it, first_account_arrival_by_ts.end());
+        EXPECT_LT(it->second, row_view.arrival_index);
+    }
+    for (const auto& row_view : funding_rows) {
+        ASSERT_NE(row_view.row, nullptr);
+        const auto it = first_account_arrival_by_ts.find(row_view.row->ts);
+        ASSERT_NE(it, first_account_arrival_by_ts.end());
+        EXPECT_LT(it->second, row_view.arrival_index);
+    }
 }
 
 TEST_F(BinanceExchangeLogFixture, ReducedObservabilityFundingOnlyStepCarriesStepContextInCurrentKernel)
@@ -860,6 +882,42 @@ TEST_F(BinanceExchangeLogFixture, ReducedObservabilityFundingOnlyStepCarriesStep
     EXPECT_EQ(funding_payload->step_seq, 2u);
     EXPECT_EQ(funding_payload->ts_local, 60000u);
     EXPECT_EQ(funding_payload->symbol, "BTCUSDT");
+}
+
+TEST_F(BinanceExchangeLogFixture, ReducedObservabilityStatusVersionGateDoesNotSuppressMarketEventsInCurrentKernel)
+{
+    WriteCsv("btc.csv", {
+        {      0, 100,100,100,100,1000, 30000,100,1,0,0 },
+        {  60000, 101,101,101,101,1000, 90000,100,1,0,0 }
+    });
+
+    Account::AccountInitConfig init{};
+    init.spot_initial_cash = 1000.0;
+    init.perp_initial_wallet = 0.0;
+    BinanceExchange exchange(
+        { { "BTCUSDT", (tmp_dir / "btc.csv").string() } },
+        logger,
+        init,
+        99u);
+
+    ASSERT_TRUE(exchange.step());
+    (void)exchange.get_market_channel()->Receive();
+    ASSERT_TRUE(exchange.step());
+    (void)exchange.get_market_channel()->Receive();
+    StopLogger();
+
+    const auto account_rows = FilterRowsByModule(QTrading::Log::LogModule::Account);
+    ASSERT_EQ(account_rows.size(), 1u);
+    EXPECT_EQ(account_rows[0].row->ts, 0u);
+
+    const auto market_rows = FilterRowsByModule(QTrading::Log::LogModule::MarketEvent);
+    ASSERT_EQ(market_rows.size(), 2u);
+    const auto* event0 = RowPayloadCast<QTrading::Log::FileLogger::FeatherV2::MarketEventDto>(market_rows[0].row);
+    const auto* event1 = RowPayloadCast<QTrading::Log::FileLogger::FeatherV2::MarketEventDto>(market_rows[1].row);
+    ASSERT_NE(event0, nullptr);
+    ASSERT_NE(event1, nullptr);
+    EXPECT_EQ(event0->step_seq, 1u);
+    EXPECT_EQ(event1->step_seq, 2u);
 }
 
 } // namespace
