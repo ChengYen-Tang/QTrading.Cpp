@@ -81,6 +81,8 @@ struct StepKernelState {
     std::vector<uint8_t> matching_has_liquidity_scratch;
     std::vector<double> matching_reducible_long_scratch;
     std::vector<double> matching_reducible_short_scratch;
+    std::vector<double> liquidation_mark_price_scratch;
+    std::vector<uint8_t> liquidation_has_mark_scratch;
 };
 
 } // namespace QTrading::Infra::Exchanges::BinanceSim::State

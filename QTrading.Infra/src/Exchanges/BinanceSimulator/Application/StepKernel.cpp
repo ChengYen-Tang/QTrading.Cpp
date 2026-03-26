@@ -15,6 +15,7 @@
 #include "Exchanges/BinanceSimulator/Domain/FillSettlementEngine.hpp"
 #include "Exchanges/BinanceSimulator/Domain/FundingApplyOrchestration.hpp"
 #include "Exchanges/BinanceSimulator/Domain/FundingEligibilityDecision.hpp"
+#include "Exchanges/BinanceSimulator/Domain/LiquidationExecution.hpp"
 #include "Exchanges/BinanceSimulator/Domain/MatchingEngine.hpp"
 #include "Exchanges/BinanceSimulator/Domain/ReferencePriceResolver.hpp"
 #include "Exchanges/BinanceSimulator/Output/ChannelPublisher.hpp"
@@ -529,6 +530,13 @@ bool StepKernel::run_step() const
                 }
                 Domain::FillSettlementEngine::Apply(runtime_state, exchange_.account_state(), fills);
             });
+        if (Domain::LiquidationExecution::Run(
+                runtime_state,
+                exchange_.account_state(),
+                step_state,
+                *frame.market_payload)) {
+            ++step_state.account_state_version;
+        }
     }
 
     Output::StepObservableContext observable_ctx{};

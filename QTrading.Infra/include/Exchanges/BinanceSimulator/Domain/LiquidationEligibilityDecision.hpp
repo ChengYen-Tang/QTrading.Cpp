@@ -1,40 +1,46 @@
 #pragma once
 
-#include "Dto/Account/BalanceSnapshot.hpp"
+#include <cstddef>
+#include <cstdint>
+#include <vector>
+
+namespace QTrading::Dto::Market::Binance {
+struct MultiKlineDto;
+}
+
+namespace QTrading::Infra::Exchanges::BinanceSim::State {
+struct BinanceExchangeRuntimeState;
+struct StepKernelState;
+}
+
+namespace QTrading::Infra::Exchanges::BinanceSim {
+class Account;
+}
 
 namespace QTrading::Infra::Exchanges::BinanceSim::Domain {
 
-struct LiquidationEligibilityDecision {
+struct LiquidationHealthSnapshot {
+    bool has_perp_positions{ false };
+    bool has_full_mark_context{ false };
     bool distressed{ false };
-    bool warning_zone{ false };
-    bool should_run{ false };
+    double equity{ 0.0 };
+    double maintenance_margin{ 0.0 };
 };
 
-class LiquidationEligibility final {
+class LiquidationEligibilityDecision final {
 public:
-    static LiquidationEligibilityDecision Evaluate(
-        const QTrading::Dto::Account::BalanceSnapshot& snapshot,
-        double warning_zone_ratio) noexcept
-    {
-        LiquidationEligibilityDecision out{};
-        out.distressed = snapshot.MarginBalance < snapshot.MaintenanceMargin;
-        out.warning_zone = (snapshot.MaintenanceMargin > 0.0) &&
-            (snapshot.MarginBalance >= snapshot.MaintenanceMargin) &&
-            (snapshot.MarginBalance < snapshot.MaintenanceMargin * warning_zone_ratio);
-        out.should_run = out.warning_zone || out.distressed;
-        return out;
-    }
+    static LiquidationHealthSnapshot Evaluate(
+        State::BinanceExchangeRuntimeState& runtime_state,
+        const Account& account,
+        const State::StepKernelState& step_state,
+        const QTrading::Dto::Market::Binance::MultiKlineDto& market_payload,
+        std::vector<double>& mark_price_scratch,
+        std::vector<uint8_t>& has_mark_scratch) noexcept;
 
-    static bool ShouldContinueStagedStep(
-        bool step_distressed,
-        bool warning_zone_entered,
-        int step) noexcept
-    {
-        if (step_distressed) {
-            return true;
-        }
-        return warning_zone_entered && step == 0;
-    }
+    static int FindWorstLossPerpPositionIndex(
+        const State::BinanceExchangeRuntimeState& runtime_state,
+        const State::StepKernelState& step_state,
+        const std::vector<uint8_t>& has_mark_scratch) noexcept;
 };
 
 } // namespace QTrading::Infra::Exchanges::BinanceSim::Domain

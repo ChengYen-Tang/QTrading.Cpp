@@ -950,6 +950,97 @@ TEST_F(BinanceExchangeFixture, StatusSnapshotSuppressesBasisWarningWhenMarkIndex
     EXPECT_EQ(snapshot.basis_warning_symbols, 0u);
 }
 
+TEST_F(BinanceExchangeFixture, LiquidationDistressCancelsPerpOrdersAndReducesExposureInCurrentKernel)
+{
+    WriteCsv("btc.csv", {
+        {      0, 100,100,100,100,10000, 30000,10000,1,0,0 }
+    });
+    WriteCsv("btc_mark.csv", {
+        {      0, 10,10,10,10,10000, 30000,10000,1,0,0 }
+    });
+
+    Account::AccountInitConfig init{};
+    init.spot_initial_cash = 0.0;
+    init.perp_initial_wallet = 1000.0;
+    BinanceExchange exchange(
+        { { "BTCUSDT",
+            (tmp_dir / "btc.csv").string(),
+            std::nullopt,
+            std::optional<std::string>((tmp_dir / "btc_mark.csv").string()) } },
+        nullptr,
+        init);
+
+    ASSERT_TRUE(exchange.perp.place_order("BTCUSDT", 500.0, QTrading::Dto::Trading::OrderSide::Buy));
+    ASSERT_TRUE(exchange.perp.place_order(
+        "BTCUSDT", 1.0, 1.0, QTrading::Dto::Trading::OrderSide::Buy));
+
+    ASSERT_TRUE(exchange.step());
+    (void)exchange.get_market_channel()->Receive();
+
+    BinanceExchange::StatusSnapshot snapshot{};
+    exchange.FillStatusSnapshot(snapshot);
+    EXPECT_EQ(exchange.get_all_positions().size(), 0u);
+    EXPECT_EQ(exchange.get_all_open_orders().size(), 0u);
+    EXPECT_NEAR(snapshot.wallet_balance, -44055.0, 1e-6);
+}
+
+TEST_F(BinanceExchangeFixture, LiquidationRemainsNoOpWithoutDistressInCurrentKernel)
+{
+    WriteCsv("btc.csv", {
+        {      0, 100,100,100,100,10000, 30000,10000,1,0,0 }
+    });
+
+    Account::AccountInitConfig init{};
+    init.spot_initial_cash = 0.0;
+    init.perp_initial_wallet = 1000.0;
+    BinanceExchange exchange(
+        { { "BTCUSDT", (tmp_dir / "btc.csv").string() } },
+        nullptr,
+        init);
+
+    ASSERT_TRUE(exchange.perp.place_order("BTCUSDT", 1.0, QTrading::Dto::Trading::OrderSide::Buy));
+
+    ASSERT_TRUE(exchange.step());
+    (void)exchange.get_market_channel()->Receive();
+
+    BinanceExchange::StatusSnapshot snapshot{};
+    exchange.FillStatusSnapshot(snapshot);
+    ASSERT_EQ(exchange.get_all_positions().size(), 1u);
+    EXPECT_NEAR(exchange.get_all_positions()[0].quantity, 1.0, 1e-12);
+    EXPECT_NEAR(snapshot.wallet_balance, 999.9, 1e-9);
+}
+
+TEST_F(BinanceExchangeFixture, LiquidationSkipsWhenRawMarkContextMissingInCurrentKernel)
+{
+    WriteCsv("btc.csv", {
+        {      0, 100,100,100,100,10000, 30000,10000,1,0,0 },
+        {  60000, 10,10,10,10,10000, 90000,10000,1,0,0 }
+    });
+
+    Account::AccountInitConfig init{};
+    init.spot_initial_cash = 0.0;
+    init.perp_initial_wallet = 1000.0;
+    BinanceExchange exchange(
+        { { "BTCUSDT", (tmp_dir / "btc.csv").string() } },
+        nullptr,
+        init);
+
+    ASSERT_TRUE(exchange.perp.place_order("BTCUSDT", 500.0, QTrading::Dto::Trading::OrderSide::Buy));
+    ASSERT_TRUE(exchange.step());
+    (void)exchange.get_market_channel()->Receive();
+
+    ASSERT_EQ(exchange.get_all_positions().size(), 1u);
+    ASSERT_TRUE(exchange.step());
+    (void)exchange.get_market_channel()->Receive();
+
+    BinanceExchange::StatusSnapshot snapshot{};
+    exchange.FillStatusSnapshot(snapshot);
+    EXPECT_EQ(exchange.get_all_positions().size(), 1u);
+    EXPECT_NEAR(exchange.get_all_positions()[0].quantity, 500.0, 1e-9);
+    EXPECT_EQ(exchange.get_all_open_orders().size(), 0u);
+    EXPECT_NEAR(snapshot.wallet_balance, 950.0, 1e-9);
+}
+
 TEST_F(BinanceExchangeLogFixture, ReducedObservabilityStatusPrecedesEventRowsInCurrentKernel)
 {
     WriteCsv("btc.csv", {
