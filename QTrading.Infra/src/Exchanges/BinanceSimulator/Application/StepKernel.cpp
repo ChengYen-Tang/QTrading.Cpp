@@ -1,6 +1,8 @@
 #include "Exchanges/BinanceSimulator/Application/StepKernel.hpp"
 
 #include <algorithm>
+#include <cmath>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -9,6 +11,8 @@
 #include "Exchanges/BinanceSimulator/Application/TerminationPolicy.hpp"
 #include "Exchanges/BinanceSimulator/BinanceExchange.hpp"
 #include "Exchanges/BinanceSimulator/Domain/FillSettlementEngine.hpp"
+#include "Exchanges/BinanceSimulator/Domain/FundingApplyOrchestration.hpp"
+#include "Exchanges/BinanceSimulator/Domain/FundingEligibilityDecision.hpp"
 #include "Exchanges/BinanceSimulator/Domain/MatchingEngine.hpp"
 #include "Exchanges/BinanceSimulator/Output/ChannelPublisher.hpp"
 #include "Exchanges/BinanceSimulator/Output/StepObservableContext.hpp"
@@ -124,6 +128,53 @@ bool vector_equal(const std::vector<T>& lhs, const std::vector<T>& rhs, TEqual e
     return true;
 }
 
+bool apply_funding_for_step(
+    State::StepKernelState& step_state,
+    const State::BinanceExchangeRuntimeState& runtime_state,
+    Account& account,
+    const QTrading::Dto::Market::Binance::MultiKlineDto& market_payload)
+{
+    constexpr double kEpsilon = 1e-12;
+    bool wallet_mutated = false;
+    const size_t count = std::min(step_state.symbols.size(), market_payload.funding_by_id.size());
+    for (size_t i = 0; i < count; ++i) {
+        if (!market_payload.funding_by_id[i].has_value()) {
+            continue;
+        }
+        const auto& funding = *market_payload.funding_by_id[i];
+        const bool is_duplicate = step_state.last_applied_funding_time_by_symbol[i] == funding.FundingTime;
+        const auto action = Domain::FundingEligibilityDecision::Decide(
+            is_duplicate,
+            funding.MarkPrice.has_value(),
+            true);
+        if (action == Domain::FundingDecisionAction::SkipNoMark) {
+            ++step_state.funding_skipped_no_mark_total;
+            continue;
+        }
+        if (action == Domain::FundingDecisionAction::SkipDuplicate ||
+            action == Domain::FundingDecisionAction::NoOp) {
+            continue;
+        }
+
+        const std::string& symbol = step_state.symbols[i];
+        const double mark = *funding.MarkPrice;
+        for (const auto& position : runtime_state.positions) {
+            if (position.instrument_type != QTrading::Dto::Trading::InstrumentType::Perp ||
+                position.symbol != symbol ||
+                position.quantity <= kEpsilon) {
+                continue;
+            }
+            const double direction = position.is_long ? -1.0 : 1.0;
+            const double funding_delta = direction * position.quantity * mark * funding.Rate;
+            account.apply_perp_wallet_delta(funding_delta);
+            ++step_state.funding_applied_events_total;
+            wallet_mutated = true;
+        }
+        step_state.last_applied_funding_time_by_symbol[i] = funding.FundingTime;
+    }
+    return wallet_mutated;
+}
+
 void publish_position_order_channels(
     BinanceExchange& exchange,
     const State::BinanceExchangeRuntimeState& runtime_state,
@@ -196,13 +247,23 @@ bool StepKernel::run_step() const
     OrderCommandKernel(exchange_).FlushDeferredForStep(step_state.step_seq);
     runtime_state.last_status_snapshot.ts_exchange = frame.ts_exchange;
     if (frame.market_payload) {
-        auto& fills = step_state.match_fills_scratch;
-        fills.reserve(runtime_state.orders.size());
-        Domain::MatchingEngine::RunStep(runtime_state, step_state, *frame.market_payload, fills);
-        if (!fills.empty()) {
-            ++step_state.account_state_version;
-        }
-        Domain::FillSettlementEngine::Apply(runtime_state, exchange_.account_state(), fills);
+        Domain::FundingApplyOrchestration::Execute(
+            runtime_state.simulation_config.funding_apply_timing ==
+                Contracts::FundingApplyTiming::BeforeMatching,
+            [&]() {
+                if (apply_funding_for_step(step_state, runtime_state, exchange_.account_state(), *frame.market_payload)) {
+                    ++step_state.account_state_version;
+                }
+            },
+            [&]() {
+                auto& fills = step_state.match_fills_scratch;
+                fills.reserve(runtime_state.orders.size());
+                Domain::MatchingEngine::RunStep(runtime_state, step_state, *frame.market_payload, fills);
+                if (!fills.empty()) {
+                    ++step_state.account_state_version;
+                }
+                Domain::FillSettlementEngine::Apply(runtime_state, exchange_.account_state(), fills);
+            });
     }
 
     Output::StepObservableContext observable_ctx{};

@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "Data/Binance/MarketData.hpp"
+#include "Data/Binance/FundingRateData.hpp"
 #include "Dto/Order.hpp"
 #include "Dto/Position.hpp"
 #include "Exchanges/BinanceSimulator/Contracts/BinanceExchangeDiagnostics.hpp"
@@ -39,6 +40,14 @@ struct StepKernelState {
     std::unordered_map<std::string, size_t> symbol_to_id;
     std::shared_ptr<const std::vector<std::string>> symbols_shared;
     std::vector<MarketData> market_data;
+    std::vector<FundingRateData> funding_data_pool;
+    std::vector<int32_t> funding_data_id_by_symbol;
+    std::vector<size_t> funding_cursor_by_symbol;
+    std::vector<uint64_t> next_funding_ts_by_symbol;
+    std::vector<uint8_t> has_next_funding_ts;
+    std::vector<uint64_t> last_applied_funding_time_by_symbol;
+    uint64_t funding_applied_events_total{ 0 };
+    uint64_t funding_skipped_no_mark_total{ 0 };
     std::vector<size_t> replay_cursor;
     std::vector<uint64_t> next_ts_by_symbol;
     std::vector<uint8_t> has_next_ts;

@@ -5,6 +5,7 @@
 #include "Exchanges/BinanceSimulator/BinanceExchange.hpp"
 #include "Exchanges/BinanceSimulator/State/BinanceExchangeRuntimeState.hpp"
 #include "Exchanges/BinanceSimulator/State/SnapshotState.hpp"
+#include "Exchanges/BinanceSimulator/State/StepKernelState.hpp"
 
 namespace QTrading::Infra::Exchanges::BinanceSim::Output {
 namespace {
@@ -80,8 +81,8 @@ void SnapshotBuilder::Fill(const BinanceExchange& exchange, Contracts::StatusSna
     out.basis_warning_symbols = 0;
     out.basis_stress_symbols = 0;
     out.basis_stress_blocked_orders = 0;
-    out.funding_applied_events = 0;
-    out.funding_skipped_no_mark = 0;
+    out.funding_applied_events = exchange.step_kernel_state_->funding_applied_events_total;
+    out.funding_skipped_no_mark = exchange.step_kernel_state_->funding_skipped_no_mark_total;
     out.progress_pct = snapshot_state.progress_pct;
 
     out.prices.clear();

@@ -2,6 +2,8 @@
 
 #include <filesystem>
 #include <fstream>
+#include <limits>
+#include <optional>
 #include <tuple>
 #include <vector>
 
@@ -51,6 +53,21 @@ protected:
                  << std::get<8>(row) << ','
                  << std::get<9>(row) << ','
                  << std::get<10>(row) << '\n';
+        }
+    }
+
+    void WriteFundingCsv(
+        const std::string& file_name,
+        const std::vector<std::tuple<uint64_t, double, std::optional<double>>>& rows)
+    {
+        std::ofstream file(tmp_dir / file_name, std::ios::trunc);
+        file << "FundingTime,Rate,MarkPrice\n";
+        for (const auto& row : rows) {
+            file << std::get<0>(row) << ',' << std::get<1>(row) << ',';
+            if (std::get<2>(row).has_value()) {
+                file << *std::get<2>(row);
+            }
+            file << '\n';
         }
     }
 
@@ -554,6 +571,168 @@ TEST_F(BinanceExchangeFixture, OrderChannelPublishesWhenOrderBookChangesInCurren
     auto cancel_snapshot = order_channel->Receive();
     ASSERT_TRUE(cancel_snapshot.has_value());
     EXPECT_TRUE(cancel_snapshot->empty());
+}
+
+TEST_F(BinanceExchangeFixture, FundingApplyTimingControlsSameTimestampFundingInCurrentKernel)
+{
+    WriteCsv("btc.csv", {
+        {      0, 100,100,100,100,1000, 30000,100,1,0,0 },
+        {  60000, 200,200,200,200,1000, 90000,100,1,0,0 }
+    });
+    WriteFundingCsv("btc_funding.csv", {
+        { 60000, 0.001, 100.0 }
+    });
+
+    auto run_case = [&](QTrading::Infra::Exchanges::BinanceSim::Contracts::FundingApplyTiming timing) -> double {
+        Account::AccountInitConfig init{};
+        init.spot_initial_cash = 0.0;
+        init.perp_initial_wallet = 1000.0;
+        BinanceExchange exchange(
+            { { "BTCUSDT", (tmp_dir / "btc.csv").string(), std::optional<std::string>((tmp_dir / "btc_funding.csv").string()) } },
+            nullptr,
+            init);
+
+        BinanceExchange::SimulationConfig cfg = exchange.simulation_config();
+        cfg.funding_apply_timing = timing;
+        exchange.apply_simulation_config(cfg);
+
+        auto market_channel = exchange.get_market_channel();
+        if (!exchange.step()) {
+            ADD_FAILURE() << "step#1 failed";
+            return std::numeric_limits<double>::quiet_NaN();
+        }
+        (void)market_channel->Receive();
+        if (!exchange.perp.place_order("BTCUSDT", 1.0, QTrading::Dto::Trading::OrderSide::Buy)) {
+            ADD_FAILURE() << "place_order failed";
+            return std::numeric_limits<double>::quiet_NaN();
+        }
+        if (!exchange.step()) {
+            ADD_FAILURE() << "step#2 failed";
+            return std::numeric_limits<double>::quiet_NaN();
+        }
+        (void)market_channel->Receive();
+        BinanceExchange::StatusSnapshot snapshot{};
+        exchange.FillStatusSnapshot(snapshot);
+        return snapshot.wallet_balance;
+    };
+
+    const double before = run_case(QTrading::Infra::Exchanges::BinanceSim::Contracts::FundingApplyTiming::BeforeMatching);
+    const double after = run_case(QTrading::Infra::Exchanges::BinanceSim::Contracts::FundingApplyTiming::AfterMatching);
+    EXPECT_NEAR(before - after, 0.1, 1e-6);
+}
+
+TEST_F(BinanceExchangeFixture, FundingWithoutMarkSourceIsSkippedInCurrentKernel)
+{
+    WriteCsv("btc.csv", {
+        {      0, 100,100,100,100,1000, 30000,100,1,0,0 },
+        {  60000, 100,100,100,100,1000, 90000,100,1,0,0 }
+    });
+    WriteFundingCsv("btc_funding.csv", {
+        { 60000, 0.001, std::nullopt }
+    });
+
+    Account::AccountInitConfig init{};
+    init.spot_initial_cash = 0.0;
+    init.perp_initial_wallet = 1000.0;
+    BinanceExchange exchange(
+        { { "BTCUSDT", (tmp_dir / "btc.csv").string(), std::optional<std::string>((tmp_dir / "btc_funding.csv").string()) } },
+        nullptr,
+        init);
+
+    auto market_channel = exchange.get_market_channel();
+    ASSERT_TRUE(exchange.step());
+    (void)market_channel->Receive();
+    ASSERT_TRUE(exchange.perp.place_order("BTCUSDT", 1.0, QTrading::Dto::Trading::OrderSide::Buy));
+    ASSERT_TRUE(exchange.step());
+    (void)market_channel->Receive();
+
+    BinanceExchange::StatusSnapshot snapshot{};
+    exchange.FillStatusSnapshot(snapshot);
+    EXPECT_EQ(snapshot.funding_applied_events, 0u);
+    EXPECT_GE(snapshot.funding_skipped_no_mark, 1u);
+}
+
+TEST_F(BinanceExchangeFixture, FundingAppliedEventsCountAffectedPerpPositionsInCurrentKernel)
+{
+    WriteCsv("btc.csv", {
+        {      0, 100,100,100,100,1000, 30000,100,1,0,0 },
+        { 120000, 110,110,110,110,1000,150000,100,1,0,0 }
+    });
+    WriteCsv("eth.csv", {
+        {      0, 200,200,200,200,1000, 30000,100,1,0,0 },
+        { 120000, 210,210,210,210,1000,150000,100,1,0,0 }
+    });
+    WriteFundingCsv("btc_funding.csv", {
+        { 60000, 0.001, 100.0 }
+    });
+    WriteFundingCsv("eth_funding.csv", {
+        { 60000, 0.001, 200.0 }
+    });
+
+    Account::AccountInitConfig init{};
+    init.spot_initial_cash = 0.0;
+    init.perp_initial_wallet = 1000.0;
+    BinanceExchange exchange(
+        {
+            { "BTCUSDT", (tmp_dir / "btc.csv").string(), std::optional<std::string>((tmp_dir / "btc_funding.csv").string()) },
+            { "ETHUSDT", (tmp_dir / "eth.csv").string(), std::optional<std::string>((tmp_dir / "eth_funding.csv").string()) }
+        },
+        nullptr,
+        init);
+
+    auto market_channel = exchange.get_market_channel();
+    ASSERT_TRUE(exchange.perp.place_order("BTCUSDT", 1.0, QTrading::Dto::Trading::OrderSide::Buy));
+    ASSERT_TRUE(exchange.perp.place_order("ETHUSDT", 1.0, QTrading::Dto::Trading::OrderSide::Buy));
+    ASSERT_TRUE(exchange.step());
+    (void)market_channel->Receive();
+    ASSERT_EQ(exchange.get_all_positions().size(), 2u);
+
+    ASSERT_TRUE(exchange.step());
+    auto funding_step = market_channel->Receive();
+    ASSERT_TRUE(funding_step.has_value());
+    EXPECT_EQ(funding_step->get()->Timestamp, 60000u);
+
+    BinanceExchange::StatusSnapshot snapshot{};
+    exchange.FillStatusSnapshot(snapshot);
+    // Current reduced kernel keeps one perp position per symbol; this assertion
+    // locks event counting to "affected position records", not a single batch event.
+    EXPECT_EQ(snapshot.funding_applied_events, 2u);
+}
+
+TEST_F(BinanceExchangeFixture, FundingTimestampParticipatesInStepTimelineInCurrentKernel)
+{
+    WriteCsv("btc.csv", {
+        {      0, 100,100,100,100,1000, 30000,100,1,0,0 },
+        { 120000, 110,110,110,110,1000,150000,100,1,0,0 }
+    });
+    WriteFundingCsv("btc_funding.csv", {
+        { 60000, 0.001, 100.0 }
+    });
+
+    Account::AccountInitConfig init{};
+    init.spot_initial_cash = 0.0;
+    init.perp_initial_wallet = 1000.0;
+    BinanceExchange exchange(
+        { { "BTCUSDT", (tmp_dir / "btc.csv").string(), std::optional<std::string>((tmp_dir / "btc_funding.csv").string()) } },
+        nullptr,
+        init);
+
+    auto market_channel = exchange.get_market_channel();
+    ASSERT_TRUE(exchange.step());
+    auto step1 = market_channel->Receive();
+    ASSERT_TRUE(step1.has_value());
+    EXPECT_EQ(step1->get()->Timestamp, 0u);
+    ASSERT_TRUE(exchange.step());
+    auto step2 = market_channel->Receive();
+    ASSERT_TRUE(step2.has_value());
+    EXPECT_EQ(step2->get()->Timestamp, 60000u);
+    ASSERT_EQ(step2->get()->funding_by_id.size(), 1u);
+    EXPECT_TRUE(step2->get()->funding_by_id[0].has_value());
+    EXPECT_FALSE(step2->get()->trade_klines_by_id[0].has_value());
+    ASSERT_TRUE(exchange.step());
+    auto step3 = market_channel->Receive();
+    ASSERT_TRUE(step3.has_value());
+    EXPECT_EQ(step3->get()->Timestamp, 120000u);
 }
 
 } // namespace

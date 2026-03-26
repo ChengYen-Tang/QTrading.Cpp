@@ -9,7 +9,15 @@ namespace QTrading::Infra::Exchanges::BinanceSim::Application {
 
 bool TerminationPolicy::IsReplayExhausted(const State::StepKernelState& state) noexcept
 {
-    return state.next_ts_heap.empty();
+    if (!state.next_ts_heap.empty()) {
+        return false;
+    }
+    for (const auto has_next_funding : state.has_next_funding_ts) {
+        if (has_next_funding != 0) {
+            return false;
+        }
+    }
+    return true;
 }
 
 void TerminationPolicy::CloseChannels(BinanceExchange& exchange, State::StepKernelState& state) noexcept

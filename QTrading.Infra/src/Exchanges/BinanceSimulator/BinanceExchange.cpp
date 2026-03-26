@@ -99,7 +99,13 @@ void BinanceExchange::initialize_step_kernel_state_(const std::vector<SymbolData
     step_kernel_state_->symbols.reserve(datasets.size());
     step_kernel_state_->symbol_to_id.reserve(datasets.size());
     step_kernel_state_->market_data.reserve(datasets.size());
+    step_kernel_state_->funding_data_pool.reserve(datasets.size());
     step_kernel_state_->replay_cursor.assign(datasets.size(), 0);
+    step_kernel_state_->funding_data_id_by_symbol.assign(datasets.size(), -1);
+    step_kernel_state_->funding_cursor_by_symbol.assign(datasets.size(), 0);
+    step_kernel_state_->next_funding_ts_by_symbol.assign(datasets.size(), 0);
+    step_kernel_state_->has_next_funding_ts.assign(datasets.size(), 0);
+    step_kernel_state_->last_applied_funding_time_by_symbol.assign(datasets.size(), 0);
     step_kernel_state_->next_ts_by_symbol.assign(datasets.size(), 0);
     step_kernel_state_->has_next_ts.assign(datasets.size(), 0);
 
@@ -108,6 +114,16 @@ void BinanceExchange::initialize_step_kernel_state_(const std::vector<SymbolData
         step_kernel_state_->symbols.push_back(ds.symbol);
         step_kernel_state_->symbol_to_id.emplace(ds.symbol, i);
         step_kernel_state_->market_data.emplace_back(ds.symbol, ds.kline_csv);
+        if (ds.funding_csv.has_value()) {
+            step_kernel_state_->funding_data_id_by_symbol[i] =
+                static_cast<int32_t>(step_kernel_state_->funding_data_pool.size());
+            step_kernel_state_->funding_data_pool.emplace_back(ds.symbol, *ds.funding_csv);
+            const auto& funding_data = step_kernel_state_->funding_data_pool.back();
+            if (funding_data.get_count() > 0) {
+                step_kernel_state_->next_funding_ts_by_symbol[i] = funding_data.get_funding(0).FundingTime;
+                step_kernel_state_->has_next_funding_ts[i] = 1;
+            }
+        }
         if (step_kernel_state_->market_data.back().get_klines_count() > 0) {
             const uint64_t ts = step_kernel_state_->market_data.back().get_kline(0).Timestamp;
             step_kernel_state_->next_ts_by_symbol[i] = ts;
