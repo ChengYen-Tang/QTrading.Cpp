@@ -1242,4 +1242,100 @@ TEST_F(BinanceExchangeLogFixture, ReducedObservabilityStatusVersionGateDoesNotSu
     EXPECT_EQ(event1->step_seq, 2u);
 }
 
+TEST_F(BinanceExchangeLogFixture, ReducedObservabilityMarketEventCarriesRawMarkIndexContextInCurrentKernel)
+{
+    WriteCsv("btc.csv", {
+        {      0, 100,101,99,100.5,1000, 30000,1000,1,0,0 }
+    });
+    WriteCsv("btc_mark.csv", {
+        {      0, 123,123,123,123,1000, 30000,1000,1,0,0 }
+    });
+    WriteCsv("btc_index.csv", {
+        {      0, 117,117,117,117,1000, 30000,1000,1,0,0 }
+    });
+
+    Account::AccountInitConfig init{};
+    init.spot_initial_cash = 1000.0;
+    init.perp_initial_wallet = 0.0;
+    BinanceExchange exchange(
+        { { "BTCUSDT",
+            (tmp_dir / "btc.csv").string(),
+            std::nullopt,
+            std::optional<std::string>((tmp_dir / "btc_mark.csv").string()),
+            std::optional<std::string>((tmp_dir / "btc_index.csv").string()) } },
+        logger,
+        init,
+        321u);
+
+    ASSERT_TRUE(exchange.step());
+    ASSERT_TRUE(exchange.get_market_channel()->Receive().has_value());
+    StopLogger();
+
+    const auto market_rows = FilterRowsByModule(QTrading::Log::LogModule::MarketEvent);
+    ASSERT_EQ(market_rows.size(), 1u);
+    const auto* payload = RowPayloadCast<QTrading::Log::FileLogger::FeatherV2::MarketEventDto>(market_rows.front().row);
+    ASSERT_NE(payload, nullptr);
+    EXPECT_TRUE(payload->has_mark_price);
+    EXPECT_DOUBLE_EQ(payload->mark_price, 123.0);
+    EXPECT_EQ(payload->mark_price_source,
+        static_cast<int32_t>(QTrading::Infra::Exchanges::BinanceSim::Contracts::ReferencePriceSource::Raw));
+    EXPECT_TRUE(payload->has_index_price);
+    EXPECT_DOUBLE_EQ(payload->index_price, 117.0);
+    EXPECT_EQ(payload->index_price_source,
+        static_cast<int32_t>(QTrading::Infra::Exchanges::BinanceSim::Contracts::ReferencePriceSource::Raw));
+}
+
+TEST_F(BinanceExchangeLogFixture, ReducedObservabilityMarketThenFundingOrderWithinSingleStepInCurrentKernel)
+{
+    WriteCsv("btc.csv", {
+        {      0, 100,101,99,100,1000, 30000,1000,1,0,0 },
+        {  60000, 101,102,100,101,1000, 90000,1000,1,0,0 }
+    });
+    WriteFundingCsv("btc_funding.csv", {
+        { 60000, 0.0001, 101.0 }
+    });
+
+    Account::AccountInitConfig init{};
+    init.spot_initial_cash = 0.0;
+    init.perp_initial_wallet = 1000.0;
+    BinanceExchange exchange(
+        { { "BTCUSDT",
+            (tmp_dir / "btc.csv").string(),
+            std::optional<std::string>((tmp_dir / "btc_funding.csv").string()) } },
+        logger,
+        init,
+        333u);
+
+    ASSERT_TRUE(exchange.perp.place_order("BTCUSDT", 1.0, QTrading::Dto::Trading::OrderSide::Buy));
+    ASSERT_TRUE(exchange.step());
+    ASSERT_TRUE(exchange.get_market_channel()->Receive().has_value());
+    ASSERT_TRUE(exchange.step());
+    ASSERT_TRUE(exchange.get_market_channel()->Receive().has_value());
+    StopLogger();
+
+    const auto market_rows = FilterRowsByModule(QTrading::Log::LogModule::MarketEvent);
+    const auto funding_rows = FilterRowsByModule(QTrading::Log::LogModule::FundingEvent);
+    ASSERT_EQ(funding_rows.size(), 1u);
+
+    const ArrivedRowView* market_step2 = nullptr;
+    for (const auto& row_view : market_rows) {
+        const auto* market = RowPayloadCast<QTrading::Log::FileLogger::FeatherV2::MarketEventDto>(row_view.row);
+        ASSERT_NE(market, nullptr);
+        if (market->step_seq == 2u) {
+            market_step2 = &row_view;
+            break;
+        }
+    }
+
+    ASSERT_NE(market_step2, nullptr);
+    const auto* market_payload = RowPayloadCast<QTrading::Log::FileLogger::FeatherV2::MarketEventDto>(market_step2->row);
+    const auto* funding_payload = RowPayloadCast<QTrading::Log::FileLogger::FeatherV2::FundingEventDto>(funding_rows.front().row);
+    ASSERT_NE(market_payload, nullptr);
+    ASSERT_NE(funding_payload, nullptr);
+    EXPECT_EQ(market_payload->step_seq, 2u);
+    EXPECT_EQ(funding_payload->step_seq, 2u);
+    EXPECT_LT(market_step2->arrival_index, funding_rows.front().arrival_index);
+    EXPECT_LT(market_payload->event_seq, funding_payload->event_seq);
+}
+
 } // namespace

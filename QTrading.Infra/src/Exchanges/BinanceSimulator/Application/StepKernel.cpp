@@ -384,6 +384,26 @@ void emit_market_funding_events(
                 event.volume = kline.Volume;
                 event.taker_buy_base_volume = kline.TakerBuyBaseVolume;
             }
+            if (i < payload.mark_klines_by_id.size() && payload.mark_klines_by_id[i].has_value()) {
+                event.has_mark_price = true;
+                event.mark_price = payload.mark_klines_by_id[i]->ClosePrice;
+                event.mark_price_source = static_cast<int32_t>(Contracts::ReferencePriceSource::Raw);
+            }
+            else {
+                event.has_mark_price = false;
+                event.mark_price = 0.0;
+                event.mark_price_source = static_cast<int32_t>(Contracts::ReferencePriceSource::None);
+            }
+            if (i < payload.index_klines_by_id.size() && payload.index_klines_by_id[i].has_value()) {
+                event.has_index_price = true;
+                event.index_price = payload.index_klines_by_id[i]->ClosePrice;
+                event.index_price_source = static_cast<int32_t>(Contracts::ReferencePriceSource::Raw);
+            }
+            else {
+                event.has_index_price = false;
+                event.index_price = 0.0;
+                event.index_price_source = static_cast<int32_t>(Contracts::ReferencePriceSource::None);
+            }
             (void)logger->Log(step_state.log_module_market_event_id, event);
         }
     }
