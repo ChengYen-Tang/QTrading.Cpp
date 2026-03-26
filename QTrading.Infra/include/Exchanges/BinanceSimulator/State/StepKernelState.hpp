@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <queue>
@@ -55,6 +56,12 @@ struct StepKernelState {
     uint64_t step_seq{ 0 };
     bool channels_closed{ false };
     uint64_t account_state_version{ 0 };
+    uint64_t last_logged_status_version{ std::numeric_limits<uint64_t>::max() };
+    uint64_t last_logged_event_version{ std::numeric_limits<uint64_t>::max() };
+    uint32_t log_module_account_id{ 0 };
+    uint32_t log_module_market_event_id{ 0 };
+    uint32_t log_module_funding_event_id{ 0 };
+    bool has_resolved_log_module_ids{ false };
     uint64_t last_published_account_state_version{ 0 };
     std::vector<QTrading::dto::Position> last_published_positions;
     std::vector<QTrading::dto::Order> last_published_orders;

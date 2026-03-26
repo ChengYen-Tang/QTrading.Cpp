@@ -1,6 +1,7 @@
 #pragma once
 
 #include <deque>
+#include <memory>
 #include <optional>
 #include <vector>
 
@@ -11,12 +12,14 @@
 #include "Exchanges/BinanceSimulator/Contracts/BinanceExchangeDiagnostics.hpp"
 #include "Exchanges/BinanceSimulator/Contracts/BinanceExchangeRuntimeTypes.hpp"
 #include "Exchanges/BinanceSimulator/Contracts/BinanceExchangeStatusSnapshot.hpp"
+#include "Logger.hpp"
 
 namespace QTrading::Infra::Exchanges::BinanceSim::State {
 
 /// Non-step-core runtime state retained by the facade.
 /// Holds account/order/channel-adjacent data that is not part of replay cursors.
 struct BinanceExchangeRuntimeState {
+    std::shared_ptr<QTrading::Log::Logger> logger{};
     std::vector<QTrading::dto::Position> positions;
     std::vector<QTrading::dto::Order> orders;
     std::vector<Contracts::AsyncOrderAck> async_order_acks;

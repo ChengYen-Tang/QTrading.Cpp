@@ -23,10 +23,8 @@ BinanceExchange::BinanceExchange(const std::vector<SymbolDataset>& datasets,
       step_kernel_state_(std::make_unique<State::StepKernelState>()),
       snapshot_state_(std::make_unique<State::SnapshotState>())
 {
-    // Phase-1/2/3 bootstrap:
-    // - build replay state, channels, and initial status snapshot
-    // - logger is intentionally unused in the current skeleton stage
-    static_cast<void>(logger);
+    // Build replay state, channels, and the initial status snapshot.
+    runtime_state_->logger = std::move(logger);
     initialize_step_kernel_state_(datasets, run_id);
     initialize_channels_();
     runtime_state_->last_status_snapshot =

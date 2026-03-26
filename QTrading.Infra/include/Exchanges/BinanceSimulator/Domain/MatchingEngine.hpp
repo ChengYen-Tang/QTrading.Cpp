@@ -29,7 +29,7 @@ struct MatchFill {
     double price{ 0.0 };
 };
 
-/// Minimal matching engine used by Phase 5 skeleton rebuild.
+/// Minimal matching engine for the current restored execution path.
 /// Supports market/limit matching and partial/no-fill based on bar liquidity.
 class MatchingEngine final {
 public:

@@ -14,7 +14,7 @@ struct BinanceExchangeRuntimeState;
 
 namespace QTrading::Infra::Exchanges::BinanceSim::Domain {
 
-/// Minimal settlement engine used by Phase 5 skeleton rebuild.
+/// Minimal settlement engine for the current matching and fill path.
 /// Applies fill deltas to account balances and spot/perp positions.
 class FillSettlementEngine final {
 public:

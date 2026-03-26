@@ -716,7 +716,7 @@ TEST_F(PerfGuardrailFixture, SessionStepHotPathBenchmarkComparesLegacyCompareOff
               << " ratio_legacy_v2=" << ratio_legacy_v2
               << " ratio_compare_off_shadow=" << ratio_compare_off_shadow << '\n';
 
-    // Phase 2 fail-fast budget: single step latency and mode ratios.
+    // Fail-fast budget: single step latency and mode ratios.
     EXPECT_LE(legacy.ns_per_step, kMaxSingleStepLatencyNs);
     EXPECT_LE(compare_off.ns_per_step, kMaxSingleStepLatencyNs);
     EXPECT_LE(shadow_compare.ns_per_step, kMaxSingleStepLatencyNs);

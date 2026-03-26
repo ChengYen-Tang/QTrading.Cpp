@@ -32,7 +32,7 @@ std::unordered_map<std::string, TradeKlineDto> one_trade_kline(
 
 } // namespace
 
-TEST(AccountServicesPhase3Tests, TransferServiceMovesCashBetweenLedgersWithoutChangingTotalCash)
+TEST(AccountServiceTests, TransferServiceMovesCashBetweenLedgersWithoutChangingTotalCash)
 {
     Account::AccountInitConfig cfg{};
     cfg.spot_initial_cash = 1200.0;
@@ -56,7 +56,7 @@ TEST(AccountServicesPhase3Tests, TransferServiceMovesCashBetweenLedgersWithoutCh
     EXPECT_EQ(account.get_state_version(), state_after_valid);
 }
 
-TEST(AccountServicesPhase3Tests, FundingServiceUpdatesWalletAndPreservesPositionShape)
+TEST(AccountServiceTests, FundingServiceUpdatesWalletAndPreservesPositionShape)
 {
     Account::AccountInitConfig cfg{};
     cfg.spot_initial_cash = 0.0;
@@ -84,7 +84,7 @@ TEST(AccountServicesPhase3Tests, FundingServiceUpdatesWalletAndPreservesPosition
     EXPECT_NEAR(account.get_wallet_balance(), wallet_before + funding_delta, 1e-9);
 }
 
-TEST(AccountServicesPhase3Tests, OrderEntryAndMatchingPipelineStillEmitsFillEvents)
+TEST(AccountServiceTests, OrderEntryAndMatchingPipelineStillEmitsFillEvents)
 {
     Account::AccountInitConfig cfg{};
     cfg.spot_initial_cash = 1000.0;

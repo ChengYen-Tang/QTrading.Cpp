@@ -1,5 +1,5 @@
 add_executable(QTrading.Infra.Tests
-  Exchanges/BinanceSimulator/BinanceExchangePhase1BaselineTests.cpp
+  Exchanges/BinanceSimulator/BinanceExchangeBaselineReplayTests.cpp
 )
 
 target_include_directories(QTrading.Infra.Tests

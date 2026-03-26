@@ -7,6 +7,7 @@
 #include <tuple>
 #include <vector>
 
+#include "InfraLogTestFixture.hpp"
 #include "Exchanges/BinanceSimulator/BinanceExchange.hpp"
 #include "Exchanges/BinanceSimulator/Support/BinanceExchangeSkeletonSupport.hpp"
 
@@ -22,7 +23,7 @@ protected:
     void SetUp() override
     {
         tmp_dir = fs::temp_directory_path() /
-            (std::string("QTradingPhase1_") +
+            (std::string("QTradingBaselineReplay_") +
              ::testing::UnitTest::GetInstance()->current_test_info()->name());
         fs::create_directories(tmp_dir);
     }
@@ -77,6 +78,48 @@ protected:
             datasets,
             nullptr,
             QTrading::Infra::Exchanges::BinanceSim::Support::BuildInitConfig(1000.0, 0));
+    }
+};
+
+class BinanceExchangeLogFixture : public InfraLogTestFixture {
+protected:
+    void WriteCsv(
+        const std::string& file_name,
+        const std::vector<std::tuple<
+            uint64_t, double, double, double, double, double,
+            uint64_t, double, int, double, double>>& rows)
+    {
+        std::ofstream file(tmp_dir / file_name, std::ios::trunc);
+        file << "openTime,open,high,low,close,volume,"
+                "closeTime,quoteVol,tradeCnt,takerBB,takerBQ\n";
+        for (const auto& row : rows) {
+            file << std::get<0>(row) << ','
+                 << std::get<1>(row) << ','
+                 << std::get<2>(row) << ','
+                 << std::get<3>(row) << ','
+                 << std::get<4>(row) << ','
+                 << std::get<5>(row) << ','
+                 << std::get<6>(row) << ','
+                 << std::get<7>(row) << ','
+                 << std::get<8>(row) << ','
+                 << std::get<9>(row) << ','
+                 << std::get<10>(row) << '\n';
+        }
+    }
+
+    void WriteFundingCsv(
+        const std::string& file_name,
+        const std::vector<std::tuple<uint64_t, double, std::optional<double>>>& rows)
+    {
+        std::ofstream file(tmp_dir / file_name, std::ios::trunc);
+        file << "FundingTime,Rate,MarkPrice\n";
+        for (const auto& row : rows) {
+            file << std::get<0>(row) << ',' << std::get<1>(row) << ',';
+            if (std::get<2>(row).has_value()) {
+                file << *std::get<2>(row);
+            }
+            file << '\n';
+        }
     }
 };
 
@@ -733,6 +776,90 @@ TEST_F(BinanceExchangeFixture, FundingTimestampParticipatesInStepTimelineInCurre
     auto step3 = market_channel->Receive();
     ASSERT_TRUE(step3.has_value());
     EXPECT_EQ(step3->get()->Timestamp, 120000u);
+}
+
+TEST_F(BinanceExchangeLogFixture, ReducedObservabilityStatusPrecedesEventRowsInCurrentKernel)
+{
+    WriteCsv("btc.csv", {
+        {      0, 100,100,100,100,1000, 30000,100,1,0,0 },
+        {  60000, 101,101,101,101,1000, 90000,100,1,0,0 }
+    });
+    WriteFundingCsv("btc_funding.csv", {
+        { 60000, 0.001, 100.0 }
+    });
+
+    Account::AccountInitConfig init{};
+    init.spot_initial_cash = 0.0;
+    init.perp_initial_wallet = 1000.0;
+    BinanceExchange exchange(
+        { { "BTCUSDT", (tmp_dir / "btc.csv").string(), std::optional<std::string>((tmp_dir / "btc_funding.csv").string()) } },
+        logger,
+        init,
+        77u);
+
+    ASSERT_TRUE(exchange.perp.place_order("BTCUSDT", 1.0, QTrading::Dto::Trading::OrderSide::Buy));
+    ASSERT_TRUE(exchange.step());
+    (void)exchange.get_market_channel()->Receive();
+    ASSERT_TRUE(exchange.step());
+    (void)exchange.get_market_channel()->Receive();
+    StopLogger();
+
+    const auto account_rows = FilterRowsByModule(QTrading::Log::LogModule::Account);
+    const auto market_rows = FilterRowsByModule(QTrading::Log::LogModule::MarketEvent);
+    ASSERT_FALSE(account_rows.empty());
+    ASSERT_FALSE(market_rows.empty());
+    EXPECT_LT(account_rows.front().arrival_index, market_rows.front().arrival_index);
+
+    const auto funding_rows = FilterRowsByModule(QTrading::Log::LogModule::FundingEvent);
+    ASSERT_FALSE(funding_rows.empty());
+    EXPECT_LT(account_rows.front().arrival_index, funding_rows.front().arrival_index);
+}
+
+TEST_F(BinanceExchangeLogFixture, ReducedObservabilityFundingOnlyStepCarriesStepContextInCurrentKernel)
+{
+    WriteCsv("btc.csv", {
+        {      0, 100,100,100,100,1000, 30000,100,1,0,0 },
+        { 120000, 110,110,110,110,1000,150000,100,1,0,0 }
+    });
+    WriteFundingCsv("btc_funding.csv", {
+        { 60000, 0.001, 100.0 }
+    });
+
+    Account::AccountInitConfig init{};
+    init.spot_initial_cash = 0.0;
+    init.perp_initial_wallet = 1000.0;
+    BinanceExchange exchange(
+        { { "BTCUSDT", (tmp_dir / "btc.csv").string(), std::optional<std::string>((tmp_dir / "btc_funding.csv").string()) } },
+        logger,
+        init,
+        88u);
+
+    ASSERT_TRUE(exchange.perp.place_order("BTCUSDT", 1.0, QTrading::Dto::Trading::OrderSide::Buy));
+    ASSERT_TRUE(exchange.step());
+    (void)exchange.get_market_channel()->Receive();
+    ASSERT_TRUE(exchange.step());
+    auto funding_step = exchange.get_market_channel()->Receive();
+    ASSERT_TRUE(funding_step.has_value());
+    EXPECT_EQ(funding_step->get()->Timestamp, 60000u);
+    StopLogger();
+
+    const auto market_rows = FilterRowsByModule(QTrading::Log::LogModule::MarketEvent);
+    ASSERT_GE(market_rows.size(), 2u);
+    const auto* market_payload = RowPayloadCast<QTrading::Log::FileLogger::FeatherV2::MarketEventDto>(market_rows[1].row);
+    ASSERT_NE(market_payload, nullptr);
+    EXPECT_EQ(market_payload->run_id, 88u);
+    EXPECT_EQ(market_payload->step_seq, 2u);
+    EXPECT_EQ(market_payload->ts_local, 60000u);
+    EXPECT_FALSE(market_payload->has_kline);
+
+    const auto funding_rows = FilterRowsByModule(QTrading::Log::LogModule::FundingEvent);
+    ASSERT_FALSE(funding_rows.empty());
+    const auto* funding_payload = RowPayloadCast<QTrading::Log::FileLogger::FeatherV2::FundingEventDto>(funding_rows.front().row);
+    ASSERT_NE(funding_payload, nullptr);
+    EXPECT_EQ(funding_payload->run_id, 88u);
+    EXPECT_EQ(funding_payload->step_seq, 2u);
+    EXPECT_EQ(funding_payload->ts_local, 60000u);
+    EXPECT_EQ(funding_payload->symbol, "BTCUSDT");
 }
 
 } // namespace
