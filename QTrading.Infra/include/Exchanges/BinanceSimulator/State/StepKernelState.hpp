@@ -63,6 +63,7 @@ struct StepKernelState {
     std::vector<uint64_t> next_ts_by_symbol;
     std::vector<uint8_t> has_next_ts;
     std::priority_queue<StepKernelHeapItem, std::vector<StepKernelHeapItem>, StepKernelHeapItemGreater> next_ts_heap;
+    std::priority_queue<StepKernelHeapItem, std::vector<StepKernelHeapItem>, StepKernelHeapItemGreater> next_funding_ts_heap;
     uint64_t step_seq{ 0 };
     bool channels_closed{ false };
     uint64_t account_state_version{ 0 };
@@ -77,6 +78,7 @@ struct StepKernelState {
     bool has_published_positions{ false };
     bool has_published_orders{ false };
     std::vector<Domain::MatchFill> match_fills_scratch;
+    std::vector<QTrading::dto::Order> matching_orders_next_scratch;
     std::vector<double> matching_liquidity_scratch;
     std::vector<uint8_t> matching_has_liquidity_scratch;
     std::vector<double> matching_reducible_long_scratch;

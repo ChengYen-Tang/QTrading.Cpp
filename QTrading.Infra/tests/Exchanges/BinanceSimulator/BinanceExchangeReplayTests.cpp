@@ -779,6 +779,62 @@ TEST_F(BinanceExchangeFixture, FundingTimestampParticipatesInStepTimelineInCurre
     EXPECT_EQ(step3->get()->Timestamp, 120000u);
 }
 
+TEST_F(BinanceExchangeFixture, FundingTimelineUsesEarliestDueTimestampAcrossSymbolsInCurrentKernel)
+{
+    WriteCsv("btc.csv", {
+        {      0, 100,100,100,100,1000, 30000,100,1,0,0 },
+        { 120000, 101,101,101,101,1000,150000,100,1,0,0 }
+    });
+    WriteCsv("eth.csv", {
+        {      0, 200,200,200,200,1000, 30000,100,1,0,0 },
+        { 120000, 201,201,201,201,1000,150000,100,1,0,0 }
+    });
+    WriteFundingCsv("btc_funding.csv", {
+        { 30000, 0.001, 100.0 }
+    });
+    WriteFundingCsv("eth_funding.csv", {
+        { 60000, 0.001, 200.0 }
+    });
+
+    Account::AccountInitConfig init{};
+    init.spot_initial_cash = 0.0;
+    init.perp_initial_wallet = 1000.0;
+    BinanceExchange exchange(
+        {
+            { "BTCUSDT", (tmp_dir / "btc.csv").string(), std::optional<std::string>((tmp_dir / "btc_funding.csv").string()) },
+            { "ETHUSDT", (tmp_dir / "eth.csv").string(), std::optional<std::string>((tmp_dir / "eth_funding.csv").string()) }
+        },
+        nullptr,
+        init);
+
+    auto market_channel = exchange.get_market_channel();
+    ASSERT_TRUE(exchange.step());
+    auto step1 = market_channel->Receive();
+    ASSERT_TRUE(step1.has_value());
+    EXPECT_EQ(step1->get()->Timestamp, 0u);
+
+    ASSERT_TRUE(exchange.step());
+    auto step2 = market_channel->Receive();
+    ASSERT_TRUE(step2.has_value());
+    EXPECT_EQ(step2->get()->Timestamp, 30000u);
+    ASSERT_EQ(step2->get()->funding_by_id.size(), 2u);
+    EXPECT_TRUE(step2->get()->funding_by_id[0].has_value());
+    EXPECT_FALSE(step2->get()->funding_by_id[1].has_value());
+
+    ASSERT_TRUE(exchange.step());
+    auto step3 = market_channel->Receive();
+    ASSERT_TRUE(step3.has_value());
+    EXPECT_EQ(step3->get()->Timestamp, 60000u);
+    ASSERT_EQ(step3->get()->funding_by_id.size(), 2u);
+    EXPECT_FALSE(step3->get()->funding_by_id[0].has_value());
+    EXPECT_TRUE(step3->get()->funding_by_id[1].has_value());
+
+    ASSERT_TRUE(exchange.step());
+    auto step4 = market_channel->Receive();
+    ASSERT_TRUE(step4.has_value());
+    EXPECT_EQ(step4->get()->Timestamp, 120000u);
+}
+
 TEST_F(BinanceExchangeFixture, FundingUsesRawMarkDatasetWhenFundingMarkMissingInCurrentKernel)
 {
     WriteCsv("btc.csv", {

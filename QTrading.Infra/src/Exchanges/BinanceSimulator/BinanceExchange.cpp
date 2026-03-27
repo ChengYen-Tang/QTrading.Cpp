@@ -131,6 +131,10 @@ void BinanceExchange::initialize_step_kernel_state_(const std::vector<SymbolData
             if (funding_data.get_count() > 0) {
                 step_kernel_state_->next_funding_ts_by_symbol[i] = funding_data.get_funding(0).FundingTime;
                 step_kernel_state_->has_next_funding_ts[i] = 1;
+                step_kernel_state_->next_funding_ts_heap.push(State::StepKernelHeapItem{
+                    step_kernel_state_->next_funding_ts_by_symbol[i],
+                    i
+                });
             }
         }
         if (ds.mark_kline_csv.has_value() && !ds.mark_kline_csv->empty()) {

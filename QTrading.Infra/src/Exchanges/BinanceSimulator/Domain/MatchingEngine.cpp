@@ -76,6 +76,10 @@ void MatchingEngine::RunStep(
         return;
     }
 
+    if (out_fills.capacity() < runtime_state.orders.size()) {
+        out_fills.reserve(runtime_state.orders.size());
+    }
+
     auto& liquidity_left = step_state.matching_liquidity_scratch;
     auto& has_liquidity = step_state.matching_has_liquidity_scratch;
     auto& reducible_long_qty = step_state.matching_reducible_long_scratch;
@@ -95,30 +99,32 @@ void MatchingEngine::RunStep(
     }
 
     auto& orders = runtime_state.orders;
-    size_t i = 0;
-    while (i < orders.size()) {
-        auto& order = orders[i];
+    auto& next_orders = step_state.matching_orders_next_scratch;
+    next_orders.clear();
+    next_orders.reserve(orders.size());
+    for (auto& order_slot : orders) {
+        QTrading::dto::Order order = std::move(order_slot);
         const auto symbol_it = step_state.symbol_to_id.find(order.symbol);
         if (symbol_it == step_state.symbol_to_id.end()) {
-            ++i;
+            next_orders.emplace_back(std::move(order));
             continue;
         }
         const size_t symbol_index = symbol_it->second;
         if (symbol_index == std::numeric_limits<size_t>::max() ||
             symbol_index >= market.trade_klines_by_id.size() ||
             !market.trade_klines_by_id[symbol_index].has_value()) {
-            ++i;
+            next_orders.emplace_back(std::move(order));
             continue;
         }
 
         if (!has_liquidity[symbol_index] || liquidity_left[symbol_index] <= kEpsilon) {
-            ++i;
+            next_orders.emplace_back(std::move(order));
             continue;
         }
 
         const auto& kline = *market.trade_klines_by_id[symbol_index];
         if (!is_marketable(order, kline)) {
-            ++i;
+            next_orders.emplace_back(std::move(order));
             continue;
         }
 
@@ -134,14 +140,14 @@ void MatchingEngine::RunStep(
                 reducible_qty = reducible_short_qty[symbol_index];
             }
             if (reducible_qty <= kEpsilon) {
-                ++i;
+                next_orders.emplace_back(std::move(order));
                 continue;
             }
             max_fill_qty = std::min(max_fill_qty, reducible_qty);
         }
         const double fill_qty = max_fill_qty;
         if (fill_qty <= kEpsilon) {
-            ++i;
+            next_orders.emplace_back(std::move(order));
             continue;
         }
 
@@ -167,12 +173,11 @@ void MatchingEngine::RunStep(
             }
         }
         order.quantity = request_qty - fill_qty;
-        if (order.quantity <= kEpsilon) {
-            orders.erase(orders.begin() + static_cast<std::ptrdiff_t>(i));
-            continue;
+        if (order.quantity > kEpsilon) {
+            next_orders.emplace_back(std::move(order));
         }
-        ++i;
     }
+    orders.swap(next_orders);
 }
 
 } // namespace QTrading::Infra::Exchanges::BinanceSim::Domain

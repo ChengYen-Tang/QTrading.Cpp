@@ -226,40 +226,52 @@ bool apply_funding_for_step(
 void publish_position_order_channels(
     BinanceExchange& exchange,
     const State::BinanceExchangeRuntimeState& runtime_state,
-    State::StepKernelState& step_state)
+    State::StepKernelState& step_state,
+    bool orders_maybe_changed,
+    bool positions_maybe_changed)
 {
-    if (step_state.account_state_version == step_state.last_published_account_state_version) {
+    if (!orders_maybe_changed &&
+        !positions_maybe_changed &&
+        step_state.account_state_version == step_state.last_published_account_state_version) {
+        return;
+    }
+    if (!orders_maybe_changed && !positions_maybe_changed) {
+        step_state.last_published_account_state_version = step_state.account_state_version;
         return;
     }
 
-    const auto& orders = runtime_state.orders;
-    if (!step_state.has_published_orders) {
-        if (!orders.empty() && exchange.get_order_channel()) {
-            exchange.get_order_channel()->Send(orders);
+    if (orders_maybe_changed) {
+        const auto& orders = runtime_state.orders;
+        if (!step_state.has_published_orders) {
+            if (!orders.empty() && exchange.get_order_channel()) {
+                exchange.get_order_channel()->Send(orders);
+                step_state.last_published_orders = orders;
+                step_state.has_published_orders = true;
+            }
+        }
+        else if (!vector_equal(orders, step_state.last_published_orders, order_equal)) {
+            if (exchange.get_order_channel()) {
+                exchange.get_order_channel()->Send(orders);
+            }
             step_state.last_published_orders = orders;
-            step_state.has_published_orders = true;
         }
-    }
-    else if (!vector_equal(orders, step_state.last_published_orders, order_equal)) {
-        if (exchange.get_order_channel()) {
-            exchange.get_order_channel()->Send(orders);
-        }
-        step_state.last_published_orders = orders;
     }
 
-    const auto& positions = runtime_state.positions;
-    if (!step_state.has_published_positions) {
-        if (!positions.empty() && exchange.get_position_channel()) {
-            exchange.get_position_channel()->Send(positions);
+    if (positions_maybe_changed) {
+        const auto& positions = runtime_state.positions;
+        if (!step_state.has_published_positions) {
+            if (!positions.empty() && exchange.get_position_channel()) {
+                exchange.get_position_channel()->Send(positions);
+                step_state.last_published_positions = positions;
+                step_state.has_published_positions = true;
+            }
+        }
+        else if (!vector_equal(positions, step_state.last_published_positions, position_equal)) {
+            if (exchange.get_position_channel()) {
+                exchange.get_position_channel()->Send(positions);
+            }
             step_state.last_published_positions = positions;
-            step_state.has_published_positions = true;
         }
-    }
-    else if (!vector_equal(positions, step_state.last_published_positions, position_equal)) {
-        if (exchange.get_position_channel()) {
-            exchange.get_position_channel()->Send(positions);
-        }
-        step_state.last_published_positions = positions;
     }
 
     step_state.last_published_account_state_version = step_state.account_state_version;
@@ -354,6 +366,10 @@ void emit_market_funding_events(
     const std::shared_ptr<QTrading::Log::Logger>& logger)
 {
     if (!logger || !observable_ctx.market_payload) {
+        return;
+    }
+    if (step_state.log_module_market_event_id == QTrading::Log::Logger::kInvalidModuleId &&
+        step_state.log_module_funding_event_id == QTrading::Log::Logger::kInvalidModuleId) {
         return;
     }
 
@@ -496,7 +512,7 @@ void emit_reduced_step_logs(
         logger,
         observable_ctx.account_state_version,
         step_state);
-    // Reduced Phase-A scope decision:
+    // Reduced-scope decision:
     // - AccountEvent/PositionEvent/OrderEvent modules are intentionally not restored
     //   yet for current kernel, to avoid implying full logger parity.
     // - Event version debounce therefore applies to status snapshot only.
@@ -532,7 +548,26 @@ bool StepKernel::run_step() const
     }
 
     ++step_state.step_seq;
+    bool orders_maybe_changed = false;
+    bool positions_maybe_changed = false;
+    if (!step_state.has_published_orders) {
+        orders_maybe_changed = !runtime_state.orders.empty();
+    }
+    else if (runtime_state.orders.size() != step_state.last_published_orders.size()) {
+        orders_maybe_changed = true;
+    }
+    if (!step_state.has_published_positions) {
+        positions_maybe_changed = !runtime_state.positions.empty();
+    }
+    else if (runtime_state.positions.size() != step_state.last_published_positions.size()) {
+        positions_maybe_changed = true;
+    }
+    const bool has_deferred_before_flush = !runtime_state.deferred_order_commands.empty();
+    const size_t orders_before_flush = runtime_state.orders.size();
     OrderCommandKernel(exchange_).FlushDeferredForStep(step_state.step_seq);
+    orders_maybe_changed = orders_maybe_changed ||
+        has_deferred_before_flush ||
+        runtime_state.orders.size() != orders_before_flush;
     QTrading::Utils::GlobalTimestamp.store(frame.ts_exchange, std::memory_order_release);
     runtime_state.last_status_snapshot.ts_exchange = frame.ts_exchange;
     if (frame.market_payload) {
@@ -550,6 +585,8 @@ bool StepKernel::run_step() const
                 Domain::MatchingEngine::RunStep(runtime_state, step_state, *frame.market_payload, fills);
                 if (!fills.empty()) {
                     ++step_state.account_state_version;
+                    orders_maybe_changed = true;
+                    positions_maybe_changed = true;
                 }
                 Domain::FillSettlementEngine::Apply(runtime_state, exchange_.account_state(), fills);
             });
@@ -559,6 +596,8 @@ bool StepKernel::run_step() const
                 step_state,
                 *frame.market_payload)) {
             ++step_state.account_state_version;
+            orders_maybe_changed = true;
+            positions_maybe_changed = true;
         }
     }
 
@@ -573,7 +612,12 @@ bool StepKernel::run_step() const
     update_snapshot_state(snapshot_state, step_state, observable_ctx);
     emit_reduced_step_logs(runtime_state, step_state, snapshot_state, exchange_.account_state(), observable_ctx);
     Output::ChannelPublisher::PublishStep(exchange_, observable_ctx);
-    publish_position_order_channels(exchange_, runtime_state, step_state);
+    publish_position_order_channels(
+        exchange_,
+        runtime_state,
+        step_state,
+        orders_maybe_changed,
+        positions_maybe_changed);
     step_state.channels_closed = false;
     return true;
 }

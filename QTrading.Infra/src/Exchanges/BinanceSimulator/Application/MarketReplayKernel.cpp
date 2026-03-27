@@ -24,6 +24,21 @@ void drop_stale_heap_entries(State::StepKernelState& state)
     }
 }
 
+void drop_stale_funding_heap_entries(State::StepKernelState& state)
+{
+    while (!state.next_funding_ts_heap.empty()) {
+        const auto top = state.next_funding_ts_heap.top();
+        if (top.sym_id >= state.has_next_funding_ts.size() ||
+            !state.has_next_funding_ts[top.sym_id] ||
+            top.sym_id >= state.next_funding_ts_by_symbol.size() ||
+            state.next_funding_ts_by_symbol[top.sym_id] != top.ts) {
+            state.next_funding_ts_heap.pop();
+            continue;
+        }
+        break;
+    }
+}
+
 } // namespace
 
 MarketReplayStepFrame MarketReplayKernel::Next(State::StepKernelState& state)
@@ -36,15 +51,10 @@ MarketReplayStepFrame MarketReplayKernel::Next(State::StepKernelState& state)
         ? std::numeric_limits<uint64_t>::max()
         : state.next_ts_heap.top().ts;
 
-    uint64_t funding_next_ts = std::numeric_limits<uint64_t>::max();
-    for (size_t i = 0; i < state.has_next_funding_ts.size(); ++i) {
-        if (!state.has_next_funding_ts[i]) {
-            continue;
-        }
-        if (state.next_funding_ts_by_symbol[i] < funding_next_ts) {
-            funding_next_ts = state.next_funding_ts_by_symbol[i];
-        }
-    }
+    drop_stale_funding_heap_entries(state);
+    const uint64_t funding_next_ts = state.next_funding_ts_heap.empty()
+        ? std::numeric_limits<uint64_t>::max()
+        : state.next_funding_ts_heap.top().ts;
 
     const uint64_t ts = std::min(market_next_ts, funding_next_ts);
     if (ts == std::numeric_limits<uint64_t>::max()) {
@@ -165,6 +175,7 @@ MarketReplayStepFrame MarketReplayKernel::Next(State::StepKernelState& state)
         state.funding_cursor_by_symbol[i] = cursor;
         if (cursor < funding_data.get_count()) {
             state.next_funding_ts_by_symbol[i] = funding_data.get_funding(cursor).FundingTime;
+            state.next_funding_ts_heap.push(State::StepKernelHeapItem{ state.next_funding_ts_by_symbol[i], i });
         }
         else {
             state.has_next_funding_ts[i] = 0;
