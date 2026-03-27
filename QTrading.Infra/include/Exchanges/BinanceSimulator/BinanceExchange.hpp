@@ -32,7 +32,6 @@ class StepKernel;
 
 namespace QTrading::Infra::Exchanges::BinanceSim::Output {
 class SnapshotBuilder;
-class EventCaptureBoundary;
 class PositionOrderSnapshotGate;
 }
 
@@ -87,7 +86,6 @@ private:
     friend class Application::OrderCommandKernel;
     friend class Application::StepKernel;
     friend class Output::SnapshotBuilder;
-    friend class Output::EventCaptureBoundary;
     friend class Output::PositionOrderSnapshotGate;
 
     /// Initializes bounded/unbounded public channels according to contract.

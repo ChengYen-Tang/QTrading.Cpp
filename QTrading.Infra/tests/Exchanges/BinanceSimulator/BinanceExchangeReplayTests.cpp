@@ -73,6 +73,22 @@ protected:
         }
     }
 
+    void WriteCompactCsv(
+        const std::string& file_name,
+        const std::vector<std::tuple<uint64_t, double, double, double, double, uint64_t>>& rows)
+    {
+        std::ofstream file(tmp_dir / file_name, std::ios::trunc);
+        file << "openTime,open,high,low,close,closeTime\n";
+        for (const auto& row : rows) {
+            file << std::get<0>(row) << ','
+                 << std::get<1>(row) << ','
+                 << std::get<2>(row) << ','
+                 << std::get<3>(row) << ','
+                 << std::get<4>(row) << ','
+                 << std::get<5>(row) << '\n';
+        }
+    }
+
     BinanceExchange MakeExchange(const std::vector<BinanceExchange::SymbolDataset>& datasets)
     {
         return BinanceExchange(
@@ -665,6 +681,58 @@ TEST_F(BinanceExchangeFixture, FundingApplyTimingControlsSameTimestampFundingInC
     EXPECT_NEAR(before - after, 0.1, 1e-6);
 }
 
+TEST_F(BinanceExchangeFixture, FundingAppliedAndDedupedInCurrentKernel)
+{
+    WriteCsv("btc.csv", {
+        {      0, 100,100,100,100,1000, 30000,100,1,0,0 },
+        {  60000, 110,110,110,110,1000, 90000,100,1,0,0 },
+        { 120000, 120,120,120,120,1000,150000,100,1,0,0 }
+    });
+    WriteCompactCsv("btc_mark.csv", {
+        {      0, 130,130,130,130,  30000 },
+        {  60000, 140,140,140,140,  90000 },
+        { 120000, 150,150,150,150, 150000 }
+    });
+    WriteFundingCsv("btc_funding.csv", {
+        {  60000,  0.001, std::nullopt },
+        { 120000, -0.002, 100.0 }
+    });
+
+    Account::AccountInitConfig init{};
+    init.spot_initial_cash = 0.0;
+    init.perp_initial_wallet = 1000.0;
+    BinanceExchange exchange(
+        { { "BTCUSDT",
+            (tmp_dir / "btc.csv").string(),
+            std::optional<std::string>((tmp_dir / "btc_funding.csv").string()),
+            std::optional<std::string>((tmp_dir / "btc_mark.csv").string()) } },
+        nullptr,
+        init);
+
+    ASSERT_TRUE(exchange.perp.place_order("BTCUSDT", 1.0, QTrading::Dto::Trading::OrderSide::Buy));
+    auto market_channel = exchange.get_market_channel();
+
+    BinanceExchange::StatusSnapshot snapshot{};
+    ASSERT_TRUE(exchange.step());
+    (void)market_channel->Receive();
+    exchange.FillStatusSnapshot(snapshot);
+    const double base = snapshot.wallet_balance;
+
+    ASSERT_TRUE(exchange.step());
+    (void)market_channel->Receive();
+    exchange.FillStatusSnapshot(snapshot);
+    const double after1 = snapshot.wallet_balance;
+    EXPECT_NEAR(after1 - base, -0.14, 1e-6);
+
+    ASSERT_TRUE(exchange.step());
+    (void)market_channel->Receive();
+    exchange.FillStatusSnapshot(snapshot);
+    const double after2 = snapshot.wallet_balance;
+    EXPECT_NEAR(after2 - base, 0.06, 1e-6);
+
+    EXPECT_FALSE(exchange.step());
+}
+
 TEST_F(BinanceExchangeFixture, FundingWithoutMarkSourceIsSkippedInCurrentKernel)
 {
     WriteCsv("btc.csv", {
@@ -694,6 +762,38 @@ TEST_F(BinanceExchangeFixture, FundingWithoutMarkSourceIsSkippedInCurrentKernel)
     exchange.FillStatusSnapshot(snapshot);
     EXPECT_EQ(snapshot.funding_applied_events, 0u);
     EXPECT_GE(snapshot.funding_skipped_no_mark, 1u);
+}
+
+TEST_F(BinanceExchangeFixture, NoFundingPathKeepsBalanceInCurrentKernel)
+{
+    WriteCsv("btc.csv", {
+        {      0, 100,100,100,100,1000, 30000,100,1,0,0 },
+        {  60000, 110,110,110,110,1000, 90000,100,1,0,0 }
+    });
+
+    Account::AccountInitConfig init{};
+    init.spot_initial_cash = 0.0;
+    init.perp_initial_wallet = 1000.0;
+    BinanceExchange exchange(
+        { { "BTCUSDT", (tmp_dir / "btc.csv").string() } },
+        nullptr,
+        init);
+
+    ASSERT_TRUE(exchange.perp.place_order("BTCUSDT", 1.0, QTrading::Dto::Trading::OrderSide::Buy));
+    auto market_channel = exchange.get_market_channel();
+
+    BinanceExchange::StatusSnapshot snapshot{};
+    ASSERT_TRUE(exchange.step());
+    (void)market_channel->Receive();
+    exchange.FillStatusSnapshot(snapshot);
+    const double base = snapshot.wallet_balance;
+
+    ASSERT_TRUE(exchange.step());
+    (void)market_channel->Receive();
+    exchange.FillStatusSnapshot(snapshot);
+    const double after = snapshot.wallet_balance;
+
+    EXPECT_NEAR(after, base, 1e-8);
 }
 
 TEST_F(BinanceExchangeFixture, FundingAppliedEventsCountAffectedPerpPositionsInCurrentKernel)

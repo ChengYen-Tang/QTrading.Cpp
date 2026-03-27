@@ -1,4 +1,5 @@
 add_library(QTrading.Infra.Library STATIC
+  Exchanges/BinanceSimulator/Account/Account.cpp
   Data/Binance/FundingRateData.cpp
   Exchanges/BinanceSimulator/Adapters/AccountFacadeAdapter.cpp
   Data/Binance/MarketData.cpp
@@ -8,6 +9,8 @@ add_library(QTrading.Infra.Library STATIC
   Exchanges/BinanceSimulator/Application/TerminationPolicy.cpp
   Exchanges/BinanceSimulator/Application/StepKernel.cpp
   Exchanges/BinanceSimulator/Domain/BinanceRejectSurface.cpp
+  Exchanges/BinanceSimulator/Domain/AccountPolicyExecutionService.cpp
+  Exchanges/BinanceSimulator/Domain/AsyncOrderLatencyScheduler.cpp
   Exchanges/BinanceSimulator/Domain/FillSettlementEngine.cpp
   Exchanges/BinanceSimulator/Domain/LiquidationEligibilityDecision.cpp
   Exchanges/BinanceSimulator/Domain/LiquidationExecution.cpp

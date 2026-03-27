@@ -1,21 +1,26 @@
 #include <gtest/gtest.h>
 
+#include <optional>
+#include <unordered_map>
+
 #include "Exchanges/BinanceSimulator/Account/Account.hpp"
 #include "Exchanges/BinanceSimulator/Account/AccountPolicies.hpp"
 
-using QTrading::Dto::Market::Binance::KlineDto;
+using QTrading::Dto::Market::Binance::TradeKlineDto;
 using QTrading::Dto::Trading::OrderSide;
 using QTrading::Dto::Trading::PositionSide;
 using QTrading::dto::Order;
+using QTrading::Infra::Exchanges::BinanceSim::AccountPerSymbolMarketContext;
+using QTrading::Infra::Exchanges::BinanceSim::AccountPolicies;
 
 namespace {
 
-static std::unordered_map<std::string, KlineDto> oneKline(
+static std::unordered_map<std::string, TradeKlineDto> oneKline(
     const std::string& sym,
     double o, double h, double l, double c,
     double vol)
 {
-    KlineDto k;
+    TradeKlineDto k;
     k.OpenPrice = o;
     k.HighPrice = h;
     k.LowPrice = l;
@@ -28,10 +33,10 @@ static std::unordered_map<std::string, KlineDto> oneKline(
 
 TEST(AccountPoliciesTest, InjectedExecutionPriceIsUsed)
 {
-    Account::Policies p = AccountPolicies::Default();
+    AccountPolicies p = AccountPolicies::Default();
 
     // Force every fill to happen at 123 regardless of kline/order.
-    p.execution_price_ctx = [](const Order&, const Account::PerSymbolMarketContext&, double, double) {
+    p.execution_price_ctx = [](const Order&, const AccountPerSymbolMarketContext&, double, double) {
         return 123.0;
     };
 
@@ -48,7 +53,7 @@ TEST(AccountPoliciesTest, InjectedExecutionPriceIsUsed)
 
 TEST(AccountPoliciesTest, InjectedFeeRatesAffectChargedFeeRate)
 {
-    Account::Policies p = AccountPolicies::Default();
+    AccountPolicies p = AccountPolicies::Default();
 
     // Make maker=10%, taker=20% so we can see the effect clearly.
     p.fee_rates = [](int) {
@@ -56,7 +61,7 @@ TEST(AccountPoliciesTest, InjectedFeeRatesAffectChargedFeeRate)
     };
 
     // Always taker so fee_rate should be 0.20.
-    p.can_fill_and_taker_ctx = [](const Order&, const Account::PerSymbolMarketContext&) {
+    p.can_fill_and_taker_ctx = [](const Order&, const AccountPerSymbolMarketContext&) {
         return std::make_pair(true, true);
     };
 
@@ -78,11 +83,11 @@ TEST(AccountPoliciesTest, InjectedFeeRatesAffectChargedFeeRate)
 
 TEST(AccountPoliciesTest, ContextExecutionPriceSeesMarkPrice)
 {
-    Account::Policies p = AccountPolicies::Default();
+    AccountPolicies p = AccountPolicies::Default();
 
     bool context_called = false;
     std::optional<double> observed_mark;
-    p.execution_price_ctx = [&](const Order&, const Account::PerSymbolMarketContext& ctx, double, double) {
+    p.execution_price_ctx = [&](const Order&, const AccountPerSymbolMarketContext& ctx, double, double) {
         context_called = true;
         observed_mark = ctx.last_mark_price;
         return ctx.last_mark_price.value_or(0.0);
