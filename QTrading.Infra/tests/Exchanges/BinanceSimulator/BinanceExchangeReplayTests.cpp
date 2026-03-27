@@ -24,7 +24,7 @@ protected:
     void SetUp() override
     {
         tmp_dir = fs::temp_directory_path() /
-            (std::string("QTradingBaselineReplay_") +
+            (std::string("QTradingReplay_") +
              ::testing::UnitTest::GetInstance()->current_test_info()->name());
         fs::create_directories(tmp_dir);
     }
@@ -124,7 +124,7 @@ protected:
     }
 };
 
-// Baseline reference: BinanceExchangeFixture.SymbolsSynchronisedWithHoles
+// Source reference: BinanceExchangeFixture.SymbolsSynchronisedWithHoles
 TEST_F(BinanceExchangeFixture, SymbolsSynchronisedWithHoles)
 {
     WriteCsv("btc.csv", {
@@ -195,7 +195,7 @@ TEST_F(BinanceExchangeFixture, StepSuccessPublishesMarketChannel)
     EXPECT_EQ(dto.value()->Timestamp, 1000u);
 }
 
-// Baseline reference: EOF behavior from BinanceExchangeFixture.PushOnlyOnChange
+// Source reference: EOF behavior from BinanceExchangeFixture.PushOnlyOnChange
 TEST_F(BinanceExchangeFixture, ReplayExhaustedClosesAllPublicChannels)
 {
     WriteCsv("btc.csv", {
@@ -217,7 +217,7 @@ TEST_F(BinanceExchangeFixture, ReplayExhaustedClosesAllPublicChannels)
     EXPECT_TRUE(exchange.get_order_channel()->IsClosed());
 }
 
-// Baseline observability alignment: no additional channel payload after exhaustion.
+// Observability alignment: no additional channel payload after exhaustion.
 TEST_F(BinanceExchangeFixture, ReplayExhaustedKeepsChannelsClosedOnSubsequentSteps)
 {
     WriteCsv("btc.csv", {
@@ -242,7 +242,7 @@ TEST_F(BinanceExchangeFixture, ReplayExhaustedKeepsChannelsClosedOnSubsequentSte
     EXPECT_FALSE(exchange.get_order_channel()->TryReceive().has_value());
 }
 
-// Baseline reference: BinanceExchangeFixture.StatusSnapshotPriceIncludesTradeMarkAndIndex
+// Source reference: BinanceExchangeFixture.StatusSnapshotPriceIncludesTradeMarkAndIndex
 TEST_F(BinanceExchangeFixture, StatusSnapshotCarriesLatestTradePriceContext)
 {
     WriteCsv("btc.csv", {
@@ -267,7 +267,7 @@ TEST_F(BinanceExchangeFixture, StatusSnapshotCarriesLatestTradePriceContext)
     EXPECT_FALSE(snapshot.prices[0].has_index_price);
 }
 
-// Baseline reference: BinanceExchangeFixture.StatusSnapshotExposesDualLedgerTotals
+// Source reference: BinanceExchangeFixture.StatusSnapshotExposesDualLedgerTotals
 TEST_F(BinanceExchangeFixture, StatusSnapshotExposesMinimalDualLedgerBalances)
 {
     WriteCsv("btc.csv", {
@@ -335,7 +335,7 @@ TEST_F(BinanceExchangeFixture, SpotSellWithoutInventoryRejectsSynchronously)
     EXPECT_TRUE(exchange.get_all_open_orders().empty());
 }
 
-// Baseline reference: BinanceExchangeFixture.DomainFacadeRoutesByInstrumentType
+// Source reference: BinanceExchangeFixture.DomainFacadeRoutesByInstrumentType
 TEST_F(BinanceExchangeFixture, SpotAndPerpSyncOrdersAreStoredByInstrumentType)
 {
     WriteCsv("btc.csv", {
@@ -476,7 +476,7 @@ TEST_F(BinanceExchangeFixture, PerpReduceOnlyOrderDoesNotFlipExposure)
     EXPECT_TRUE(exchange.get_all_positions().empty());
 }
 
-// Baseline source: BinanceExchangeTests.PushOnlyOnChange (trimmed to minimal no-fill contract).
+// Source case: BinanceExchangeTests.PushOnlyOnChange (trimmed to minimal no-fill contract).
 TEST_F(BinanceExchangeFixture, PerpLimitOrderNoFillKeepsOpenOrder)
 {
     WriteCsv("btc.csv", {
@@ -498,7 +498,7 @@ TEST_F(BinanceExchangeFixture, PerpLimitOrderNoFillKeepsOpenOrder)
     EXPECT_DOUBLE_EQ(orders[0].quantity, 1.0);
 }
 
-// Baseline source: AccountTests.UpdatePositionsPartialFillSameOrder (adapted to exchange step flow).
+// Source case: AccountTests.UpdatePositionsPartialFillSameOrder (adapted to exchange step flow).
 TEST_F(BinanceExchangeFixture, PerpMarketOrderPartialFillThenFullFill)
 {
     WriteCsv("btc.csv", {
@@ -530,7 +530,7 @@ TEST_F(BinanceExchangeFixture, PerpMarketOrderPartialFillThenFullFill)
     EXPECT_DOUBLE_EQ(exchange.get_all_positions()[0].quantity, 5.0);
 }
 
-// Baseline source: cases A05/T14 minimal subset (spot market buy with quote-fee settlement).
+// Source case: cases A05/T14 minimal subset (spot market buy with quote-fee settlement).
 TEST_F(BinanceExchangeFixture, SpotMarketBuySettlesCashInventoryAndFee)
 {
     WriteCsv("btc.csv", {
@@ -556,7 +556,7 @@ TEST_F(BinanceExchangeFixture, SpotMarketBuySettlesCashInventoryAndFee)
     EXPECT_NEAR(exchange.get_all_positions()[0].quantity, 1.0, 1e-12);
 }
 
-// Baseline source: BinanceExchangeTests.SnapshotConsistent/DomainFacadeRoutesByInstrumentType (perp fill path).
+// Source case: BinanceExchangeTests.SnapshotConsistent/DomainFacadeRoutesByInstrumentType (perp fill path).
 TEST_F(BinanceExchangeFixture, PerpMarketBuyCreatesPositionAndDebitsFee)
 {
     WriteCsv("btc.csv", {
@@ -1144,6 +1144,10 @@ TEST_F(BinanceExchangeLogFixture, ReducedObservabilityFundingOnlyStepCarriesStep
     EXPECT_EQ(funding_payload->step_seq, 2u);
     EXPECT_EQ(funding_payload->ts_local, 60000u);
     EXPECT_EQ(funding_payload->symbol, "BTCUSDT");
+
+    EXPECT_TRUE(FilterRowsByModule(QTrading::Log::LogModule::AccountEvent).empty());
+    EXPECT_TRUE(FilterRowsByModule(QTrading::Log::LogModule::PositionEvent).empty());
+    EXPECT_TRUE(FilterRowsByModule(QTrading::Log::LogModule::OrderEvent).empty());
 }
 
 TEST_F(BinanceExchangeLogFixture, FundingEventUsesResolvedRawMarkFallbackConsistentlyInCurrentKernel)
@@ -1240,6 +1244,10 @@ TEST_F(BinanceExchangeLogFixture, ReducedObservabilityStatusVersionGateDoesNotSu
     ASSERT_NE(event1, nullptr);
     EXPECT_EQ(event0->step_seq, 1u);
     EXPECT_EQ(event1->step_seq, 2u);
+
+    EXPECT_TRUE(FilterRowsByModule(QTrading::Log::LogModule::AccountEvent).empty());
+    EXPECT_TRUE(FilterRowsByModule(QTrading::Log::LogModule::PositionEvent).empty());
+    EXPECT_TRUE(FilterRowsByModule(QTrading::Log::LogModule::OrderEvent).empty());
 }
 
 TEST_F(BinanceExchangeLogFixture, ReducedObservabilityMarketEventCarriesRawMarkIndexContextInCurrentKernel)
@@ -1336,6 +1344,71 @@ TEST_F(BinanceExchangeLogFixture, ReducedObservabilityMarketThenFundingOrderWith
     EXPECT_EQ(funding_payload->step_seq, 2u);
     EXPECT_LT(market_step2->arrival_index, funding_rows.front().arrival_index);
     EXPECT_LT(market_payload->event_seq, funding_payload->event_seq);
+}
+
+TEST_F(BinanceExchangeLogFixture, ReducedObservabilityKeepsAccountPositionOrderEventModulesDisabledInCurrentKernel)
+{
+    WriteCsv("event_order_fill.csv", {
+        {      0, 100.0,100.0,100.0,100.0,1000.0, 30000,1000.0,1,0.0,0.0 }
+    });
+
+    Account::AccountInitConfig init{};
+    init.spot_initial_cash = 0.0;
+    init.perp_initial_wallet = 1000.0;
+    BinanceExchange exchange(
+        { { "BTCUSDT", (tmp_dir / "event_order_fill.csv").string() } },
+        logger,
+        init,
+        7200u);
+
+    ASSERT_TRUE(exchange.perp.place_order("BTCUSDT", 1.0, QTrading::Dto::Trading::OrderSide::Buy));
+    ASSERT_TRUE(exchange.step());
+    ASSERT_TRUE(exchange.get_market_channel()->Receive().has_value());
+    StopLogger();
+
+    ASSERT_FALSE(FilterRowsByModule(QTrading::Log::LogModule::MarketEvent).empty());
+    EXPECT_TRUE(FilterRowsByModule(QTrading::Log::LogModule::FundingEvent).empty());
+    EXPECT_TRUE(FilterRowsByModule(QTrading::Log::LogModule::AccountEvent).empty());
+    EXPECT_TRUE(FilterRowsByModule(QTrading::Log::LogModule::PositionEvent).empty());
+    EXPECT_TRUE(FilterRowsByModule(QTrading::Log::LogModule::OrderEvent).empty());
+}
+
+TEST_F(BinanceExchangeLogFixture, ReducedObservabilityLiquidationStepEmitsStatusAndMarketOnlyInCurrentKernel)
+{
+    WriteCsv("liq_trade.csv", {
+        {      0, 100,100,100,100,10000, 30000,10000,1,0,0 }
+    });
+    WriteCsv("liq_mark.csv", {
+        {      0, 10,10,10,10,10000, 30000,10000,1,0,0 }
+    });
+
+    Account::AccountInitConfig init{};
+    init.spot_initial_cash = 0.0;
+    init.perp_initial_wallet = 1000.0;
+    BinanceExchange exchange(
+        { { "BTCUSDT",
+            (tmp_dir / "liq_trade.csv").string(),
+            std::nullopt,
+            std::optional<std::string>((tmp_dir / "liq_mark.csv").string()) } },
+        logger,
+        init,
+        7400u);
+
+    ASSERT_TRUE(exchange.perp.place_order("BTCUSDT", 500.0, QTrading::Dto::Trading::OrderSide::Buy));
+    ASSERT_TRUE(exchange.perp.place_order("BTCUSDT", 1.0, 1.0, QTrading::Dto::Trading::OrderSide::Buy));
+    ASSERT_TRUE(exchange.step());
+    ASSERT_TRUE(exchange.get_market_channel()->Receive().has_value());
+    StopLogger();
+
+    const auto account_rows = FilterRowsByModule(QTrading::Log::LogModule::Account);
+    const auto market_rows = FilterRowsByModule(QTrading::Log::LogModule::MarketEvent);
+    ASSERT_FALSE(account_rows.empty());
+    ASSERT_FALSE(market_rows.empty());
+
+    EXPECT_TRUE(FilterRowsByModule(QTrading::Log::LogModule::FundingEvent).empty());
+    EXPECT_TRUE(FilterRowsByModule(QTrading::Log::LogModule::AccountEvent).empty());
+    EXPECT_TRUE(FilterRowsByModule(QTrading::Log::LogModule::PositionEvent).empty());
+    EXPECT_TRUE(FilterRowsByModule(QTrading::Log::LogModule::OrderEvent).empty());
 }
 
 } // namespace

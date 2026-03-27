@@ -7,7 +7,7 @@
 #include <cstdlib>
 
 #include "Exchanges/BinanceSimulator/BinanceExchange.hpp"
-#include "BaselineSemanticsInputPinning.hpp"
+#include "ReplaySemanticsInputPinning.hpp"
 
 using namespace QTrading::Infra::Exchanges::BinanceSim;
 using namespace QTrading::Dto::Market::Binance;
@@ -765,12 +765,12 @@ TEST_F(BinanceExchangeFixture, TradingSessionCoreV2DiagnosticTracksStepLifecycle
 TEST_F(BinanceExchangeFixture, BalanceDepletedTerminationClosesAllPublicChannels)
 {
     SCOPED_TRACE(::testing::Message()
-        << "baseline_pin id=" << QTrading::Infra::Tests::BaselineSemanticsPinning::kBalanceDepletionClosesPublicChannels.id
-        << " run_id=" << QTrading::Infra::Tests::BaselineSemanticsPinning::kBalanceDepletionClosesPublicChannels.run_id
-        << " baseline_input_version=" << QTrading::Infra::Tests::BaselineSemanticsPinning::kBaselineInputVersion
-        << " seed=" << QTrading::Infra::Tests::BaselineSemanticsPinning::kPinnedDeterministicSeed
+        << "scenario_pin id=" << QTrading::Infra::Tests::ReplaySemanticsPinning::kBalanceDepletionClosesPublicChannels.id
+        << " run_id=" << QTrading::Infra::Tests::ReplaySemanticsPinning::kBalanceDepletionClosesPublicChannels.run_id
+        << " input_fixture_version=" << QTrading::Infra::Tests::ReplaySemanticsPinning::kInputFixtureVersion
+        << " seed=" << QTrading::Infra::Tests::ReplaySemanticsPinning::kPinnedDeterministicSeed
         << " scenario=balance_depletion_closes_public_channels");
-    writeCsv(QTrading::Infra::Tests::BaselineSemanticsPinning::kBalanceDepletionTradeCsv, {
+    writeCsv(QTrading::Infra::Tests::ReplaySemanticsPinning::kBalanceDepletionTradeCsv, {
         {      0,100,100,100,100,1000, 30000,100,1,0,0 }
         });
 
@@ -779,10 +779,10 @@ TEST_F(BinanceExchangeFixture, BalanceDepletedTerminationClosesAllPublicChannels
     cfg.spot_initial_cash = 0.0;
 
     BinanceExchange ex(
-        { { "BTCUSDT", (tmpDir / QTrading::Infra::Tests::BaselineSemanticsPinning::kBalanceDepletionTradeCsv).string() } },
+        { { "BTCUSDT", (tmpDir / QTrading::Infra::Tests::ReplaySemanticsPinning::kBalanceDepletionTradeCsv).string() } },
         logger,
         cfg,
-        QTrading::Infra::Tests::BaselineSemanticsPinning::kBalanceDepletionClosesPublicChannels.run_id);
+        QTrading::Infra::Tests::ReplaySemanticsPinning::kBalanceDepletionClosesPublicChannels.run_id);
     auto mCh = ex.get_market_channel();
     auto pCh = ex.get_position_channel();
     auto oCh = ex.get_order_channel();
@@ -1111,7 +1111,7 @@ TEST_F(BinanceExchangeFixture, FacadeContractLegacyAndV2PrimaryKeepInputReturnAn
     EXPECT_TRUE(v2_primary.bridge_diag->routed_to_v2);
 }
 
-TEST_F(BinanceExchangeFixture, FacadeContractFallbackKeepsLegacyBaselineWhenV2Unavailable)
+TEST_F(BinanceExchangeFixture, FacadeContractFallbackKeepsLegacyBehaviorWhenV2Unavailable)
 {
     writeCsv("btc.csv", {
         {      0,100,100,100,100,1000, 30000,100,1,0,0 },

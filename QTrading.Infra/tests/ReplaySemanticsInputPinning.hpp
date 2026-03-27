@@ -2,9 +2,9 @@
 
 #include <cstdint>
 
-namespace QTrading::Infra::Tests::BaselineSemanticsPinning {
+namespace QTrading::Infra::Tests::ReplaySemanticsPinning {
 
-inline constexpr uint32_t kBaselineInputVersion = 1u;
+inline constexpr uint32_t kInputFixtureVersion = 1u;
 inline constexpr uint64_t kPinnedDeterministicSeed = 0x20260321u;
 
 struct ScenarioPin final {
@@ -30,4 +30,4 @@ inline constexpr char kLiquidationSyntheticFillTradeCsv[] = "liquidation_synthet
 inline constexpr char kLiquidationSyntheticFillMarkCsv[] = "liquidation_synthetic_fill_mark_v1.csv";
 inline constexpr char kBalanceDepletionTradeCsv[] = "balance_depletion_trade_v1.csv";
 
-} // namespace QTrading::Infra::Tests::BaselineSemanticsPinning
+} // namespace QTrading::Infra::Tests::ReplaySemanticsPinning

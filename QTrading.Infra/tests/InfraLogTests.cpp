@@ -9,7 +9,7 @@
 
 #include "Exchanges/BinanceSimulator/BinanceExchange.hpp"
 #include "Global.hpp"
-#include "BaselineSemanticsInputPinning.hpp"
+#include "ReplaySemanticsInputPinning.hpp"
 #include "InfraLogTestFixture.hpp"
 
 namespace {
@@ -415,7 +415,7 @@ std::vector<LegacyLogContractSnapshot> CaptureCriticalOnlySequenceWithLoggerMode
     QTrading::Utils::GlobalTimestamp.store(10u);
     if (!local_logger->Log(
             QTrading::Log::LogModuleToString(QTrading::Log::LogModule::RunMetadata),
-            MakeRunMetadata(700u, "critical-only", "baseline"))) {
+            MakeRunMetadata(700u, "critical-only", "reference"))) {
         local_logger->Stop();
         return {};
     }
@@ -437,7 +437,7 @@ std::vector<LegacyLogContractSnapshot> CaptureCriticalOnlySequenceWithLoggerMode
     QTrading::Utils::GlobalTimestamp.store(20u);
     if (!local_logger->Log(
             QTrading::Log::LogModuleToString(QTrading::Log::LogModule::RunMetadata),
-            MakeRunMetadata(701u, "critical-only-after", "baseline"))) {
+            MakeRunMetadata(701u, "critical-only-after", "reference"))) {
         local_logger->Stop();
         return {};
     }
@@ -901,12 +901,12 @@ TEST_F(InfraLogTestFixture, CriticalOnlyRowsKeepSameOrderWhenDebugChannelIsEnabl
 {
     StopLogger();
 
-    const auto baseline = CaptureCriticalOnlySequenceWithLoggerMode(tmp_dir / "baseline-critical", false);
+    const auto reference = CaptureCriticalOnlySequenceWithLoggerMode(tmp_dir / "reference-critical", false);
     const auto with_debug_channel = CaptureCriticalOnlySequenceWithLoggerMode(tmp_dir / "with-debug-channel", true);
 
-    ASSERT_FALSE(baseline.empty());
-    ASSERT_EQ(with_debug_channel.size(), baseline.size());
-    EXPECT_EQ(with_debug_channel, baseline);
+    ASSERT_FALSE(reference.empty());
+    ASSERT_EQ(with_debug_channel.size(), reference.size());
+    EXPECT_EQ(with_debug_channel, reference);
 }
 
 TEST_F(InfraLogTestFixture, InMemorySinkInjectionRowsRemainReadableAfterLoggerStop)
@@ -4734,22 +4734,22 @@ TEST_F(InfraLogTestFixture, StatusSnapshotsAreEmittedBeforeSameStepEvents)
     using QTrading::Log::FileLogger::FeatherV2::PositionEventDto;
 
     SCOPED_TRACE(::testing::Message()
-        << "baseline_pin id=" << QTrading::Infra::Tests::BaselineSemanticsPinning::kStatusSnapshotsBeforeEvents.id
-        << " run_id=" << QTrading::Infra::Tests::BaselineSemanticsPinning::kStatusSnapshotsBeforeEvents.run_id
-        << " baseline_input_version=" << QTrading::Infra::Tests::BaselineSemanticsPinning::kBaselineInputVersion
-        << " seed=" << QTrading::Infra::Tests::BaselineSemanticsPinning::kPinnedDeterministicSeed
+        << "scenario_pin id=" << QTrading::Infra::Tests::ReplaySemanticsPinning::kStatusSnapshotsBeforeEvents.id
+        << " run_id=" << QTrading::Infra::Tests::ReplaySemanticsPinning::kStatusSnapshotsBeforeEvents.run_id
+        << " input_fixture_version=" << QTrading::Infra::Tests::ReplaySemanticsPinning::kInputFixtureVersion
+        << " seed=" << QTrading::Infra::Tests::ReplaySemanticsPinning::kPinnedDeterministicSeed
         << " scenario=status_snapshots_before_same_step_events");
     WriteBinanceCsv(
-        tmp_dir / QTrading::Infra::Tests::BaselineSemanticsPinning::kStatusSnapshotsBeforeEventsTradeCsv,
+        tmp_dir / QTrading::Infra::Tests::ReplaySemanticsPinning::kStatusSnapshotsBeforeEventsTradeCsv,
         { { 0u, 100.0, 100.0, 100.0, 100.0, 100.0, 30000u, 100.0, 1, 0.0, 0.0 } });
 
     {
         BinanceExchange exchange(
-            { { "BTCUSDT", (tmp_dir / QTrading::Infra::Tests::BaselineSemanticsPinning::kStatusSnapshotsBeforeEventsTradeCsv).string() } },
+            { { "BTCUSDT", (tmp_dir / QTrading::Infra::Tests::ReplaySemanticsPinning::kStatusSnapshotsBeforeEventsTradeCsv).string() } },
             logger,
             1000.0,
             0,
-            QTrading::Infra::Tests::BaselineSemanticsPinning::kStatusSnapshotsBeforeEvents.run_id);
+            QTrading::Infra::Tests::ReplaySemanticsPinning::kStatusSnapshotsBeforeEvents.run_id);
         auto market_channel = exchange.get_market_channel();
 
         ASSERT_TRUE(exchange.perp.place_order("BTCUSDT", 1.0, 90.0, OrderSide::Buy));
@@ -4830,31 +4830,31 @@ TEST_F(InfraLogTestFixture, EventModulesPreserveMarketFundingAccountPositionOrde
     using QTrading::Log::FileLogger::FeatherV2::PositionEventDto;
 
     SCOPED_TRACE(::testing::Message()
-        << "baseline_pin id=" << QTrading::Infra::Tests::BaselineSemanticsPinning::kEventModuleOrdering.id
-        << " run_id=" << QTrading::Infra::Tests::BaselineSemanticsPinning::kEventModuleOrdering.run_id
-        << " baseline_input_version=" << QTrading::Infra::Tests::BaselineSemanticsPinning::kBaselineInputVersion
-        << " seed=" << QTrading::Infra::Tests::BaselineSemanticsPinning::kPinnedDeterministicSeed
+        << "scenario_pin id=" << QTrading::Infra::Tests::ReplaySemanticsPinning::kEventModuleOrdering.id
+        << " run_id=" << QTrading::Infra::Tests::ReplaySemanticsPinning::kEventModuleOrdering.run_id
+        << " input_fixture_version=" << QTrading::Infra::Tests::ReplaySemanticsPinning::kInputFixtureVersion
+        << " seed=" << QTrading::Infra::Tests::ReplaySemanticsPinning::kPinnedDeterministicSeed
         << " scenario=event_module_ordering_market_funding_account_position_order");
     WriteBinanceCsv(
-        tmp_dir / QTrading::Infra::Tests::BaselineSemanticsPinning::kEventModuleOrderingTradeCsv,
+        tmp_dir / QTrading::Infra::Tests::ReplaySemanticsPinning::kEventModuleOrderingTradeCsv,
         {
             { 0u, 100.0, 100.0, 100.0, 100.0, 1000.0, 30000u, 1000.0, 1, 0.0, 0.0 },
             { 60000u, 101.0, 101.0, 101.0, 101.0, 1000.0, 90000u, 1010.0, 1, 0.0, 0.0 }
         });
     WriteFundingCsv(
-        tmp_dir / QTrading::Infra::Tests::BaselineSemanticsPinning::kEventModuleOrderingFundingCsv,
+        tmp_dir / QTrading::Infra::Tests::ReplaySemanticsPinning::kEventModuleOrderingFundingCsv,
         { { 60000u, 0.0001, 101.0 } });
 
     {
         BinanceExchange exchange(
             { BinanceExchange::SymbolDataset{
                 "BTCUSDT",
-                (tmp_dir / QTrading::Infra::Tests::BaselineSemanticsPinning::kEventModuleOrderingTradeCsv).string(),
-                (tmp_dir / QTrading::Infra::Tests::BaselineSemanticsPinning::kEventModuleOrderingFundingCsv).string() } },
+                (tmp_dir / QTrading::Infra::Tests::ReplaySemanticsPinning::kEventModuleOrderingTradeCsv).string(),
+                (tmp_dir / QTrading::Infra::Tests::ReplaySemanticsPinning::kEventModuleOrderingFundingCsv).string() } },
             logger,
             1000.0,
             0,
-            QTrading::Infra::Tests::BaselineSemanticsPinning::kEventModuleOrdering.run_id);
+            QTrading::Infra::Tests::ReplaySemanticsPinning::kEventModuleOrdering.run_id);
         auto market_channel = exchange.get_market_channel();
 
         ASSERT_TRUE(exchange.perp.place_order("BTCUSDT", 1.0, OrderSide::Buy));
@@ -4929,13 +4929,13 @@ TEST_F(InfraLogTestFixture, AsyncAckPendingResolvedAndRejectMappingStayStable)
     using QTrading::Log::FileLogger::FeatherV2::OrderEventType;
 
     SCOPED_TRACE(::testing::Message()
-        << "baseline_pin id=" << QTrading::Infra::Tests::BaselineSemanticsPinning::kAsyncAckRejectMapping.id
-        << " run_id=" << QTrading::Infra::Tests::BaselineSemanticsPinning::kAsyncAckRejectMapping.run_id
-        << " baseline_input_version=" << QTrading::Infra::Tests::BaselineSemanticsPinning::kBaselineInputVersion
-        << " seed=" << QTrading::Infra::Tests::BaselineSemanticsPinning::kPinnedDeterministicSeed
+        << "scenario_pin id=" << QTrading::Infra::Tests::ReplaySemanticsPinning::kAsyncAckRejectMapping.id
+        << " run_id=" << QTrading::Infra::Tests::ReplaySemanticsPinning::kAsyncAckRejectMapping.run_id
+        << " input_fixture_version=" << QTrading::Infra::Tests::ReplaySemanticsPinning::kInputFixtureVersion
+        << " seed=" << QTrading::Infra::Tests::ReplaySemanticsPinning::kPinnedDeterministicSeed
         << " scenario=async_ack_pending_resolved_reject_mapping");
     WriteBinanceCsv(
-        tmp_dir / QTrading::Infra::Tests::BaselineSemanticsPinning::kAsyncAckRejectMappingTradeCsv,
+        tmp_dir / QTrading::Infra::Tests::ReplaySemanticsPinning::kAsyncAckRejectMappingTradeCsv,
         {
             { 0u, 100.0, 100.0, 100.0, 100.0, 100.0, 30000u, 100.0, 1, 0.0, 0.0 },
             { 60000u, 100.0, 100.0, 100.0, 100.0, 100.0, 90000u, 100.0, 1, 0.0, 0.0 }
@@ -4945,11 +4945,11 @@ TEST_F(InfraLogTestFixture, AsyncAckPendingResolvedAndRejectMappingStayStable)
     BinanceExchange::AsyncOrderAck rejected_ack{};
     {
         BinanceExchange exchange(
-            { { "BTCUSDT", (tmp_dir / QTrading::Infra::Tests::BaselineSemanticsPinning::kAsyncAckRejectMappingTradeCsv).string() } },
+            { { "BTCUSDT", (tmp_dir / QTrading::Infra::Tests::ReplaySemanticsPinning::kAsyncAckRejectMappingTradeCsv).string() } },
             logger,
             1000.0,
             0,
-            QTrading::Infra::Tests::BaselineSemanticsPinning::kAsyncAckRejectMapping.run_id);
+            QTrading::Infra::Tests::ReplaySemanticsPinning::kAsyncAckRejectMapping.run_id);
         exchange.set_order_latency_bars(1);
         auto market_channel = exchange.get_market_channel();
 
@@ -4999,32 +4999,32 @@ TEST_F(InfraLogTestFixture, FundingAndFillSameStepBeforeAfterMatchingRemainStabl
     using QTrading::Log::FileLogger::FeatherV2::FundingEventDto;
 
     SCOPED_TRACE(::testing::Message()
-        << "baseline_pin id=" << QTrading::Infra::Tests::BaselineSemanticsPinning::kFundingFillSameStepBeforeMatching.id
-        << " run_id=" << QTrading::Infra::Tests::BaselineSemanticsPinning::kFundingFillSameStepBeforeMatching.run_id
-        << " baseline_input_version=" << QTrading::Infra::Tests::BaselineSemanticsPinning::kBaselineInputVersion
-        << " seed=" << QTrading::Infra::Tests::BaselineSemanticsPinning::kPinnedDeterministicSeed
+        << "scenario_pin id=" << QTrading::Infra::Tests::ReplaySemanticsPinning::kFundingFillSameStepBeforeMatching.id
+        << " run_id=" << QTrading::Infra::Tests::ReplaySemanticsPinning::kFundingFillSameStepBeforeMatching.run_id
+        << " input_fixture_version=" << QTrading::Infra::Tests::ReplaySemanticsPinning::kInputFixtureVersion
+        << " seed=" << QTrading::Infra::Tests::ReplaySemanticsPinning::kPinnedDeterministicSeed
         << " scenario=funding_fill_same_step_before_matching");
     SCOPED_TRACE(::testing::Message()
-        << "baseline_pin id=" << QTrading::Infra::Tests::BaselineSemanticsPinning::kFundingFillSameStepAfterMatching.id
-        << " run_id=" << QTrading::Infra::Tests::BaselineSemanticsPinning::kFundingFillSameStepAfterMatching.run_id
-        << " baseline_input_version=" << QTrading::Infra::Tests::BaselineSemanticsPinning::kBaselineInputVersion
-        << " seed=" << QTrading::Infra::Tests::BaselineSemanticsPinning::kPinnedDeterministicSeed
+        << "scenario_pin id=" << QTrading::Infra::Tests::ReplaySemanticsPinning::kFundingFillSameStepAfterMatching.id
+        << " run_id=" << QTrading::Infra::Tests::ReplaySemanticsPinning::kFundingFillSameStepAfterMatching.run_id
+        << " input_fixture_version=" << QTrading::Infra::Tests::ReplaySemanticsPinning::kInputFixtureVersion
+        << " seed=" << QTrading::Infra::Tests::ReplaySemanticsPinning::kPinnedDeterministicSeed
         << " scenario=funding_fill_same_step_after_matching");
     WriteBinanceCsv(
-        tmp_dir / QTrading::Infra::Tests::BaselineSemanticsPinning::kFundingFillSameStepTradeCsv,
+        tmp_dir / QTrading::Infra::Tests::ReplaySemanticsPinning::kFundingFillSameStepTradeCsv,
         {
             { 0u, 100.0, 100.0, 100.0, 100.0, 1000.0, 30000u, 1000.0, 1, 0.0, 0.0 },
             { 60000u, 200.0, 200.0, 200.0, 200.0, 1000.0, 90000u, 2000.0, 1, 0.0, 0.0 }
         });
     WriteFundingCsv(
-        tmp_dir / QTrading::Infra::Tests::BaselineSemanticsPinning::kFundingFillSameStepFundingCsv,
+        tmp_dir / QTrading::Infra::Tests::ReplaySemanticsPinning::kFundingFillSameStepFundingCsv,
         { { 60000u, 0.001, 100.0 } });
 
     auto run_timing = [&](BinanceExchange::FundingApplyTiming timing, uint64_t run_id) -> double {
         BinanceExchange::StatusSnapshot snap{};
         BinanceExchange exchange(
-            { { "BTCUSDT", (tmp_dir / QTrading::Infra::Tests::BaselineSemanticsPinning::kFundingFillSameStepTradeCsv).string(),
-                std::optional<std::string>((tmp_dir / QTrading::Infra::Tests::BaselineSemanticsPinning::kFundingFillSameStepFundingCsv).string()) } },
+            { { "BTCUSDT", (tmp_dir / QTrading::Infra::Tests::ReplaySemanticsPinning::kFundingFillSameStepTradeCsv).string(),
+                std::optional<std::string>((tmp_dir / QTrading::Infra::Tests::ReplaySemanticsPinning::kFundingFillSameStepFundingCsv).string()) } },
             logger,
             1000.0,
             0,
@@ -5063,10 +5063,10 @@ TEST_F(InfraLogTestFixture, FundingAndFillSameStepBeforeAfterMatchingRemainStabl
 
     const double before_wallet = run_timing(
         BinanceExchange::FundingApplyTiming::BeforeMatching,
-        QTrading::Infra::Tests::BaselineSemanticsPinning::kFundingFillSameStepBeforeMatching.run_id);
+        QTrading::Infra::Tests::ReplaySemanticsPinning::kFundingFillSameStepBeforeMatching.run_id);
     const double after_wallet = run_timing(
         BinanceExchange::FundingApplyTiming::AfterMatching,
-        QTrading::Infra::Tests::BaselineSemanticsPinning::kFundingFillSameStepAfterMatching.run_id);
+        QTrading::Infra::Tests::ReplaySemanticsPinning::kFundingFillSameStepAfterMatching.run_id);
 
     StopLogger();
 
@@ -5076,10 +5076,10 @@ TEST_F(InfraLogTestFixture, FundingAndFillSameStepBeforeAfterMatchingRemainStabl
     for (const auto& row_view : funding_rows) {
         const auto* payload = RowPayloadCast<FundingEventDto>(row_view.row);
         ASSERT_NE(payload, nullptr);
-        if (payload->run_id == QTrading::Infra::Tests::BaselineSemanticsPinning::kFundingFillSameStepBeforeMatching.run_id) {
+        if (payload->run_id == QTrading::Infra::Tests::ReplaySemanticsPinning::kFundingFillSameStepBeforeMatching.run_id) {
             before_events.push_back(*payload);
         }
-        if (payload->run_id == QTrading::Infra::Tests::BaselineSemanticsPinning::kFundingFillSameStepAfterMatching.run_id) {
+        if (payload->run_id == QTrading::Infra::Tests::ReplaySemanticsPinning::kFundingFillSameStepAfterMatching.run_id) {
             after_events.push_back(*payload);
         }
     }
@@ -5105,16 +5105,16 @@ TEST_F(InfraLogTestFixture, LiquidationSyntheticFillContractRemainsVisible)
     using QTrading::Log::FileLogger::FeatherV2::PositionEventDto;
 
     SCOPED_TRACE(::testing::Message()
-        << "baseline_pin id=" << QTrading::Infra::Tests::BaselineSemanticsPinning::kLiquidationSyntheticFillContract.id
-        << " run_id=" << QTrading::Infra::Tests::BaselineSemanticsPinning::kLiquidationSyntheticFillContract.run_id
-        << " baseline_input_version=" << QTrading::Infra::Tests::BaselineSemanticsPinning::kBaselineInputVersion
-        << " seed=" << QTrading::Infra::Tests::BaselineSemanticsPinning::kPinnedDeterministicSeed
+        << "scenario_pin id=" << QTrading::Infra::Tests::ReplaySemanticsPinning::kLiquidationSyntheticFillContract.id
+        << " run_id=" << QTrading::Infra::Tests::ReplaySemanticsPinning::kLiquidationSyntheticFillContract.run_id
+        << " input_fixture_version=" << QTrading::Infra::Tests::ReplaySemanticsPinning::kInputFixtureVersion
+        << " seed=" << QTrading::Infra::Tests::ReplaySemanticsPinning::kPinnedDeterministicSeed
         << " scenario=liquidation_synthetic_fill_contract_visibility");
     WriteBinanceCsv(
-        tmp_dir / QTrading::Infra::Tests::BaselineSemanticsPinning::kLiquidationSyntheticFillTradeCsv,
+        tmp_dir / QTrading::Infra::Tests::ReplaySemanticsPinning::kLiquidationSyntheticFillTradeCsv,
         { { 0u, 1.0, 1.0, 1.0, 1.0, 10000.0, 30000u, 10000.0, 1, 0.0, 0.0 } });
     WriteBinanceCsv(
-        tmp_dir / QTrading::Infra::Tests::BaselineSemanticsPinning::kLiquidationSyntheticFillMarkCsv,
+        tmp_dir / QTrading::Infra::Tests::ReplaySemanticsPinning::kLiquidationSyntheticFillMarkCsv,
         { { 0u, 1.0, 1.0, 1.0, 1.0, 10000.0, 30000u, 10000.0, 1, 0.0, 0.0 } });
 
     auto account = std::make_shared<Account>(350000.0, 0);
@@ -5134,12 +5134,12 @@ TEST_F(InfraLogTestFixture, LiquidationSyntheticFillContractRemainsVisible)
         BinanceExchange exchange(
             { BinanceExchange::SymbolDataset{
                 "BTCUSDT",
-                (tmp_dir / QTrading::Infra::Tests::BaselineSemanticsPinning::kLiquidationSyntheticFillTradeCsv).string(),
+                (tmp_dir / QTrading::Infra::Tests::ReplaySemanticsPinning::kLiquidationSyntheticFillTradeCsv).string(),
                 std::nullopt,
-                (tmp_dir / QTrading::Infra::Tests::BaselineSemanticsPinning::kLiquidationSyntheticFillMarkCsv).string() } },
+                (tmp_dir / QTrading::Infra::Tests::ReplaySemanticsPinning::kLiquidationSyntheticFillMarkCsv).string() } },
             logger,
             account,
-            QTrading::Infra::Tests::BaselineSemanticsPinning::kLiquidationSyntheticFillContract.run_id);
+            QTrading::Infra::Tests::ReplaySemanticsPinning::kLiquidationSyntheticFillContract.run_id);
         auto market_channel = exchange.get_market_channel();
 
         ASSERT_TRUE(exchange.step());
@@ -5805,7 +5805,7 @@ TEST_F(InfraLogTestFixture, AggregatedFundingEventsMatchAccountEventAndSnapshotW
             { 120000u, -0.002, 100.0 }
         });
 
-    BinanceExchange::StatusSnapshot baseline_snap{};
+    BinanceExchange::StatusSnapshot initial_snap{};
     BinanceExchange::StatusSnapshot final_snap{};
     {
         BinanceExchange exchange(
@@ -5822,7 +5822,7 @@ TEST_F(InfraLogTestFixture, AggregatedFundingEventsMatchAccountEventAndSnapshotW
         ASSERT_TRUE(exchange.perp.place_order("BTCUSDT", 1.0, OrderSide::Buy));
         ASSERT_TRUE(exchange.step());
         ASSERT_TRUE(market_channel->Receive().has_value());
-        exchange.FillStatusSnapshot(baseline_snap);
+        exchange.FillStatusSnapshot(initial_snap);
 
         ASSERT_TRUE(exchange.step());
         ASSERT_TRUE(market_channel->Receive().has_value());
@@ -5856,6 +5856,6 @@ TEST_F(InfraLogTestFixture, AggregatedFundingEventsMatchAccountEventAndSnapshotW
     }
 
     ASSERT_EQ(funding_steps.size(), 2u);
-    EXPECT_NEAR(final_snap.wallet_balance - baseline_snap.wallet_balance, funding_sum, 1e-9);
+    EXPECT_NEAR(final_snap.wallet_balance - initial_snap.wallet_balance, funding_sum, 1e-9);
     EXPECT_NEAR(funding_wallet_delta_sum, funding_sum, 1e-9);
 }

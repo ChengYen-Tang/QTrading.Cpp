@@ -922,7 +922,7 @@ TEST_F(PerfGuardrailFixture, CompareDiagnosticOverheadIsQuantifiedAndBoundedByBu
 
 TEST_F(PerfGuardrailFixture, LogHeavyScenarioCoversRowVolumeOrderingBatchBoundaryAndHighDensityPublish)
 {
-    const auto baseline = RunLogHeavyScenario(
+    const auto reference_run = RunLogHeavyScenario(
         tmp_dir_,
         nullptr,
         BinanceExchange::CoreMode::LegacyOnly,
@@ -935,9 +935,9 @@ TEST_F(PerfGuardrailFixture, LogHeavyScenarioCoversRowVolumeOrderingBatchBoundar
         BinanceExchange::EventPublishMode::DualPublishCompare,
         true);
 
-    ASSERT_GT(baseline.steps, 0u);
+    ASSERT_GT(reference_run.steps, 0u);
     ASSERT_GT(forwarding.steps, 0u);
-    ASSERT_GT(baseline.market_msgs, 0u);
+    ASSERT_GT(reference_run.market_msgs, 0u);
     ASSERT_GT(forwarding.market_msgs, 0u);
 
     EXPECT_GT(forwarding.position_msgs + forwarding.order_msgs, 0u);
@@ -949,8 +949,8 @@ TEST_F(PerfGuardrailFixture, LogHeavyScenarioCoversRowVolumeOrderingBatchBoundar
         EXPECT_EQ(forwarding.event_diag_count, forwarding.event_diag_matched_count);
     }
 
-    std::cout << "[PERF][LogHeavyScenario] baseline_ns_per_step=" << baseline.ns_per_step
-              << " baseline_throughput=" << baseline.throughput_steps_per_sec
+    std::cout << "[PERF][LogHeavyScenario] reference_ns_per_step=" << reference_run.ns_per_step
+              << " reference_throughput=" << reference_run.throughput_steps_per_sec
               << " forwarding_ns_per_step=" << forwarding.ns_per_step
               << " forwarding_throughput=" << forwarding.throughput_steps_per_sec
               << " forwarding_position_msgs=" << forwarding.position_msgs
@@ -960,9 +960,9 @@ TEST_F(PerfGuardrailFixture, LogHeavyScenarioCoversRowVolumeOrderingBatchBoundar
               << " forwarding_market_backlog=" << forwarding.max_market_backlog
               << '\n';
 
-    EXPECT_LE(baseline.ns_per_step, kLogHeavyStepBudgetNs);
+    EXPECT_LE(reference_run.ns_per_step, kLogHeavyStepBudgetNs);
     EXPECT_LE(forwarding.ns_per_step, kLogHeavyStepBudgetNs);
-    EXPECT_GE(baseline.throughput_steps_per_sec, kLogHeavyMinThroughputStepsPerSec);
+    EXPECT_GE(reference_run.throughput_steps_per_sec, kLogHeavyMinThroughputStepsPerSec);
     EXPECT_GE(forwarding.throughput_steps_per_sec, kLogHeavyMinThroughputStepsPerSec);
 }
 
@@ -1012,7 +1012,7 @@ TEST_F(PerfGuardrailFixture, LogHeavyLoggerEnableDisableAndSideEffectForwardingO
     EXPECT_LE(logger_ratio, kMaxModeRatio);
     EXPECT_LE(forwarding_ratio, kMaxModeRatio);
 
-    // Memory/buffering proxy guardrail: forwarding path backlog must not explode compared with baseline.
+    // Memory/buffering proxy guardrail: forwarding path backlog must not explode compared with the reference path.
     const double backlog_multiplier = (no_logger.max_market_backlog == 0)
         ? static_cast<double>(with_forwarding.max_market_backlog + 1)
         : static_cast<double>(with_forwarding.max_market_backlog + 1)
@@ -1186,16 +1186,16 @@ TEST_F(PerfGuardrailFixture, MixedScenarioBudgetCoversJitterAndFallbackUnsupport
     fallback->candidate_steps[0].state.progress.status = ReplayCompare::ReplayCompareStatus::Fallback;
     fallback->candidate_steps[0].state.progress.fallback_to_legacy = true;
 
-    const auto baseline = RunMixedScenarioBenchmark(*base, ReplayCompare::ReplayCompareTestHarness::StateOnlyFeatureSet());
+    const auto reference_perf = RunMixedScenarioBenchmark(*base, ReplayCompare::ReplayCompareTestHarness::StateOnlyFeatureSet());
     const auto unsupported_perf = RunMixedScenarioBenchmark(*unsupported, ReplayCompare::ReplayCompareTestHarness::StateOnlyFeatureSet());
     const auto fallback_perf = RunMixedScenarioBenchmark(*fallback, ReplayCompare::ReplayCompareTestHarness::StateOnlyFeatureSet());
 
-    ASSERT_GT(baseline.ns_per_step, 0.0);
+    ASSERT_GT(reference_perf.ns_per_step, 0.0);
     ASSERT_GT(unsupported_perf.ns_per_step, 0.0);
     ASSERT_GT(fallback_perf.ns_per_step, 0.0);
 
-    const double unsupported_ratio = unsupported_perf.ns_per_step / baseline.ns_per_step;
-    const double fallback_ratio = fallback_perf.ns_per_step / baseline.ns_per_step;
+    const double unsupported_ratio = unsupported_perf.ns_per_step / reference_perf.ns_per_step;
+    const double fallback_ratio = fallback_perf.ns_per_step / reference_perf.ns_per_step;
 
     std::cout << "[PERF][MixedBudget] scenario=v2-vs-legacy.funding-reference-edge"
               << " p50_ns_per_step=" << stats.p50

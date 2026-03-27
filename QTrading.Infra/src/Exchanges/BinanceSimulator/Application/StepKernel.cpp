@@ -487,7 +487,7 @@ void emit_reduced_step_logs(
     }
     resolve_log_module_ids_if_needed(step_state, logger);
 
-    // Keep baseline direction in reduced scope: status first, then events.
+    // Keep the current reduced-scope direction: status first, then events.
     emit_status_log_if_needed(
         runtime_state,
         step_state,
@@ -496,9 +496,12 @@ void emit_reduced_step_logs(
         logger,
         observable_ctx.account_state_version,
         step_state);
-    // Reduced Phase-7/8 scope keeps only market/funding event modules.
-    // Baseline direction for unchanged versions is still "market/funding remain",
-    // so there is no separate version gate here in current kernel.
+    // Reduced Phase-A scope decision:
+    // - AccountEvent/PositionEvent/OrderEvent modules are intentionally not restored
+    //   yet for current kernel, to avoid implying full logger parity.
+    // - Event version debounce therefore applies to status snapshot only.
+    // - Market/Funding events remain per-step and are not suppressed by account
+    //   version gate in this reduced pipeline.
     emit_market_funding_events(step_state, runtime_state, observable_ctx, logger);
 }
 
