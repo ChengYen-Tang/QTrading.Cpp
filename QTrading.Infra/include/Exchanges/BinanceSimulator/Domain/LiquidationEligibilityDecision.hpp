@@ -30,7 +30,7 @@ struct LiquidationHealthSnapshot {
 class LiquidationEligibilityDecision final {
 public:
     static LiquidationHealthSnapshot Evaluate(
-        State::BinanceExchangeRuntimeState& runtime_state,
+        const State::BinanceExchangeRuntimeState& runtime_state,
         const Account& account,
         const State::StepKernelState& step_state,
         const QTrading::Dto::Market::Binance::MultiKlineDto& market_payload,
@@ -40,7 +40,8 @@ public:
     static int FindWorstLossPerpPositionIndex(
         const State::BinanceExchangeRuntimeState& runtime_state,
         const State::StepKernelState& step_state,
-        const std::vector<uint8_t>& has_mark_scratch) noexcept;
+        const std::vector<uint8_t>& has_mark_scratch,
+        const std::vector<double>& mark_price_scratch) noexcept;
 };
 
 } // namespace QTrading::Infra::Exchanges::BinanceSim::Domain

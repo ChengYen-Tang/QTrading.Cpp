@@ -18,7 +18,7 @@ constexpr double kMaintenanceMarginRate = 0.004;
 } // namespace
 
 LiquidationHealthSnapshot LiquidationEligibilityDecision::Evaluate(
-    State::BinanceExchangeRuntimeState& runtime_state,
+    const State::BinanceExchangeRuntimeState& runtime_state,
     const Account& account,
     const State::StepKernelState& step_state,
     const QTrading::Dto::Market::Binance::MultiKlineDto& market_payload,
@@ -42,7 +42,7 @@ LiquidationHealthSnapshot LiquidationEligibilityDecision::Evaluate(
 
     double total_unrealized = 0.0;
     double total_maintenance = 0.0;
-    for (auto& position : runtime_state.positions) {
+    for (const auto& position : runtime_state.positions) {
         if (position.instrument_type != QTrading::Dto::Trading::InstrumentType::Perp ||
             position.quantity <= kEpsilon) {
             continue;
@@ -61,11 +61,11 @@ LiquidationHealthSnapshot LiquidationEligibilityDecision::Evaluate(
 
         const double mark = mark_price_scratch[symbol_id];
         const double direction = position.is_long ? 1.0 : -1.0;
-        position.unrealized_pnl = (mark - position.entry_price) * position.quantity * direction;
-        position.notional = std::abs(position.quantity * mark);
-        position.maintenance_margin = position.notional * kMaintenanceMarginRate;
-        total_unrealized += position.unrealized_pnl;
-        total_maintenance += position.maintenance_margin;
+        const double unrealized = (mark - position.entry_price) * position.quantity * direction;
+        const double notional = std::abs(position.quantity * mark);
+        const double maintenance = notional * kMaintenanceMarginRate;
+        total_unrealized += unrealized;
+        total_maintenance += maintenance;
     }
 
     const double wallet_balance = account.get_perp_balance().WalletBalance;
@@ -81,7 +81,8 @@ LiquidationHealthSnapshot LiquidationEligibilityDecision::Evaluate(
 int LiquidationEligibilityDecision::FindWorstLossPerpPositionIndex(
     const State::BinanceExchangeRuntimeState& runtime_state,
     const State::StepKernelState& step_state,
-    const std::vector<uint8_t>& has_mark_scratch) noexcept
+    const std::vector<uint8_t>& has_mark_scratch,
+    const std::vector<double>& mark_price_scratch) noexcept
 {
     int worst_index = -1;
     double worst_unrealized = std::numeric_limits<double>::max();
@@ -99,9 +100,15 @@ int LiquidationEligibilityDecision::FindWorstLossPerpPositionIndex(
         if (symbol_id >= has_mark_scratch.size() || has_mark_scratch[symbol_id] == 0) {
             continue;
         }
-        if (worst_index < 0 || position.unrealized_pnl < worst_unrealized) {
+        if (symbol_id >= mark_price_scratch.size()) {
+            continue;
+        }
+        const double mark = mark_price_scratch[symbol_id];
+        const double direction = position.is_long ? 1.0 : -1.0;
+        const double unrealized = (mark - position.entry_price) * position.quantity * direction;
+        if (worst_index < 0 || unrealized < worst_unrealized) {
             worst_index = i;
-            worst_unrealized = position.unrealized_pnl;
+            worst_unrealized = unrealized;
         }
     }
     return worst_index;

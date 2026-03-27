@@ -76,6 +76,9 @@ bool LiquidationExecution::Run(
     State::StepKernelState& step_state,
     const QTrading::Dto::Market::Binance::MultiKlineDto& market_payload) noexcept
 {
+    // Current scope keeps liquidation as direct state reduction:
+    // - no synthetic fill external contract is emitted here
+    // - no bankruptcy-reset fallback is applied here
     auto& mark_price_scratch = step_state.liquidation_mark_price_scratch;
     auto& has_mark_scratch = step_state.liquidation_has_mark_scratch;
 
@@ -109,7 +112,8 @@ bool LiquidationExecution::Run(
         const int worst_idx = LiquidationEligibilityDecision::FindWorstLossPerpPositionIndex(
             runtime_state,
             step_state,
-            has_mark_scratch);
+            has_mark_scratch,
+            mark_price_scratch);
         if (worst_idx < 0) {
             break;
         }

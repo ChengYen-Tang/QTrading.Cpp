@@ -950,7 +950,7 @@ TEST_F(BinanceExchangeFixture, StatusSnapshotSuppressesBasisWarningWhenMarkIndex
     EXPECT_EQ(snapshot.basis_warning_symbols, 0u);
 }
 
-TEST_F(BinanceExchangeFixture, LiquidationDistressCancelsPerpOrdersAndReducesExposureInCurrentKernel)
+TEST_F(BinanceExchangeFixture, LiquidationDistressCancelsPerpOrdersAndReducesExposureWithoutBankruptcyResetInCurrentKernel)
 {
     WriteCsv("btc.csv", {
         {      0, 100,100,100,100,10000, 30000,10000,1,0,0 }
@@ -1008,6 +1008,46 @@ TEST_F(BinanceExchangeFixture, LiquidationRemainsNoOpWithoutDistressInCurrentKer
     ASSERT_EQ(exchange.get_all_positions().size(), 1u);
     EXPECT_NEAR(exchange.get_all_positions()[0].quantity, 1.0, 1e-12);
     EXPECT_NEAR(snapshot.wallet_balance, 999.9, 1e-9);
+}
+
+TEST_F(BinanceExchangeFixture, LiquidationEligibilityCheckDoesNotMutatePositionFieldsWithoutReductionInCurrentKernel)
+{
+    WriteCsv("btc.csv", {
+        {      0, 100,100,100,100,10000, 30000,10000,1,0,0 },
+        {  60000, 100,100,100,100,10000, 90000,10000,1,0,0 }
+    });
+    WriteCsv("btc_mark.csv", {
+        {  60000, 50,50,50,50,10000, 90000,10000,1,0,0 }
+    });
+
+    Account::AccountInitConfig init{};
+    init.spot_initial_cash = 0.0;
+    init.perp_initial_wallet = 1000.0;
+    BinanceExchange exchange(
+        { { "BTCUSDT",
+            (tmp_dir / "btc.csv").string(),
+            std::nullopt,
+            std::optional<std::string>((tmp_dir / "btc_mark.csv").string()) } },
+        nullptr,
+        init);
+
+    ASSERT_TRUE(exchange.perp.place_order("BTCUSDT", 1.0, QTrading::Dto::Trading::OrderSide::Buy));
+    ASSERT_TRUE(exchange.step());
+    (void)exchange.get_market_channel()->Receive();
+    ASSERT_EQ(exchange.get_all_positions().size(), 1u);
+
+    const auto& before_eval = exchange.get_all_positions().front();
+    EXPECT_NEAR(before_eval.unrealized_pnl, 0.0, 1e-12);
+    EXPECT_NEAR(before_eval.notional, 100.0, 1e-12);
+    EXPECT_NEAR(before_eval.maintenance_margin, 0.0, 1e-12);
+
+    ASSERT_TRUE(exchange.step());
+    (void)exchange.get_market_channel()->Receive();
+    ASSERT_EQ(exchange.get_all_positions().size(), 1u);
+    const auto& after_eval = exchange.get_all_positions().front();
+    EXPECT_NEAR(after_eval.unrealized_pnl, 0.0, 1e-12);
+    EXPECT_NEAR(after_eval.notional, 100.0, 1e-12);
+    EXPECT_NEAR(after_eval.maintenance_margin, 0.0, 1e-12);
 }
 
 TEST_F(BinanceExchangeFixture, LiquidationSkipsWhenRawMarkContextMissingInCurrentKernel)
@@ -1373,7 +1413,7 @@ TEST_F(BinanceExchangeLogFixture, ReducedObservabilityKeepsAccountPositionOrderE
     EXPECT_TRUE(FilterRowsByModule(QTrading::Log::LogModule::OrderEvent).empty());
 }
 
-TEST_F(BinanceExchangeLogFixture, ReducedObservabilityLiquidationStepEmitsStatusAndMarketOnlyInCurrentKernel)
+TEST_F(BinanceExchangeLogFixture, ReducedObservabilityLiquidationStepEmitsStatusAndMarketWithoutSyntheticFillContractInCurrentKernel)
 {
     WriteCsv("liq_trade.csv", {
         {      0, 100,100,100,100,10000, 30000,10000,1,0,0 }
