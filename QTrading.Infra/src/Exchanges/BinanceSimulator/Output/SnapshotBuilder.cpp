@@ -82,6 +82,8 @@ void SnapshotBuilder::Fill(const BinanceExchange& exchange, Contracts::StatusSna
     out.total_ledger_value_optimistic = total_ledger_value * (1.0 + band_ratio);
     out.uncertainty_band_bps = uncertainty_bps;
     out.basis_warning_symbols = 0;
+    // Current kernel only restores warning-tier diagnostics from coherent raw mark/index.
+    // Stress-tier risk overlay and order blocking are intentionally not restored yet.
     out.basis_stress_symbols = 0;
     out.basis_stress_blocked_orders = 0;
     out.funding_applied_events = exchange.step_kernel_state_->funding_applied_events_total;

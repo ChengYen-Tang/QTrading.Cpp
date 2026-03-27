@@ -16,10 +16,13 @@ struct FundingMarkResolution {
 
 class ReferencePriceResolver final {
 public:
+    // Current kernel keeps a raw-only reference path:
+    // - FundingRate.MarkPrice when present
+    // - same-step raw mark kline close fallback
+    // Interpolation is intentionally not restored in this resolver.
     static FundingMarkResolution ResolveFundingMark(
         const QTrading::Dto::Market::Binance::FundingRateDto& funding,
         const std::optional<QTrading::Dto::Market::Binance::ReferenceKlineDto>& raw_mark_kline) noexcept;
 };
 
 } // namespace QTrading::Infra::Exchanges::BinanceSim::Domain
-

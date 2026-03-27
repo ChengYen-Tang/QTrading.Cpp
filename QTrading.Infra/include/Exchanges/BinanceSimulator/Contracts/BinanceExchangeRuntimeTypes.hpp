@@ -54,6 +54,7 @@ enum class FundingApplyTiming : uint8_t {
 enum class ReferencePriceSource : int32_t {
     None = 0,
     Raw = 1,
+    // Reserved enum value for compatibility; current kernel does not emit it.
     Interpolated = 2,
 };
 

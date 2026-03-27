@@ -8,6 +8,8 @@ struct SimulationConfig {
     Contracts::FundingApplyTiming funding_apply_timing{ Contracts::FundingApplyTiming::BeforeMatching };
     double uncertainty_band_bps{ 0.0 };
     double basis_warning_bps{ 0.0 };
+    // Reserved risk-overlay controls kept for facade/config compatibility.
+    // Current kernel does not activate stress/opening-block/leverage-cap logic.
     double basis_stress_bps{ 0.0 };
     double basis_warning_cap{ 0.0 };
     double basis_stress_cap{ 0.0 };
