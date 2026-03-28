@@ -263,42 +263,43 @@
 
 - Baseline source: [Exchanges\BinanceSimulator\Calibration\CalibrationMetricsTests.cpp](d:/QTrading.Cpp-baseline-7110533/QTrading.Infra/tests/Exchanges\BinanceSimulator\Calibration\CalibrationMetricsTests.cpp)
 - Test data form: inline scenario only
-- Current migration status: pending triage
+- Current migration status: completed
+- Migrated target: `QTrading.Utils/tests/Calibration/CalibrationMetricsTests.cpp`
 
-- [ ] CalibrationMetricsTest.EvaluateObjectiveComputesWeightedScore
-- [ ] CalibrationMetricsTest.AcceptanceKpiGateUsesThresholds
-- [ ] CalibrationMetricsTest.BuildWalkForwardWindowsCreatesRollingSplits
-- [ ] CalibrationMetricsTest.EvaluateWalkForwardPipelineAggregatesWindowScores
-- [ ] CalibrationMetricsTest.AcceptanceGateDecisionUsesMinPassRate
+- [x] CalibrationMetricsTest.EvaluateObjectiveComputesWeightedScore
+- [x] CalibrationMetricsTest.AcceptanceKpiGateUsesThresholds
+- [x] CalibrationMetricsTest.BuildWalkForwardWindowsCreatesRollingSplits
+- [x] CalibrationMetricsTest.EvaluateWalkForwardPipelineAggregatesWindowScores
+- [x] CalibrationMetricsTest.AcceptanceGateDecisionUsesMinPassRate
 
 ### Exchanges\BinanceSimulator\DataProvider\FundingRateDataTests.cpp
 
 - Baseline source: [Exchanges\BinanceSimulator\DataProvider\FundingRateDataTests.cpp](d:/QTrading.Cpp-baseline-7110533/QTrading.Infra/tests/Exchanges\BinanceSimulator\DataProvider\FundingRateDataTests.cpp)
 - Test data form: mixed inline + file/serialized fixtures (inspect file before migration)
-- Current migration status: pending triage
+- Current migration status: completed
 
-- [ ] FundingRateDataTests.LoadCsvAndCheckCount
-- [ ] FundingRateDataTests.GetLatestFunding
-- [ ] FundingRateDataTests.GetFundingOutOfRange
-- [ ] FundingRateDataTests.IteratorTraversal
-- [ ] FundingRateDataTests.GetLatestThrowsWhenNoParsedRows
+- [x] FundingRateDataTests.LoadCsvAndCheckCount
+- [x] FundingRateDataTests.GetLatestFunding
+- [x] FundingRateDataTests.GetFundingOutOfRange
+- [x] FundingRateDataTests.IteratorTraversal
+- [x] FundingRateDataTests.GetLatestThrowsWhenNoParsedRows
 
 ### Exchanges\BinanceSimulator\DataProvider\MarketDataTests.cpp
 
 - Baseline source: [Exchanges\BinanceSimulator\DataProvider\MarketDataTests.cpp](d:/QTrading.Cpp-baseline-7110533/QTrading.Infra/tests/Exchanges\BinanceSimulator\DataProvider\MarketDataTests.cpp)
 - Test data form: mixed inline + file/serialized fixtures (inspect file before migration)
-- Current migration status: pending triage
+- Current migration status: completed
 
-- [ ] MarketDataTests.LoadCsvAndCheckCount
-- [ ] MarketDataTests.GetLatestKline
-- [ ] MarketDataTests.GetKlineOutOfRange
-- [ ] MarketDataTests.GetSymbolAndFirstKline
-- [ ] MarketDataTests.IteratorTraversal
-- [ ] MarketDataTests.ManualIteratorUsage
-- [ ] MarketDataTests.ConstIteratorTraversal
-- [ ] MarketDataTests.LoadCompactSixColumnCsv
-- [ ] MarketDataTests.LowerUpperBoundByTimestamp
-- [ ] MarketDataTests.GetLatestKlineThrowsWhenNoParsedRows
+- [x] MarketDataTests.LoadCsvAndCheckCount
+- [x] MarketDataTests.GetLatestKline
+- [x] MarketDataTests.GetKlineOutOfRange
+- [x] MarketDataTests.GetSymbolAndFirstKline
+- [x] MarketDataTests.IteratorTraversal
+- [x] MarketDataTests.ManualIteratorUsage
+- [x] MarketDataTests.ConstIteratorTraversal
+- [x] MarketDataTests.LoadCompactSixColumnCsv
+- [x] MarketDataTests.LowerUpperBoundByTimestamp
+- [x] MarketDataTests.GetLatestKlineThrowsWhenNoParsedRows
 
 ### InfraLogFeatherRoundTripTests.cpp
 
