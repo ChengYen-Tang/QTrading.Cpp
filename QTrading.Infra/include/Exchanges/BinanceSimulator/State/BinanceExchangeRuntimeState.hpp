@@ -36,6 +36,7 @@ struct BinanceExchangeRuntimeState {
     Contracts::SideEffectAdapterConfig side_effect_adapters{};
     Config::SimulationConfig simulation_config{};
     std::optional<Contracts::EventPublishCompareDiagnostic> last_event_publish_compare_diagnostic;
+    uint64_t basis_stress_blocked_orders_total{ 0 };
     size_t order_latency_bars{ 0 };
     uint64_t next_order_id{ 1 };
     uint64_t next_async_order_request_id{ 1 };

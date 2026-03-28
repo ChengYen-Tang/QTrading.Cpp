@@ -62,11 +62,11 @@ void SnapshotBuilder::Fill(const BinanceExchange& exchange, Contracts::StatusSna
         0.0,
         spot_balance.WalletBalance - spot_balance.PositionInitialMargin - runtime_state.spot_open_order_initial_margin);
 
-    const double uncertainty_bps = std::max(0.0, runtime_state.simulation_config.uncertainty_band_bps);
+    const double base_uncertainty_bps = std::max(0.0, runtime_state.simulation_config.uncertainty_band_bps);
     const double spot_inventory_value = compute_spot_inventory_value(runtime_state, snapshot_state);
     const double spot_ledger_value = spot_balance.WalletBalance + spot_inventory_value;
     const double total_ledger_value = perp_balance.Equity + spot_ledger_value;
-    const double band_ratio = uncertainty_bps / 10000.0;
+    double mark_index_diag_bps = 0.0;
 
     out.ts_exchange = snapshot_state.ts_exchange;
     out.wallet_balance = perp_balance.WalletBalance;
@@ -84,14 +84,12 @@ void SnapshotBuilder::Fill(const BinanceExchange& exchange, Contracts::StatusSna
     out.total_cash_balance = total_cash_balance;
     out.total_ledger_value = total_ledger_value;
     out.total_ledger_value_base = total_ledger_value;
-    out.total_ledger_value_conservative = total_ledger_value * (1.0 - band_ratio);
-    out.total_ledger_value_optimistic = total_ledger_value * (1.0 + band_ratio);
-    out.uncertainty_band_bps = uncertainty_bps;
+    out.total_ledger_value_conservative = total_ledger_value;
+    out.total_ledger_value_optimistic = total_ledger_value;
+    out.uncertainty_band_bps = base_uncertainty_bps;
     out.basis_warning_symbols = 0;
-    // Current kernel only restores warning-tier diagnostics from coherent raw mark/index.
-    // Stress-tier risk overlay and order blocking are intentionally not restored yet.
     out.basis_stress_symbols = 0;
-    out.basis_stress_blocked_orders = 0;
+    out.basis_stress_blocked_orders = runtime_state.basis_stress_blocked_orders_total;
     out.funding_applied_events = exchange.step_kernel_state_->funding_applied_events_total;
     out.funding_skipped_no_mark = exchange.step_kernel_state_->funding_skipped_no_mark_total;
     out.progress_pct = snapshot_state.progress_pct;
@@ -102,6 +100,8 @@ void SnapshotBuilder::Fill(const BinanceExchange& exchange, Contracts::StatusSna
     }
     out.prices.reserve(snapshot_state.symbols_shared->size());
     const double basis_warning_bps = std::max(0.0, runtime_state.simulation_config.basis_warning_bps);
+    const double basis_stress_bps = std::max(0.0, runtime_state.simulation_config.basis_stress_bps);
+    const bool overlay_enabled = runtime_state.simulation_config.simulator_risk_overlay_enabled;
     for (size_t i = 0; i < snapshot_state.symbols_shared->size(); ++i) {
         Contracts::StatusPriceSnapshot price{};
         price.symbol = (*snapshot_state.symbols_shared)[i];
@@ -146,12 +146,22 @@ void SnapshotBuilder::Fill(const BinanceExchange& exchange, Contracts::StatusSna
             mark_index_ts_coherent &&
             std::abs(price.index_price) > 1e-12) {
             const double basis_bps = std::abs((price.mark_price - price.index_price) / price.index_price) * 10000.0;
-            if (basis_bps >= basis_warning_bps) {
-                ++out.basis_warning_symbols;
+            mark_index_diag_bps = std::max(mark_index_diag_bps, basis_bps);
+            if (overlay_enabled) {
+                if (basis_bps >= basis_warning_bps) {
+                    ++out.basis_warning_symbols;
+                }
+                if (basis_stress_bps > 0.0 && basis_bps >= basis_stress_bps) {
+                    ++out.basis_stress_symbols;
+                }
             }
         }
         out.prices.emplace_back(std::move(price));
     }
+    out.uncertainty_band_bps = base_uncertainty_bps + mark_index_diag_bps;
+    const double band_ratio = out.uncertainty_band_bps / 10000.0;
+    out.total_ledger_value_conservative = out.total_ledger_value_base * (1.0 - band_ratio);
+    out.total_ledger_value_optimistic = out.total_ledger_value_base * (1.0 + band_ratio);
 }
 
 } // namespace QTrading::Infra::Exchanges::BinanceSim::Output

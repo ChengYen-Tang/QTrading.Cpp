@@ -11,6 +11,7 @@
 
 #include "Data/Binance/MarketData.hpp"
 #include "Data/Binance/FundingRateData.hpp"
+#include "Dto/Market/Binance/FundingRate.hpp"
 #include "Dto/Order.hpp"
 #include "Dto/Position.hpp"
 #include "Exchanges/BinanceSimulator/Contracts/BinanceExchangeDiagnostics.hpp"
@@ -59,6 +60,7 @@ struct StepKernelState {
     std::vector<uint8_t> has_next_mark_ts;
     std::vector<uint8_t> has_next_index_ts;
     std::vector<uint64_t> last_applied_funding_time_by_symbol;
+    std::vector<std::optional<QTrading::Dto::Market::Binance::FundingRateDto>> last_observed_funding_by_symbol;
     uint64_t funding_applied_events_total{ 0 };
     uint64_t funding_skipped_no_mark_total{ 0 };
     std::vector<size_t> replay_cursor;

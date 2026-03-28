@@ -10,7 +10,7 @@ Account::AccountInitConfig BuildInitConfig(double init_balance, int vip_level)
     Account::AccountInitConfig cfg{};
     cfg.init_balance = init_balance;
     cfg.spot_initial_cash = init_balance;
-    cfg.perp_initial_wallet = 0.0;
+    cfg.perp_initial_wallet = init_balance;
     cfg.vip_level = vip_level;
     return cfg;
 }

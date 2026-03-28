@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <optional>
 #include <string>
 #include <utility>
@@ -20,6 +21,7 @@
 #include "Exchanges/BinanceSimulator/Domain/OrderEntryService.hpp"
 #include "Exchanges/BinanceSimulator/Domain/ReferencePriceResolver.hpp"
 #include "Exchanges/BinanceSimulator/Output/ChannelPublisher.hpp"
+#include "Exchanges/BinanceSimulator/Output/SnapshotBuilder.hpp"
 #include "Exchanges/BinanceSimulator/Output/StepObservableContext.hpp"
 #include "Exchanges/BinanceSimulator/State/BinanceExchangeRuntimeState.hpp"
 #include "Exchanges/BinanceSimulator/State/SnapshotState.hpp"
@@ -59,6 +61,81 @@ double compute_progress_pct(const State::StepKernelState& step_state)
         return 0.0;
     }
     return std::clamp(min_ratio, 0.0, 1.0) * 100.0;
+}
+
+std::optional<double> interpolate_close_price(
+    const MarketData& data,
+    uint64_t ts)
+{
+    const size_t count = data.get_klines_count();
+    if (count == 0) {
+        return std::nullopt;
+    }
+    if (count == 1) {
+        return data.get_kline(0).ClosePrice;
+    }
+
+    const auto& first = data.get_kline(0);
+    const auto& last = data.get_kline(count - 1);
+    if (ts <= first.Timestamp) {
+        return first.ClosePrice;
+    }
+    if (ts >= last.Timestamp) {
+        return last.ClosePrice;
+    }
+
+    size_t lo = 0;
+    size_t hi = count - 1;
+    while (lo < hi) {
+        const size_t mid = lo + (hi - lo) / 2;
+        if (data.get_kline(mid).Timestamp < ts) {
+            lo = mid + 1;
+        }
+        else {
+            hi = mid;
+        }
+    }
+    const size_t right = lo;
+    if (right < count && data.get_kline(right).Timestamp == ts) {
+        return data.get_kline(right).ClosePrice;
+    }
+    if (right == 0 || right >= count) {
+        return std::nullopt;
+    }
+
+    const auto& lhs = data.get_kline(right - 1);
+    const auto& rhs = data.get_kline(right);
+    const uint64_t dt = rhs.Timestamp - lhs.Timestamp;
+    if (dt == 0) {
+        return rhs.ClosePrice;
+    }
+    const double w = static_cast<double>(ts - lhs.Timestamp) / static_cast<double>(dt);
+    return lhs.ClosePrice + (rhs.ClosePrice - lhs.ClosePrice) * w;
+}
+
+std::optional<QTrading::Dto::Market::Binance::ReferenceKlineDto> resolve_funding_mark_kline(
+    const State::StepKernelState& step_state,
+    const QTrading::Dto::Market::Binance::MultiKlineDto& payload,
+    size_t symbol_id,
+    uint64_t funding_ts)
+{
+    if (symbol_id < payload.mark_klines_by_id.size() &&
+        payload.mark_klines_by_id[symbol_id].has_value()) {
+        return payload.mark_klines_by_id[symbol_id];
+    }
+    if (symbol_id >= step_state.mark_data_id_by_symbol.size()) {
+        return std::nullopt;
+    }
+    const int32_t data_id = step_state.mark_data_id_by_symbol[symbol_id];
+    if (data_id < 0 || static_cast<size_t>(data_id) >= step_state.mark_data_pool.size()) {
+        return std::nullopt;
+    }
+    const auto& mark_data = step_state.mark_data_pool[static_cast<size_t>(data_id)];
+    const auto mark = interpolate_close_price(mark_data, funding_ts);
+    if (!mark.has_value()) {
+        return std::nullopt;
+    }
+    return QTrading::Dto::Market::Binance::ReferenceKlineDto::Point(funding_ts, *mark);
 }
 
 // Writes the current minimal read-model state consumed by FillStatusSnapshot().
@@ -179,10 +256,7 @@ bool apply_funding_for_step(
             continue;
         }
         const auto& funding = *market_payload.funding_by_id[i];
-        const std::optional<QTrading::Dto::Market::Binance::ReferenceKlineDto> raw_mark =
-            i < market_payload.mark_klines_by_id.size()
-            ? market_payload.mark_klines_by_id[i]
-            : std::optional<QTrading::Dto::Market::Binance::ReferenceKlineDto>{};
+        const auto raw_mark = resolve_funding_mark_kline(step_state, market_payload, i, funding.FundingTime);
         const auto mark_resolved = Domain::ReferencePriceResolver::ResolveFundingMark(funding, raw_mark);
         const bool is_duplicate = step_state.last_applied_funding_time_by_symbol[i] == funding.FundingTime;
         const auto action = Domain::FundingEligibilityDecision::Decide(
@@ -222,6 +296,72 @@ bool apply_funding_for_step(
         step_state.last_applied_funding_time_by_symbol[i] = funding.FundingTime;
     }
     return wallet_mutated;
+}
+
+void apply_basis_warning_leverage_caps(
+    State::BinanceExchangeRuntimeState& runtime_state,
+    const State::SnapshotState& snapshot_state)
+{
+    if (!runtime_state.simulation_config.basis_risk_guard_enabled ||
+        !snapshot_state.symbols_shared) {
+        return;
+    }
+
+    constexpr double kEpsilon = 1e-12;
+    constexpr uint64_t kUnsetSnapshotTimestamp = std::numeric_limits<uint64_t>::max();
+    const double warning_bps = std::max(0.0, runtime_state.simulation_config.basis_warning_bps);
+    const double stress_bps = std::max(0.0, runtime_state.simulation_config.basis_stress_bps);
+    for (size_t i = 0; i < snapshot_state.symbols_shared->size(); ++i) {
+        if (i >= snapshot_state.has_last_mark_price_by_symbol.size() ||
+            i >= snapshot_state.last_mark_price_by_symbol.size() ||
+            i >= snapshot_state.last_mark_price_ts_by_symbol.size() ||
+            i >= snapshot_state.has_last_index_price_by_symbol.size() ||
+            i >= snapshot_state.last_index_price_by_symbol.size() ||
+            i >= snapshot_state.last_index_price_ts_by_symbol.size() ||
+            snapshot_state.has_last_mark_price_by_symbol[i] == 0 ||
+            snapshot_state.has_last_index_price_by_symbol[i] == 0) {
+            continue;
+        }
+        const uint64_t mark_ts = snapshot_state.last_mark_price_ts_by_symbol[i];
+        const uint64_t index_ts = snapshot_state.last_index_price_ts_by_symbol[i];
+        if (mark_ts == kUnsetSnapshotTimestamp ||
+            index_ts == kUnsetSnapshotTimestamp ||
+            mark_ts != index_ts ||
+            mark_ts != snapshot_state.ts_exchange) {
+            continue;
+        }
+        const double mark = snapshot_state.last_mark_price_by_symbol[i];
+        const double index = snapshot_state.last_index_price_by_symbol[i];
+        if (std::abs(index) <= kEpsilon) {
+            continue;
+        }
+        const double basis_bps = std::abs((mark - index) / index) * 10000.0;
+        if (warning_bps <= 0.0 || basis_bps < warning_bps) {
+            continue;
+        }
+
+        double cap = runtime_state.simulation_config.basis_warning_cap;
+        if (stress_bps > 0.0 &&
+            basis_bps >= stress_bps &&
+            runtime_state.simulation_config.basis_stress_cap > 0.0) {
+            cap = cap > 0.0
+                ? std::min(cap, runtime_state.simulation_config.basis_stress_cap)
+                : runtime_state.simulation_config.basis_stress_cap;
+        }
+        if (!(cap > 0.0)) {
+            continue;
+        }
+
+        const auto& symbol = (*snapshot_state.symbols_shared)[i];
+        auto lev_it = runtime_state.symbol_leverage.find(symbol);
+        if (lev_it == runtime_state.symbol_leverage.end()) {
+            runtime_state.symbol_leverage.emplace(symbol, cap);
+            continue;
+        }
+        if (lev_it->second > cap) {
+            lev_it->second = cap;
+        }
+    }
 }
 
 void publish_position_order_channels(
@@ -412,9 +552,7 @@ void refresh_perp_mark_state(
         }
 
         const double direction = position.is_long ? 1.0 : -1.0;
-        position.unrealized_pnl = (reference_price - position.entry_price) * position.quantity * direction;
-        position.notional = std::abs(position.quantity * reference_price);
-        total_unrealized += position.unrealized_pnl;
+        total_unrealized += (reference_price - position.entry_price) * position.quantity * direction;
         total_position_initial_margin += position.initial_margin;
         total_maintenance_margin += position.maintenance_margin;
     }
@@ -507,7 +645,9 @@ void emit_market_funding_events(
             i < payload.mark_klines_by_id.size()
             ? payload.mark_klines_by_id[i]
             : std::optional<QTrading::Dto::Market::Binance::ReferenceKlineDto>{};
-        const auto mark_resolved = Domain::ReferencePriceResolver::ResolveFundingMark(funding, raw_mark);
+        const auto mark_resolved = Domain::ReferencePriceResolver::ResolveFundingMark(
+            funding,
+            resolve_funding_mark_kline(step_state, payload, i, funding.FundingTime));
         if (!mark_resolved.has_mark_price) {
             QTrading::Log::FileLogger::FeatherV2::FundingEventDto skipped{};
             skipped.run_id = ctx.run_id;
@@ -670,6 +810,21 @@ bool StepKernel::run_step() const
             runtime_state.spot_open_order_initial_margin,
             runtime_state.perp_open_order_initial_margin);
         refresh_perp_mark_state(step_state, snapshot_state, runtime_state, exchange_.account_state(), *frame.market_payload);
+        if (runtime_state.simulation_config.funding_apply_timing == Contracts::FundingApplyTiming::AfterMatching) {
+            const size_t funding_count = std::min(
+                frame.market_payload->funding_by_id.size(),
+                step_state.last_observed_funding_by_symbol.size());
+            for (size_t i = 0; i < funding_count; ++i) {
+                if (!frame.market_payload->funding_by_id[i].has_value()) {
+                    continue;
+                }
+                const auto current = frame.market_payload->funding_by_id[i];
+                if (step_state.last_observed_funding_by_symbol[i].has_value()) {
+                    frame.market_payload->funding_by_id[i] = step_state.last_observed_funding_by_symbol[i];
+                }
+                step_state.last_observed_funding_by_symbol[i] = current;
+            }
+        }
     }
 
     Output::StepObservableContext observable_ctx{};
@@ -681,6 +836,8 @@ bool StepKernel::run_step() const
     observable_ctx.order_snapshot = &runtime_state.orders;
     observable_ctx.account_state_version = step_state.account_state_version;
     update_snapshot_state(snapshot_state, step_state, observable_ctx);
+    apply_basis_warning_leverage_caps(runtime_state, snapshot_state);
+    Output::SnapshotBuilder::Fill(exchange_, runtime_state.last_status_snapshot);
     emit_reduced_step_logs(runtime_state, step_state, snapshot_state, exchange_.account_state(), observable_ctx);
     Output::ChannelPublisher::PublishStep(exchange_, observable_ctx);
     publish_position_order_channels(

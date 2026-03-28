@@ -50,15 +50,15 @@ struct SimulationConfig {
     double market_impact_liquidity_bias{ 0.0 };
     double market_impact_offset_bps{ 0.0 };
     double uncertainty_band_bps{ 0.0 };
-    double basis_warning_bps{ 0.0 };
+    double basis_warning_bps{ 50.0 };
     // Reserved risk-overlay controls kept for facade/config compatibility.
     // Current kernel does not activate stress/opening-block/leverage-cap logic.
-    double basis_stress_bps{ 0.0 };
+    double basis_stress_bps{ 1000.0 };
     double basis_warning_cap{ 0.0 };
     double basis_stress_cap{ 0.0 };
-    bool simulator_risk_overlay_enabled{ false };
+    bool simulator_risk_overlay_enabled{ true };
     bool basis_risk_guard_enabled{ false };
-    bool basis_stress_blocks_opening_orders{ false };
+    bool basis_stress_blocks_opening_orders{ true };
 };
 
 } // namespace QTrading::Infra::Exchanges::BinanceSim::Config

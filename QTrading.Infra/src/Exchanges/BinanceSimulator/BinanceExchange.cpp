@@ -120,6 +120,7 @@ void BinanceExchange::initialize_step_kernel_state_(const std::vector<SymbolData
     step_kernel_state_->has_next_mark_ts.assign(datasets.size(), 0);
     step_kernel_state_->has_next_index_ts.assign(datasets.size(), 0);
     step_kernel_state_->last_applied_funding_time_by_symbol.assign(datasets.size(), 0);
+    step_kernel_state_->last_observed_funding_by_symbol.assign(datasets.size(), std::nullopt);
     step_kernel_state_->next_ts_by_symbol.assign(datasets.size(), 0);
     step_kernel_state_->has_next_ts.assign(datasets.size(), 0);
 

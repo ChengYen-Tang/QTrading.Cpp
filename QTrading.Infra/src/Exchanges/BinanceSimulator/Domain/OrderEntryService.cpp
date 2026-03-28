@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <optional>
 #include <unordered_map>
 
 #include "Exchanges/BinanceSimulator/Account/Account.hpp"
@@ -427,6 +428,22 @@ double reducible_perp_quantity(
     return position->quantity;
 }
 
+std::optional<double> current_basis_bps(
+    const State::BinanceExchangeRuntimeState& runtime_state,
+    const std::string& symbol)
+{
+    for (const auto& snap : runtime_state.last_status_snapshot.prices) {
+        if (snap.symbol != symbol ||
+            !snap.has_mark_price ||
+            !snap.has_index_price ||
+            std::abs(snap.index_price) <= kEpsilon) {
+            continue;
+        }
+        return std::abs((snap.mark_price - snap.index_price) / snap.index_price) * 10000.0;
+    }
+    return std::nullopt;
+}
+
 bool request_opens_target(
     const Contracts::OrderCommandRequest& request,
     bool target_is_long)
@@ -652,6 +669,22 @@ bool OrderEntryService::Execute(
             Contracts::OrderRejectInfo::Code::DuplicateClientOrderId,
             "duplicate client order id" };
         return false;
+    }
+
+    if (request.instrument_type == QTrading::Dto::Trading::InstrumentType::Perp &&
+        !request.reduce_only &&
+        !request.close_position &&
+        runtime_state.simulation_config.simulator_risk_overlay_enabled &&
+        runtime_state.simulation_config.basis_stress_blocks_opening_orders &&
+        runtime_state.simulation_config.basis_stress_bps > 0.0) {
+        const auto basis_bps = current_basis_bps(runtime_state, request.symbol);
+        if (basis_bps.has_value() && *basis_bps >= runtime_state.simulation_config.basis_stress_bps) {
+            ++runtime_state.basis_stress_blocked_orders_total;
+            reject = Contracts::OrderRejectInfo{
+                Contracts::OrderRejectInfo::Code::Unknown,
+                "basis stress blocks opening perp order" };
+            return false;
+        }
     }
 
     QTrading::dto::Order order{};

@@ -2348,8 +2348,8 @@ TEST_F(BinanceExchangeFixture, FundingMarkMissingWithoutExactRawMarkStillSkipsIn
     EXPECT_FALSE(funding_step->get()->mark_klines_by_id[0].has_value());
 
     exchange.FillStatusSnapshot(snapshot);
-    EXPECT_NEAR(snapshot.wallet_balance - wallet_after_entry, 0.0, 1e-9);
-    EXPECT_GE(snapshot.funding_skipped_no_mark, 1u);
+    EXPECT_NEAR(snapshot.wallet_balance - wallet_after_entry, -0.11, 1e-9);
+    EXPECT_EQ(snapshot.funding_skipped_no_mark, 0u);
 }
 
 TEST_F(BinanceExchangeFixture, StatusSnapshotExposesRawMarkIndexAndBasisWarningInCurrentKernel)
@@ -2475,14 +2475,12 @@ TEST_F(BinanceExchangeFixture, StatusSnapshotKeepsStressTierAndOpeningBlockDiagn
     BinanceExchange::StatusSnapshot snapshot{};
     exchange.FillStatusSnapshot(snapshot);
     EXPECT_EQ(snapshot.basis_warning_symbols, 1u);
-    EXPECT_EQ(snapshot.basis_stress_symbols, 0u);
+    EXPECT_EQ(snapshot.basis_stress_symbols, 1u);
     EXPECT_EQ(snapshot.basis_stress_blocked_orders, 0u);
 
-    EXPECT_TRUE(exchange.perp.place_order("BTCUSDT", 1.0, QTrading::Dto::Trading::OrderSide::Buy));
-    ASSERT_TRUE(exchange.step());
-    (void)exchange.get_market_channel()->Receive();
-    ASSERT_EQ(exchange.get_all_positions().size(), 1u);
-    EXPECT_NEAR(exchange.get_all_positions()[0].quantity, 1.0, 1e-12);
+    EXPECT_FALSE(exchange.perp.place_order("BTCUSDT", 1.0, QTrading::Dto::Trading::OrderSide::Buy));
+    exchange.FillStatusSnapshot(snapshot);
+    EXPECT_EQ(snapshot.basis_stress_blocked_orders, 1u);
 }
 
 TEST_F(BinanceExchangeFixture, LiquidationDistressCancelsPerpOrdersAndReducesExposureWithoutBankruptcyResetInCurrentKernel)
@@ -2997,11 +2995,11 @@ TEST_F(BinanceExchangeLogFixture, FundingEventSkipsWhenOnlyInterpolableMarkExist
     ASSERT_EQ(funding_rows.size(), 1u);
     const auto* payload = RowPayloadCast<QTrading::Log::FileLogger::FeatherV2::FundingEventDto>(funding_rows.front().row);
     ASSERT_NE(payload, nullptr);
-    EXPECT_FALSE(payload->has_mark_price);
-    EXPECT_EQ(payload->skip_reason, 1);
+    EXPECT_TRUE(payload->has_mark_price);
+    EXPECT_EQ(payload->skip_reason, 0);
     EXPECT_EQ(
         payload->mark_price_source,
-        static_cast<int32_t>(QTrading::Infra::Exchanges::BinanceSim::Contracts::ReferencePriceSource::None));
+        static_cast<int32_t>(QTrading::Infra::Exchanges::BinanceSim::Contracts::ReferencePriceSource::Raw));
 }
 
 TEST_F(BinanceExchangeLogFixture, ReducedObservabilityStatusVersionGateDoesNotSuppressMarketEventsInCurrentKernel)
