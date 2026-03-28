@@ -266,6 +266,60 @@ double sum_perp_open_order_reservations(const State::BinanceExchangeRuntimeState
     return reserved;
 }
 
+bool has_duplicate_client_order_id(
+    const State::BinanceExchangeRuntimeState& runtime_state,
+    const Contracts::OrderCommandRequest& request)
+{
+    if (request.client_order_id.empty()) {
+        return false;
+    }
+    for (const auto& order : runtime_state.orders) {
+        if (order.client_order_id == request.client_order_id) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void sync_open_order_margins(State::BinanceExchangeRuntimeState& runtime_state);
+
+bool is_self_trade_conflict(
+    const QTrading::dto::Order& resting_order,
+    const Contracts::OrderCommandRequest& incoming_request)
+{
+    if (resting_order.symbol != incoming_request.symbol ||
+        resting_order.instrument_type != incoming_request.instrument_type ||
+        resting_order.side == incoming_request.side) {
+        return false;
+    }
+
+    if (incoming_request.price <= 0.0 || resting_order.price <= 0.0) {
+        return true;
+    }
+
+    if (incoming_request.side == QTrading::Dto::Trading::OrderSide::Buy) {
+        return incoming_request.price + kEpsilon >= resting_order.price;
+    }
+    return incoming_request.price <= resting_order.price + kEpsilon;
+}
+
+bool remove_order_by_id(
+    State::BinanceExchangeRuntimeState& runtime_state,
+    int order_id)
+{
+    auto& orders = runtime_state.orders;
+    const size_t before = orders.size();
+    orders.erase(
+        std::remove_if(orders.begin(), orders.end(), [&](const QTrading::dto::Order& order) {
+            return order.id == order_id;
+        }),
+        orders.end());
+    if (orders.size() != before) {
+        sync_open_order_margins(runtime_state);
+        return true;
+    }
+    return false;
+}
 void sync_open_order_margins(State::BinanceExchangeRuntimeState& runtime_state)
 {
     runtime_state.spot_open_order_initial_margin = sum_spot_buy_reservations(runtime_state);
@@ -401,6 +455,47 @@ bool OrderEntryService::Execute(
             quantity = reducible;
         }
     }
+    if (request.stp_mode != static_cast<int>(Account::SelfTradePreventionMode::None)) {
+        const auto stp_mode = static_cast<Account::SelfTradePreventionMode>(request.stp_mode);
+        const bool has_conflict = std::any_of(
+            runtime_state.orders.begin(),
+            runtime_state.orders.end(),
+            [&](const QTrading::dto::Order& order) {
+                return is_self_trade_conflict(order, request);
+            });
+        if (has_conflict) {
+            if (stp_mode == Account::SelfTradePreventionMode::ExpireTaker) {
+                reject = Contracts::OrderRejectInfo{
+                    Contracts::OrderRejectInfo::Code::StpExpiredTaker,
+                    "self trade prevention rejected incoming order" };
+                return false;
+            }
+
+            const size_t before = runtime_state.orders.size();
+            runtime_state.orders.erase(
+                std::remove_if(runtime_state.orders.begin(), runtime_state.orders.end(),
+                    [&](const QTrading::dto::Order& order) {
+                        return is_self_trade_conflict(order, request);
+                    }),
+                runtime_state.orders.end());
+            if (runtime_state.orders.size() != before) {
+                sync_open_order_margins(runtime_state);
+                ++step_state.account_state_version;
+            }
+            if (stp_mode == Account::SelfTradePreventionMode::ExpireBoth) {
+                reject = Contracts::OrderRejectInfo{
+                    Contracts::OrderRejectInfo::Code::StpExpiredBoth,
+                    "self trade prevention canceled resting order and rejected incoming order" };
+                return false;
+            }
+        }
+    }
+    if (has_duplicate_client_order_id(runtime_state, request)) {
+        reject = Contracts::OrderRejectInfo{
+            Contracts::OrderRejectInfo::Code::DuplicateClientOrderId,
+            "duplicate client order id" };
+        return false;
+    }
 
     QTrading::dto::Order order{};
     order.id = static_cast<int>(runtime_state.next_order_id++);
@@ -424,6 +519,18 @@ bool OrderEntryService::Execute(
 void OrderEntryService::SyncOpenOrderMargins(State::BinanceExchangeRuntimeState& runtime_state)
 {
     sync_open_order_margins(runtime_state);
+}
+
+bool OrderEntryService::CancelOrderById(
+    State::BinanceExchangeRuntimeState& runtime_state,
+    State::StepKernelState& step_state,
+    int order_id)
+{
+    if (!remove_order_by_id(runtime_state, order_id)) {
+        return false;
+    }
+    ++step_state.account_state_version;
+    return true;
 }
 
 void OrderEntryService::CancelOpenOrders(

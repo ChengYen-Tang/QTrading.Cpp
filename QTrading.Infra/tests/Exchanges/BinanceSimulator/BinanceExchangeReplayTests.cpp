@@ -579,6 +579,44 @@ TEST_F(BinanceExchangeFixture, PerpClosePositionOrderClosesExistingExposure)
     EXPECT_TRUE(exchange.get_all_positions().empty());
 }
 
+TEST_F(BinanceExchangeFixture, ClosePositionBySymbol)
+{
+    WriteCsv("btc.csv", {
+        {      0,1000,1000,1000,1000,1000, 30000,100,1,0,0 },
+        {  60000,1200,1200,1200,1200,1000, 90000,100,1,0,0 },
+        { 120000,1200,1200,1200,1200,1000, 150000,100,1,0,0 }
+    });
+
+    Account::AccountInitConfig init{};
+    init.spot_initial_cash = 0.0;
+    init.perp_initial_wallet = 10000.0;
+    BinanceExchange exchange(
+        { { "BTCUSDT", (tmp_dir / "btc.csv").string() } },
+        nullptr,
+        init);
+
+    exchange.set_symbol_leverage("BTCUSDT", 10.0);
+    ASSERT_TRUE(exchange.perp.place_order("BTCUSDT", 2.0, 1000.0, QTrading::Dto::Trading::OrderSide::Buy));
+    ASSERT_TRUE(exchange.step());
+    (void)exchange.get_market_channel()->Receive();
+    ASSERT_EQ(exchange.get_all_positions().size(), 1u);
+    EXPECT_DOUBLE_EQ(exchange.get_all_positions()[0].quantity, 2.0);
+
+    ASSERT_TRUE(exchange.step());
+    (void)exchange.get_market_channel()->Receive();
+    ASSERT_EQ(exchange.get_all_positions().size(), 1u);
+    EXPECT_DOUBLE_EQ(exchange.get_all_positions()[0].quantity, 2.0);
+
+    exchange.perp.close_position("BTCUSDT");
+    ASSERT_EQ(exchange.get_all_open_orders().size(), 1u);
+    EXPECT_TRUE(exchange.get_all_open_orders()[0].close_position);
+
+    ASSERT_TRUE(exchange.step());
+    (void)exchange.get_market_channel()->Receive();
+    EXPECT_TRUE(exchange.get_all_open_orders().empty());
+    EXPECT_TRUE(exchange.get_all_positions().empty());
+}
+
 TEST_F(BinanceExchangeFixture, PerpReduceOnlyOrderDoesNotFlipExposure)
 {
     WriteCsv("btc.csv", {

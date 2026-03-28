@@ -3,10 +3,14 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <optional>
 
 #include "Data/Binance/MarketData.hpp"
 #include "Dto/Trading/InstrumentSpec.hpp"
+#include "Dto/Market/Binance/MultiKline.hpp"
+#include "Exchanges/BinanceSimulator/Domain/FillSettlementEngine.hpp"
+#include "Exchanges/BinanceSimulator/Domain/MatchingEngine.hpp"
 #include "Exchanges/BinanceSimulator/Account/Account.hpp"
 #include "Exchanges/BinanceSimulator/Contracts/OrderCommandRequest.hpp"
 #include "Exchanges/BinanceSimulator/Domain/OrderEntryService.hpp"
@@ -51,6 +55,37 @@ OrderCommandRequest make_perp_market_request(double quantity)
     OrderCommandRequest request = make_perp_limit_request(quantity, 0.0);
     request.kind = OrderCommandKind::PerpMarket;
     return request;
+}
+
+QTrading::Dto::Market::Binance::MultiKlineDto make_single_symbol_market(
+    const std::string& symbol,
+    double open_price,
+    double high_price,
+    double low_price,
+    double close_price,
+    double volume,
+    uint64_t timestamp)
+{
+    QTrading::Dto::Market::Binance::MultiKlineDto market{};
+    market.Timestamp = timestamp;
+    market.symbols = std::make_shared<std::vector<std::string>>(std::initializer_list<std::string>{ symbol });
+    market.trade_klines_by_id.resize(1);
+    market.trade_klines_by_id[0] = QTrading::Dto::Market::Binance::TradeKlineDto{
+        timestamp,
+        open_price,
+        high_price,
+        low_price,
+        close_price,
+        volume,
+        timestamp + 60000,
+        close_price * volume,
+        1,
+        0.0,
+        0.0 };
+    market.mark_klines_by_id.resize(1);
+    market.index_klines_by_id.resize(1);
+    market.funding_by_id.resize(1);
+    return market;
 }
 
 std::filesystem::path write_single_kline_csv(const std::string& file_name, double close_price)
@@ -197,4 +232,140 @@ TEST(OrderEntryServiceTest, InstrumentFiltersPerpMarketNotionalUsesMarkPrice)
 
     std::filesystem::remove(trade_csv);
     std::filesystem::remove(mark_csv);
+}
+
+TEST(OrderEntryServiceTest, CancelOrderByIdRemovesRemainingOpenOrderAndKeepsFilledPosition)
+{
+    BinanceExchangeRuntimeState runtime_state{};
+    StepKernelState step_state = make_step_state_with_perp_symbol();
+    Account account(5000.0, 0);
+    std::optional<OrderRejectInfo> reject{};
+
+    ASSERT_TRUE(OrderEntryService::Execute(
+        runtime_state,
+        account,
+        step_state,
+        make_perp_limit_request(5.0, 500.0),
+        reject));
+    EXPECT_FALSE(reject.has_value());
+    ASSERT_EQ(runtime_state.orders.size(), 1u);
+    const int order_id = runtime_state.orders[0].id;
+
+    const auto market = make_single_symbol_market("BTCUSDT", 500.0, 500.0, 500.0, 500.0, 2.0, 0);
+    std::vector<QTrading::Infra::Exchanges::BinanceSim::Domain::MatchFill> fills{};
+    QTrading::Infra::Exchanges::BinanceSim::Domain::MatchingEngine::RunStep(
+        runtime_state,
+        step_state,
+        market,
+        fills);
+    QTrading::Infra::Exchanges::BinanceSim::Domain::FillSettlementEngine::Apply(
+        runtime_state,
+        account,
+        fills);
+
+    ASSERT_EQ(runtime_state.orders.size(), 1u);
+    EXPECT_DOUBLE_EQ(runtime_state.orders[0].quantity, 3.0);
+    ASSERT_EQ(runtime_state.positions.size(), 1u);
+    EXPECT_DOUBLE_EQ(runtime_state.positions[0].quantity, 2.0);
+
+    EXPECT_TRUE(OrderEntryService::CancelOrderById(runtime_state, step_state, order_id));
+    EXPECT_TRUE(runtime_state.orders.empty());
+    ASSERT_EQ(runtime_state.positions.size(), 1u);
+    EXPECT_DOUBLE_EQ(runtime_state.positions[0].quantity, 2.0);
+}
+
+TEST(OrderEntryServiceTest, ClientOrderIdMustBeUniqueAmongOpenOrders)
+{
+    BinanceExchangeRuntimeState runtime_state{};
+    StepKernelState step_state = make_step_state_with_perp_symbol();
+    Account account(10000.0, 0);
+    std::optional<OrderRejectInfo> reject{};
+
+    auto first = make_perp_limit_request(1.0, 100.0);
+    first.client_order_id = "cid-1";
+    ASSERT_TRUE(OrderEntryService::Execute(runtime_state, account, step_state, first, reject));
+    EXPECT_FALSE(reject.has_value());
+    ASSERT_EQ(runtime_state.orders.size(), 1u);
+    EXPECT_EQ(runtime_state.orders[0].client_order_id, "cid-1");
+
+    auto second = make_perp_limit_request(1.0, 99.0);
+    second.side = QTrading::Dto::Trading::OrderSide::Sell;
+    second.client_order_id = "cid-1";
+    EXPECT_FALSE(OrderEntryService::Execute(runtime_state, account, step_state, second, reject));
+    ASSERT_TRUE(reject.has_value());
+    EXPECT_EQ(reject->code, OrderRejectInfo::Code::DuplicateClientOrderId);
+    EXPECT_EQ(runtime_state.orders.size(), 1u);
+}
+
+TEST(OrderEntryServiceTest, StpExpireTakerRejectsCrossingIncomingOrder)
+{
+    BinanceExchangeRuntimeState runtime_state{};
+    StepKernelState step_state = make_step_state_with_perp_symbol();
+    Account account(10000.0, 0);
+    std::optional<OrderRejectInfo> reject{};
+
+    ASSERT_TRUE(OrderEntryService::Execute(
+        runtime_state,
+        account,
+        step_state,
+        make_perp_limit_request(1.0, 100.0),
+        reject));
+    EXPECT_FALSE(reject.has_value());
+
+    auto incoming = make_perp_limit_request(1.0, 99.0);
+    incoming.side = QTrading::Dto::Trading::OrderSide::Sell;
+    incoming.stp_mode = static_cast<int>(Account::SelfTradePreventionMode::ExpireTaker);
+    EXPECT_FALSE(OrderEntryService::Execute(runtime_state, account, step_state, incoming, reject));
+    ASSERT_TRUE(reject.has_value());
+    EXPECT_EQ(reject->code, OrderRejectInfo::Code::StpExpiredTaker);
+    ASSERT_EQ(runtime_state.orders.size(), 1u);
+    EXPECT_EQ(runtime_state.orders[0].side, QTrading::Dto::Trading::OrderSide::Buy);
+}
+
+TEST(OrderEntryServiceTest, StpExpireMakerCancelsConflictingRestingOrder)
+{
+    BinanceExchangeRuntimeState runtime_state{};
+    StepKernelState step_state = make_step_state_with_perp_symbol();
+    Account account(10000.0, 0);
+    std::optional<OrderRejectInfo> reject{};
+
+    ASSERT_TRUE(OrderEntryService::Execute(
+        runtime_state,
+        account,
+        step_state,
+        make_perp_limit_request(1.0, 100.0),
+        reject));
+    EXPECT_FALSE(reject.has_value());
+
+    auto incoming = make_perp_limit_request(1.0, 99.0);
+    incoming.side = QTrading::Dto::Trading::OrderSide::Sell;
+    incoming.stp_mode = static_cast<int>(Account::SelfTradePreventionMode::ExpireMaker);
+    ASSERT_TRUE(OrderEntryService::Execute(runtime_state, account, step_state, incoming, reject));
+    EXPECT_FALSE(reject.has_value());
+    ASSERT_EQ(runtime_state.orders.size(), 1u);
+    EXPECT_EQ(runtime_state.orders[0].side, QTrading::Dto::Trading::OrderSide::Sell);
+}
+
+TEST(OrderEntryServiceTest, StpExpireBothCancelsRestingAndRejectsIncomingOrder)
+{
+    BinanceExchangeRuntimeState runtime_state{};
+    StepKernelState step_state = make_step_state_with_perp_symbol();
+    Account account(10000.0, 0);
+    std::optional<OrderRejectInfo> reject{};
+
+    ASSERT_TRUE(OrderEntryService::Execute(
+        runtime_state,
+        account,
+        step_state,
+        make_perp_limit_request(1.0, 100.0),
+        reject));
+    EXPECT_FALSE(reject.has_value());
+
+    auto incoming = make_perp_limit_request(1.0, 99.0);
+    incoming.side = QTrading::Dto::Trading::OrderSide::Sell;
+    incoming.stp_mode = static_cast<int>(Account::SelfTradePreventionMode::ExpireBoth);
+    EXPECT_FALSE(OrderEntryService::Execute(runtime_state, account, step_state, incoming, reject));
+    ASSERT_TRUE(reject.has_value());
+    EXPECT_EQ(reject->code, OrderRejectInfo::Code::StpExpiredBoth);
+    EXPECT_TRUE(runtime_state.orders.empty());
 }

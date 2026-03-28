@@ -28,6 +28,11 @@ public:
 
     static void SyncOpenOrderMargins(State::BinanceExchangeRuntimeState& runtime_state);
 
+    static bool CancelOrderById(
+        State::BinanceExchangeRuntimeState& runtime_state,
+        State::StepKernelState& step_state,
+        int order_id);
+
     static void CancelOpenOrders(
         State::BinanceExchangeRuntimeState& runtime_state,
         State::StepKernelState& step_state,
