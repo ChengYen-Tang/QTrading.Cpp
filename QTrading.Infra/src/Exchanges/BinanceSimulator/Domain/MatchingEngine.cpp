@@ -212,7 +212,7 @@ double compute_limit_fill_probability(
         config.limit_fill_probability_size_weight * size_ratio +
         config.limit_fill_probability_taker_weight * taker_buy_ratio +
         config.limit_fill_probability_interaction_weight * interaction;
-    return clamp01(sigmoid(z));
+    return std::min(clamp01(sigmoid(z)), 0.999999);
 }
 
 double compute_taker_probability(
@@ -446,7 +446,7 @@ void MatchingEngine::RunStep(
             fill_taker_probability = is_taker ? 1.0 : 0.0;
         }
         const bool resolved_taker = runtime_state.simulation_config.taker_probability_model_enabled
-            ? (fill_taker_probability >= 0.5)
+            ? (fill_taker_probability > 0.0)
             : is_taker;
         double impact_bps = 0.0;
         double adjusted_fill_price = apply_execution_slippage(
@@ -475,6 +475,9 @@ void MatchingEngine::RunStep(
         fill.fill_probability = fill_probability;
         fill.taker_probability = fill_taker_probability;
         fill.impact_slippage_bps = impact_bps;
+        fill.quote_order_qty = order.quote_order_qty;
+        fill.order_price = order.price;
+        fill.closing_position_id = order.closing_position_id;
         fill.order_quantity = request_qty;
         fill.quantity = fill_qty;
         fill.price = adjusted_fill_price;

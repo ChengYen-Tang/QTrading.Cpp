@@ -46,20 +46,51 @@ public:
 
     using Account::Account;
 
-    void set_intra_bar_path_mode(IntraBarPathMode) {}
-    void set_intra_bar_random_seed(uint64_t) {}
-    void set_intra_bar_monte_carlo_samples(size_t) {}
+    explicit AccountShim(const Account::AccountInitConfig& init)
+        : Account(init),
+          strict_binance_mode(init.strict_binance_mode),
+          hedge_mode(init.hedge_mode)
+    {
+    }
+
+    void set_intra_bar_path_mode(IntraBarPathMode mode) { intra_bar_path_mode = mode; }
+    void set_intra_bar_random_seed(uint64_t seed) { intra_bar_random_seed = seed; }
+    void set_intra_bar_monte_carlo_samples(size_t samples)
+    {
+        intra_bar_monte_carlo_samples = static_cast<uint32_t>(samples);
+    }
     void set_strict_binance_mode(bool value) { strict_binance_mode = value; }
     void set_position_mode(bool hedge) { hedge_mode = hedge; }
     void set_symbol_leverage(const std::string& symbol, double value) { symbol_leverage[symbol] = value; }
-    void set_spot_commission_mode(SpotCommissionMode) {}
-    void set_kline_volume_split_mode(KlineVolumeSplitMode) {}
-    void set_market_impact_slippage_enabled(bool) {}
-    void set_market_impact_slippage_params(double, double, double, double, double) {}
-    void set_taker_probability_model_enabled(bool) {}
-    void set_taker_probability_model_coefficients(double, double, double, double, double) {}
-    void set_limit_fill_probability_enabled(bool) {}
-    void set_limit_fill_probability_coefficients(double, double, double, double, double) {}
+    void set_spot_commission_mode(SpotCommissionMode mode) { spot_commission_mode = mode; }
+    void set_kline_volume_split_mode(KlineVolumeSplitMode mode) { kline_volume_split_mode = mode; }
+    void set_market_impact_slippage_enabled(bool value) { market_impact_slippage_enabled = value; }
+    void set_market_impact_slippage_params(double base_bps, double max_bps, double exponent, double liquidity_bias, double offset_bps)
+    {
+        market_impact_base_bps = base_bps;
+        market_impact_max_bps = max_bps;
+        market_impact_size_exponent = exponent;
+        market_impact_liquidity_bias = liquidity_bias;
+        market_impact_offset_bps = offset_bps;
+    }
+    void set_taker_probability_model_enabled(bool value) { taker_probability_model_enabled = value; }
+    void set_taker_probability_model_coefficients(double bias, double penetration_w, double size_w, double taker_w, double interaction_w)
+    {
+        taker_probability_bias = bias;
+        taker_probability_penetration_weight = penetration_w;
+        taker_probability_size_weight = size_w;
+        taker_probability_taker_weight = taker_w;
+        taker_probability_interaction_weight = interaction_w;
+    }
+    void set_limit_fill_probability_enabled(bool value) { limit_fill_probability_enabled = value; }
+    void set_limit_fill_probability_coefficients(double bias, double penetration_w, double size_w, double taker_w, double interaction_w)
+    {
+        limit_fill_probability_bias = bias;
+        limit_fill_probability_penetration_weight = penetration_w;
+        limit_fill_probability_size_weight = size_w;
+        limit_fill_probability_taker_weight = taker_w;
+        limit_fill_probability_interaction_weight = interaction_w;
+    }
 
     bool place_order(
         const std::string& symbol,
@@ -96,6 +127,7 @@ public:
             position.instrument_type = order.instrument_type;
             positions_.push_back(position);
         }
+        open_orders_.clear();
     }
 
     const std::vector<QTrading::dto::Position>& get_all_positions() const { return positions_; }
@@ -103,6 +135,29 @@ public:
 
     bool strict_binance_mode{ true };
     bool hedge_mode{ false };
+    SpotCommissionMode spot_commission_mode{ static_cast<SpotCommissionMode>(0) };
+    IntraBarPathMode intra_bar_path_mode{ IntraBarPathMode::MonteCarloPath };
+    uint64_t intra_bar_random_seed{ 42ull };
+    uint32_t intra_bar_monte_carlo_samples{ 1u };
+    KlineVolumeSplitMode kline_volume_split_mode{ KlineVolumeSplitMode::LegacyTotalOnly };
+    bool market_impact_slippage_enabled{ false };
+    double market_impact_base_bps{ 0.0 };
+    double market_impact_max_bps{ 0.0 };
+    double market_impact_size_exponent{ 1.0 };
+    double market_impact_liquidity_bias{ 0.0 };
+    double market_impact_offset_bps{ 0.0 };
+    bool taker_probability_model_enabled{ false };
+    double taker_probability_bias{ 0.0 };
+    double taker_probability_penetration_weight{ 0.0 };
+    double taker_probability_size_weight{ 0.0 };
+    double taker_probability_taker_weight{ 0.0 };
+    double taker_probability_interaction_weight{ 0.0 };
+    bool limit_fill_probability_enabled{ false };
+    double limit_fill_probability_bias{ 0.0 };
+    double limit_fill_probability_penetration_weight{ 0.0 };
+    double limit_fill_probability_size_weight{ 0.0 };
+    double limit_fill_probability_taker_weight{ 0.0 };
+    double limit_fill_probability_interaction_weight{ 0.0 };
     std::unordered_map<std::string, double> symbol_leverage{};
 
 private:
@@ -206,7 +261,39 @@ private:
     void apply_legacy_account_(const AccountShim& legacy)
     {
         impl_.runtime_state_->strict_binance_mode = legacy.strict_binance_mode;
-        impl_.runtime_state_->hedge_mode = legacy.hedge_mode;
+        impl_.runtime_state_->hedge_mode = legacy.hedge_mode || !legacy.strict_binance_mode;
+        impl_.runtime_state_->simulation_config.spot_commission_mode =
+            legacy.spot_commission_mode == AccountShim::SpotCommissionMode::BaseOnBuyQuoteOnSell
+            ? QTrading::Infra::Exchanges::BinanceSim::Config::SpotCommissionMode::BaseOnBuyQuoteOnSell
+            : QTrading::Infra::Exchanges::BinanceSim::Config::SpotCommissionMode::QuoteOnBuyQuoteOnSell;
+        impl_.runtime_state_->simulation_config.intra_bar_path_mode =
+            legacy.intra_bar_path_mode == AccountShim::IntraBarPathMode::MonteCarloPath
+            ? QTrading::Infra::Exchanges::BinanceSim::Config::IntraBarPathMode::MonteCarloPath
+            : QTrading::Infra::Exchanges::BinanceSim::Config::IntraBarPathMode::CloseMarketability;
+        impl_.runtime_state_->simulation_config.intra_bar_random_seed = legacy.intra_bar_random_seed;
+        impl_.runtime_state_->simulation_config.intra_bar_monte_carlo_samples = legacy.intra_bar_monte_carlo_samples;
+        impl_.runtime_state_->simulation_config.kline_volume_split_mode =
+            legacy.kline_volume_split_mode == AccountShim::KlineVolumeSplitMode::LegacyTotalOnly
+            ? QTrading::Infra::Exchanges::BinanceSim::Config::KlineVolumeSplitMode::TotalOnly
+            : QTrading::Infra::Exchanges::BinanceSim::Config::KlineVolumeSplitMode::OppositePassiveSplit;
+        impl_.runtime_state_->simulation_config.market_impact_slippage_enabled = legacy.market_impact_slippage_enabled;
+        impl_.runtime_state_->simulation_config.market_impact_base_bps = legacy.market_impact_base_bps;
+        impl_.runtime_state_->simulation_config.market_impact_max_bps = legacy.market_impact_max_bps;
+        impl_.runtime_state_->simulation_config.market_impact_size_exponent = legacy.market_impact_size_exponent;
+        impl_.runtime_state_->simulation_config.market_impact_liquidity_bias = legacy.market_impact_liquidity_bias;
+        impl_.runtime_state_->simulation_config.market_impact_offset_bps = legacy.market_impact_offset_bps;
+        impl_.runtime_state_->simulation_config.taker_probability_model_enabled = legacy.taker_probability_model_enabled;
+        impl_.runtime_state_->simulation_config.taker_probability_bias = legacy.taker_probability_bias;
+        impl_.runtime_state_->simulation_config.taker_probability_penetration_weight = legacy.taker_probability_penetration_weight;
+        impl_.runtime_state_->simulation_config.taker_probability_size_weight = legacy.taker_probability_size_weight;
+        impl_.runtime_state_->simulation_config.taker_probability_taker_weight = legacy.taker_probability_taker_weight;
+        impl_.runtime_state_->simulation_config.taker_probability_interaction_weight = legacy.taker_probability_interaction_weight;
+        impl_.runtime_state_->simulation_config.limit_fill_probability_enabled = legacy.limit_fill_probability_enabled;
+        impl_.runtime_state_->simulation_config.limit_fill_probability_bias = legacy.limit_fill_probability_bias;
+        impl_.runtime_state_->simulation_config.limit_fill_probability_penetration_weight = legacy.limit_fill_probability_penetration_weight;
+        impl_.runtime_state_->simulation_config.limit_fill_probability_size_weight = legacy.limit_fill_probability_size_weight;
+        impl_.runtime_state_->simulation_config.limit_fill_probability_taker_weight = legacy.limit_fill_probability_taker_weight;
+        impl_.runtime_state_->simulation_config.limit_fill_probability_interaction_weight = legacy.limit_fill_probability_interaction_weight;
         for (const auto& [symbol, leverage] : legacy.symbol_leverage) {
             impl_.set_symbol_leverage(symbol, leverage);
         }

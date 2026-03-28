@@ -16,11 +16,13 @@ FundingMarkResolution ReferencePriceResolver::ResolveFundingMark(
     if (raw_mark_kline.has_value()) {
         out.has_mark_price = true;
         out.mark_price = raw_mark_kline->ClosePrice;
-        out.mark_price_source = Contracts::ReferencePriceSource::Raw;
+        out.mark_price_source =
+            raw_mark_kline->OpenTime == raw_mark_kline->CloseTime
+            ? Contracts::ReferencePriceSource::Interpolated
+            : Contracts::ReferencePriceSource::Raw;
         return out;
     }
     return out;
 }
 
 } // namespace QTrading::Infra::Exchanges::BinanceSim::Domain
-

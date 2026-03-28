@@ -159,7 +159,7 @@ bool OrderCommandKernel::PlacePerpClosePosition(const std::string& symbol, QTrad
     request.price = price;
     request.side = side;
     request.position_side = position_side;
-    request.reduce_only = true;
+    request.reduce_only = false;
     request.close_position = true;
     request.client_order_id = client_order_id;
     request.stp_mode = static_cast<int>(stp_mode);

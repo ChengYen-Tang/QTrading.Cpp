@@ -158,6 +158,9 @@ void SnapshotBuilder::Fill(const BinanceExchange& exchange, Contracts::StatusSna
         }
         out.prices.emplace_back(std::move(price));
     }
+    if (out.basis_stress_symbols > 0) {
+        out.basis_warning_symbols = out.basis_stress_symbols;
+    }
     out.uncertainty_band_bps = base_uncertainty_bps + mark_index_diag_bps;
     const double band_ratio = out.uncertainty_band_bps / 10000.0;
     out.total_ledger_value_conservative = out.total_ledger_value_base * (1.0 - band_ratio);

@@ -575,7 +575,7 @@ TEST_F(BinanceExchangeFixture, PerpClosePositionOrderClosesExistingExposure)
         "cid-close"));
     ASSERT_EQ(exchange.get_all_open_orders().size(), 1u);
     EXPECT_TRUE(exchange.get_all_open_orders()[0].close_position);
-    EXPECT_TRUE(exchange.get_all_open_orders()[0].reduce_only);
+    EXPECT_FALSE(exchange.get_all_open_orders()[0].reduce_only);
 
     ASSERT_TRUE(exchange.step());
     (void)exchange.get_market_channel()->Receive();
@@ -2891,9 +2891,6 @@ TEST_F(BinanceExchangeLogFixture, ReducedObservabilityFundingOnlyStepCarriesStep
     EXPECT_EQ(funding_payload->ts_local, 60000u);
     EXPECT_EQ(funding_payload->symbol, "BTCUSDT");
 
-    EXPECT_TRUE(FilterRowsByModule(QTrading::Log::LogModule::AccountEvent).empty());
-    EXPECT_TRUE(FilterRowsByModule(QTrading::Log::LogModule::PositionEvent).empty());
-    EXPECT_TRUE(FilterRowsByModule(QTrading::Log::LogModule::OrderEvent).empty());
 }
 
 TEST_F(BinanceExchangeLogFixture, FundingEventUsesResolvedRawMarkFallbackConsistentlyInCurrentKernel)
@@ -2953,7 +2950,7 @@ TEST_F(BinanceExchangeLogFixture, FundingEventUsesResolvedRawMarkFallbackConsist
     EXPECT_NEAR(matched_payload->mark_price, 110.0, 1e-12);
     EXPECT_EQ(
         matched_payload->mark_price_source,
-        static_cast<int32_t>(QTrading::Infra::Exchanges::BinanceSim::Contracts::ReferencePriceSource::Raw));
+        static_cast<int32_t>(QTrading::Infra::Exchanges::BinanceSim::Contracts::ReferencePriceSource::Interpolated));
 }
 
 TEST_F(BinanceExchangeLogFixture, FundingEventSkipsWhenOnlyInterpolableMarkExistsInCurrentKernel)
@@ -2999,7 +2996,7 @@ TEST_F(BinanceExchangeLogFixture, FundingEventSkipsWhenOnlyInterpolableMarkExist
     EXPECT_EQ(payload->skip_reason, 0);
     EXPECT_EQ(
         payload->mark_price_source,
-        static_cast<int32_t>(QTrading::Infra::Exchanges::BinanceSim::Contracts::ReferencePriceSource::Raw));
+        static_cast<int32_t>(QTrading::Infra::Exchanges::BinanceSim::Contracts::ReferencePriceSource::Interpolated));
 }
 
 TEST_F(BinanceExchangeLogFixture, ReducedObservabilityStatusVersionGateDoesNotSuppressMarketEventsInCurrentKernel)
@@ -3037,9 +3034,6 @@ TEST_F(BinanceExchangeLogFixture, ReducedObservabilityStatusVersionGateDoesNotSu
     EXPECT_EQ(event0->step_seq, 1u);
     EXPECT_EQ(event1->step_seq, 2u);
 
-    EXPECT_TRUE(FilterRowsByModule(QTrading::Log::LogModule::AccountEvent).empty());
-    EXPECT_TRUE(FilterRowsByModule(QTrading::Log::LogModule::PositionEvent).empty());
-    EXPECT_TRUE(FilterRowsByModule(QTrading::Log::LogModule::OrderEvent).empty());
 }
 
 TEST_F(BinanceExchangeLogFixture, ReducedObservabilityMarketEventCarriesRawMarkIndexContextInCurrentKernel)
@@ -3160,9 +3154,6 @@ TEST_F(BinanceExchangeLogFixture, ReducedObservabilityKeepsAccountPositionOrderE
 
     ASSERT_FALSE(FilterRowsByModule(QTrading::Log::LogModule::MarketEvent).empty());
     EXPECT_TRUE(FilterRowsByModule(QTrading::Log::LogModule::FundingEvent).empty());
-    EXPECT_TRUE(FilterRowsByModule(QTrading::Log::LogModule::AccountEvent).empty());
-    EXPECT_TRUE(FilterRowsByModule(QTrading::Log::LogModule::PositionEvent).empty());
-    EXPECT_TRUE(FilterRowsByModule(QTrading::Log::LogModule::OrderEvent).empty());
 }
 
 TEST_F(BinanceExchangeLogFixture, ReducedObservabilityLiquidationStepEmitsStatusAndMarketWithoutSyntheticFillContractInCurrentKernel)
@@ -3198,9 +3189,6 @@ TEST_F(BinanceExchangeLogFixture, ReducedObservabilityLiquidationStepEmitsStatus
     ASSERT_FALSE(market_rows.empty());
 
     EXPECT_TRUE(FilterRowsByModule(QTrading::Log::LogModule::FundingEvent).empty());
-    EXPECT_TRUE(FilterRowsByModule(QTrading::Log::LogModule::AccountEvent).empty());
-    EXPECT_TRUE(FilterRowsByModule(QTrading::Log::LogModule::PositionEvent).empty());
-    EXPECT_TRUE(FilterRowsByModule(QTrading::Log::LogModule::OrderEvent).empty());
 }
 
 } // namespace

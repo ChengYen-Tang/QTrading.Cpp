@@ -29,6 +29,9 @@ struct MatchFill {
     double fill_probability{ 1.0 };
     double taker_probability{ 0.0 };
     double impact_slippage_bps{ 0.0 };
+    double quote_order_qty{ 0.0 };
+    double order_price{ 0.0 };
+    int64_t closing_position_id{ 0 };
     double order_quantity{ 0.0 };
     double quantity{ 0.0 };
     double price{ 0.0 };
