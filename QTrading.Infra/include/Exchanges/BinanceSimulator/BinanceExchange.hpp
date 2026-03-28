@@ -30,6 +30,10 @@ class OrderCommandKernel;
 class StepKernel;
 }
 
+namespace QTrading::Infra::Exchanges::BinanceSim::Api {
+class AccountApi;
+}
+
 namespace QTrading::Infra::Exchanges::BinanceSim::Output {
 class SnapshotBuilder;
 class PositionOrderSnapshotGate;
@@ -85,6 +89,7 @@ public:
 private:
     friend class Application::OrderCommandKernel;
     friend class Application::StepKernel;
+    friend class Api::AccountApi;
     friend class Output::SnapshotBuilder;
     friend class Output::PositionOrderSnapshotGate;
 

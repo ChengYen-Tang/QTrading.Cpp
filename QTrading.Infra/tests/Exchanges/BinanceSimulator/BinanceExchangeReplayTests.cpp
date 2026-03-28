@@ -96,6 +96,13 @@ protected:
             nullptr,
             QTrading::Infra::Exchanges::BinanceSim::Support::BuildInitConfig(1000.0, 0));
     }
+
+    BinanceExchange MakeExchangeWithInit(
+        const std::vector<BinanceExchange::SymbolDataset>& datasets,
+        const Account::AccountInitConfig& init)
+    {
+        return BinanceExchange(datasets, nullptr, init);
+    }
 };
 
 class BinanceExchangeLogFixture : public InfraLogTestFixture {
@@ -402,6 +409,121 @@ TEST_F(BinanceExchangeFixture, PerpCancelOpenOrdersRemovesPerpOrdersOnly)
     EXPECT_EQ(orders[1].symbol, "ETHUSDT");
 }
 
+TEST_F(BinanceExchangeFixture, ExplicitInstrumentTypeAppliesWithoutSuffixNaming)
+{
+    WriteCsv("btc.csv", {
+        {      0, 100,100,100,100,1000, 30000,100,1,0,0 },
+        {  60000, 100,100,100,100,1000, 90000,100,1,0,0 }
+    });
+
+    Account::AccountInitConfig init{};
+    init.spot_initial_cash = 1000.0;
+    init.perp_initial_wallet = 0.0;
+    BinanceExchange exchange = MakeExchangeWithInit({
+        { "BTCUSDT",
+            (tmp_dir / "btc.csv").string(),
+            std::nullopt,
+            std::nullopt,
+            std::nullopt,
+            QTrading::Dto::Trading::InstrumentType::Spot }
+    }, init);
+
+    EXPECT_FALSE(exchange.spot.place_order("BTCUSDT", 1.0, 100.0, QTrading::Dto::Trading::OrderSide::Sell));
+    ASSERT_TRUE(exchange.spot.place_order("BTCUSDT", 1.0, 100.0, QTrading::Dto::Trading::OrderSide::Buy));
+    ASSERT_TRUE(exchange.step());
+    (void)exchange.get_market_channel()->Receive();
+    ASSERT_EQ(exchange.get_all_positions().size(), 1u);
+    EXPECT_EQ(exchange.get_all_positions()[0].instrument_type, QTrading::Dto::Trading::InstrumentType::Spot);
+    ASSERT_TRUE(exchange.spot.place_order("BTCUSDT", 0.5, 100.0, QTrading::Dto::Trading::OrderSide::Sell));
+}
+
+TEST_F(BinanceExchangeFixture, CompatibilityModeUnspecifiedInstrumentDefaultsToPerpPolicy)
+{
+    WriteCsv("btc.csv", {
+        { 0, 100,100,100,100,1000, 30000,100,1,0,0 }
+    });
+
+    Account::AccountInitConfig init{};
+    init.spot_initial_cash = 0.0;
+    init.perp_initial_wallet = 1000.0;
+    BinanceExchange exchange = MakeExchangeWithInit({
+        { "BTCUSDT", (tmp_dir / "btc.csv").string() }
+    }, init);
+
+    exchange.set_symbol_leverage("BTCUSDT", 10.0);
+    EXPECT_DOUBLE_EQ(exchange.get_symbol_leverage("BTCUSDT"), 10.0);
+    EXPECT_TRUE(exchange.perp.place_order("BTCUSDT", 1.0, 100.0, QTrading::Dto::Trading::OrderSide::Buy));
+}
+
+TEST_F(BinanceExchangeFixture, StrictModeRejectsUnknownSymbolOrderPlacement)
+{
+    WriteCsv("btc.csv", {
+        { 0, 100,100,100,100,1000, 30000,100,1,0,0 }
+    });
+
+    Account::AccountInitConfig init{};
+    init.spot_initial_cash = 0.0;
+    init.perp_initial_wallet = 1000.0;
+    BinanceExchange exchange = MakeExchangeWithInit({
+        { "BTCUSDT", (tmp_dir / "btc.csv").string() }
+    }, init);
+
+    EXPECT_FALSE(exchange.perp.place_order("UNKNOWNUSDT", 1.0, 100.0, QTrading::Dto::Trading::OrderSide::Buy));
+}
+
+TEST_F(BinanceExchangeFixture, StrictModeDomainApiRejectsUnknownSymbolOrderPlacement)
+{
+    WriteCsv("btc.csv", {
+        { 0, 100,100,100,100,1000, 30000,100,1,0,0 }
+    });
+
+    Account::AccountInitConfig init{};
+    init.spot_initial_cash = 1000.0;
+    init.perp_initial_wallet = 1000.0;
+    BinanceExchange exchange = MakeExchangeWithInit({
+        { "BTCUSDT", (tmp_dir / "btc.csv").string() }
+    }, init);
+
+    EXPECT_FALSE(exchange.perp.place_order("UNKNOWNUSDT", 1.0, 100.0, QTrading::Dto::Trading::OrderSide::Buy));
+    EXPECT_FALSE(exchange.spot.place_order("UNKNOWNUSDT", 1.0, 100.0, QTrading::Dto::Trading::OrderSide::Buy));
+}
+
+TEST_F(BinanceExchangeFixture, SetAndGetSymbolLeverage)
+{
+    WriteCsv("btc.csv", {
+        { 0, 100,100,100,100,1000, 30000,100,1,0,0 }
+    });
+    BinanceExchange exchange = MakeExchange({
+        { "BTCUSDT", (tmp_dir / "btc.csv").string() }
+    });
+
+    EXPECT_DOUBLE_EQ(exchange.get_symbol_leverage("BTCUSDT"), 1.0);
+    exchange.set_symbol_leverage("BTCUSDT", 15.0);
+    EXPECT_DOUBLE_EQ(exchange.get_symbol_leverage("BTCUSDT"), 15.0);
+    EXPECT_DOUBLE_EQ(exchange.perp.get_symbol_leverage("BTCUSDT"), 15.0);
+}
+
+TEST_F(BinanceExchangeFixture, SpotSymbolLeverageIsAlwaysOne)
+{
+    WriteCsv("btc.csv", {
+        { 0, 100,100,100,100,1000, 30000,100,1,0,0 }
+    });
+    Account::AccountInitConfig init{};
+    init.spot_initial_cash = 1000.0;
+    init.perp_initial_wallet = 0.0;
+    BinanceExchange exchange = MakeExchangeWithInit({
+        { "BTCUSDT",
+            (tmp_dir / "btc.csv").string(),
+            std::nullopt,
+            std::nullopt,
+            std::nullopt,
+            QTrading::Dto::Trading::InstrumentType::Spot }
+    }, init);
+
+    exchange.set_symbol_leverage("BTCUSDT", 20.0);
+    EXPECT_DOUBLE_EQ(exchange.get_symbol_leverage("BTCUSDT"), 1.0);
+}
+
 TEST_F(BinanceExchangeFixture, PerpClosePositionOrderRejectsWithoutReduciblePosition)
 {
     WriteCsv("btc.csv", {
@@ -590,6 +712,141 @@ TEST_F(BinanceExchangeFixture, SpotMarketBuySettlesCashInventoryAndFee)
     ASSERT_EQ(exchange.get_all_positions().size(), 1u);
     EXPECT_EQ(exchange.get_all_positions()[0].instrument_type, QTrading::Dto::Trading::InstrumentType::Spot);
     EXPECT_NEAR(exchange.get_all_positions()[0].quantity, 1.0, 1e-12);
+}
+
+TEST_F(BinanceExchangeFixture, SpotBuyConsumesOnlySpotCash)
+{
+    WriteCsv("btc.csv", {
+        { 0,100,100,100,100,10, 30000,100,1,0,0 }
+    });
+
+    Account::AccountInitConfig init{};
+    init.spot_initial_cash = 1000.0;
+    init.perp_initial_wallet = 500.0;
+    BinanceExchange exchange = MakeExchangeWithInit({
+        { "BTCUSDT",
+            (tmp_dir / "btc.csv").string(),
+            std::nullopt,
+            std::nullopt,
+            std::nullopt,
+            QTrading::Dto::Trading::InstrumentType::Spot }
+    }, init);
+
+    ASSERT_TRUE(exchange.spot.place_order("BTCUSDT", 1.0, 100.0, QTrading::Dto::Trading::OrderSide::Buy));
+    ASSERT_TRUE(exchange.step());
+    (void)exchange.get_market_channel()->Receive();
+
+    EXPECT_NEAR(exchange.account.get_perp_balance().WalletBalance, 500.0, 1e-12);
+    EXPECT_LT(exchange.account.get_spot_balance().WalletBalance, 1000.0);
+}
+
+TEST_F(BinanceExchangeFixture, SpotSellIncreasesOnlySpotCash)
+{
+    WriteCsv("btc.csv", {
+        {      0,100,100,100,100,1000, 30000,100,1,0,0 },
+        {  60000,120,120,120,120,1000, 90000,100,1,0,0 }
+    });
+
+    Account::AccountInitConfig init{};
+    init.spot_initial_cash = 2000.0;
+    init.perp_initial_wallet = 500.0;
+    BinanceExchange exchange = MakeExchangeWithInit({
+        { "BTCUSDT",
+            (tmp_dir / "btc.csv").string(),
+            std::nullopt,
+            std::nullopt,
+            std::nullopt,
+            QTrading::Dto::Trading::InstrumentType::Spot }
+    }, init);
+
+    ASSERT_TRUE(exchange.spot.place_order("BTCUSDT", 1.0, 100.0, QTrading::Dto::Trading::OrderSide::Buy));
+    ASSERT_TRUE(exchange.step());
+    (void)exchange.get_market_channel()->Receive();
+    const double spot_after_buy = exchange.account.get_spot_balance().WalletBalance;
+    const double perp_before_sell = exchange.account.get_perp_balance().WalletBalance;
+
+    ASSERT_TRUE(exchange.spot.place_order("BTCUSDT", 0.5, 120.0, QTrading::Dto::Trading::OrderSide::Sell));
+    ASSERT_TRUE(exchange.step());
+    (void)exchange.get_market_channel()->Receive();
+    EXPECT_GT(exchange.account.get_spot_balance().WalletBalance, spot_after_buy);
+    EXPECT_DOUBLE_EQ(exchange.account.get_perp_balance().WalletBalance, perp_before_sell);
+}
+
+TEST_F(BinanceExchangeFixture, SpotOpenOrderReservesOnlySpotBudget)
+{
+    WriteCsv("btc.csv", {
+        { 0,100,100,100,100,1000, 30000,100,1,0,0 }
+    });
+
+    Account::AccountInitConfig init{};
+    init.spot_initial_cash = 1000.0;
+    init.perp_initial_wallet = 500.0;
+    BinanceExchange exchange = MakeExchangeWithInit({
+        { "BTCUSDT",
+            (tmp_dir / "btc.csv").string(),
+            std::nullopt,
+            std::nullopt,
+            std::nullopt,
+            QTrading::Dto::Trading::InstrumentType::Spot }
+    }, init);
+
+    const double perp_before = exchange.account.get_perp_balance().WalletBalance;
+    ASSERT_TRUE(exchange.spot.place_order("BTCUSDT", 5.0, 100.0, QTrading::Dto::Trading::OrderSide::Buy));
+    EXPECT_FALSE(exchange.spot.place_order("BTCUSDT", 6.0, 100.0, QTrading::Dto::Trading::OrderSide::Buy));
+    EXPECT_DOUBLE_EQ(exchange.account.get_perp_balance().WalletBalance, perp_before);
+}
+
+TEST_F(BinanceExchangeFixture, SpotBuyPlacementRejectedWhenSpotBudgetExceededByOpenOrders)
+{
+    WriteCsv("btc.csv", {
+        { 0,100,100,100,100,1000, 30000,100,1,0,0 }
+    });
+
+    Account::AccountInitConfig init{};
+    init.spot_initial_cash = 1000.0;
+    init.perp_initial_wallet = 0.0;
+    BinanceExchange exchange = MakeExchangeWithInit({
+        { "BTCUSDT",
+            (tmp_dir / "btc.csv").string(),
+            std::nullopt,
+            std::nullopt,
+            std::nullopt,
+            QTrading::Dto::Trading::InstrumentType::Spot }
+    }, init);
+
+    ASSERT_TRUE(exchange.spot.place_order("BTCUSDT", 8.0, 100.0, QTrading::Dto::Trading::OrderSide::Buy));
+    EXPECT_FALSE(exchange.spot.place_order("BTCUSDT", 3.0, 100.0, QTrading::Dto::Trading::OrderSide::Buy));
+}
+
+TEST_F(BinanceExchangeFixture, TransferBetweenLedgersRespectsAvailableBalance)
+{
+    WriteCsv("btc.csv", {
+        { 0,100,100,100,100,1000, 30000,100,1,0,0 }
+    });
+
+    Account::AccountInitConfig init{};
+    init.spot_initial_cash = 500.0;
+    init.perp_initial_wallet = 500.0;
+    BinanceExchange exchange = MakeExchangeWithInit({
+        { "BTCUSDT",
+            (tmp_dir / "btc.csv").string(),
+            std::nullopt,
+            std::nullopt,
+            std::nullopt,
+            QTrading::Dto::Trading::InstrumentType::Spot }
+    }, init);
+
+    EXPECT_TRUE(exchange.account.transfer_spot_to_perp(100.0));
+    EXPECT_DOUBLE_EQ(exchange.account.get_spot_balance().WalletBalance, 400.0);
+    EXPECT_DOUBLE_EQ(exchange.account.get_perp_balance().WalletBalance, 600.0);
+
+    ASSERT_TRUE(exchange.spot.place_order("BTCUSDT", 3.0, 100.0, QTrading::Dto::Trading::OrderSide::Buy));
+    EXPECT_FALSE(exchange.account.transfer_spot_to_perp(150.0));
+
+    EXPECT_TRUE(exchange.account.transfer_perp_to_spot(200.0));
+    EXPECT_DOUBLE_EQ(exchange.account.get_perp_balance().WalletBalance, 400.0);
+    EXPECT_DOUBLE_EQ(exchange.account.get_spot_balance().WalletBalance, 600.0);
+    EXPECT_FALSE(exchange.account.transfer_perp_to_spot(1000.0));
 }
 
 // Source case: BinanceExchangeTests.SnapshotConsistent/DomainFacadeRoutesByInstrumentType (perp fill path).

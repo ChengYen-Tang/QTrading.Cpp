@@ -21,12 +21,18 @@ double AccountApi::get_total_cash_balance() const
 
 bool AccountApi::transfer_spot_to_perp(double amount)
 {
-    return Adapters::AccountFacadeAdapter::TransferSpotToPerp(owner_.account_state(), amount);
+    return Adapters::AccountFacadeAdapter::TransferSpotToPerp(
+        owner_.account_state(),
+        *owner_.runtime_state_,
+        amount);
 }
 
 bool AccountApi::transfer_perp_to_spot(double amount)
 {
-    return Adapters::AccountFacadeAdapter::TransferPerpToSpot(owner_.account_state(), amount);
+    return Adapters::AccountFacadeAdapter::TransferPerpToSpot(
+        owner_.account_state(),
+        *owner_.runtime_state_,
+        amount);
 }
 
 } // namespace QTrading::Infra::Exchanges::BinanceSim::Api

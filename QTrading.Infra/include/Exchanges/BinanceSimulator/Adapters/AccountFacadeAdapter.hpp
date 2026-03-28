@@ -5,6 +5,9 @@
 namespace QTrading::Infra::Exchanges::BinanceSim {
 class Account;
 }
+namespace QTrading::Infra::Exchanges::BinanceSim::State {
+struct BinanceExchangeRuntimeState;
+}
 
 namespace QTrading::Infra::Exchanges::BinanceSim::Adapters {
 
@@ -15,8 +18,14 @@ public:
     static QTrading::Dto::Account::BalanceSnapshot GetSpotBalance(const Account& account);
     static QTrading::Dto::Account::BalanceSnapshot GetPerpBalance(const Account& account);
     static double GetTotalCashBalance(const Account& account);
-    static bool TransferSpotToPerp(Account& account, double amount);
-    static bool TransferPerpToSpot(Account& account, double amount);
+    static bool TransferSpotToPerp(
+        Account& account,
+        const State::BinanceExchangeRuntimeState& runtime_state,
+        double amount);
+    static bool TransferPerpToSpot(
+        Account& account,
+        const State::BinanceExchangeRuntimeState& runtime_state,
+        double amount);
 };
 
 } // namespace QTrading::Infra::Exchanges::BinanceSim::Adapters
