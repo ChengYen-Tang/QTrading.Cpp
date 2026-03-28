@@ -10,8 +10,25 @@
 namespace QTrading::Infra::Exchanges::BinanceSim::Domain {
 namespace {
 
-constexpr double kFeeRate = 0.001;
+constexpr double kSpotMakerFeeRate = 0.001;
+constexpr double kSpotTakerFeeRate = 0.001;
+constexpr double kPerpMakerFeeRate = 0.0002;
+constexpr double kPerpTakerFeeRate = 0.0005;
 constexpr double kEpsilon = 1e-12;
+
+bool spot_buy_fee_paid_in_base(const State::BinanceExchangeRuntimeState& runtime_state)
+{
+    return runtime_state.simulation_config.spot_commission_mode ==
+        Config::SpotCommissionMode::BaseOnBuyQuoteOnSell;
+}
+
+double fee_rate_for_fill(const MatchFill& fill)
+{
+    if (fill.instrument_type == QTrading::Dto::Trading::InstrumentType::Spot) {
+        return fill.is_taker ? kSpotTakerFeeRate : kSpotMakerFeeRate;
+    }
+    return fill.is_taker ? kPerpTakerFeeRate : kPerpMakerFeeRate;
+}
 
 int next_position_id(State::BinanceExchangeRuntimeState& runtime_state)
 {
@@ -57,9 +74,15 @@ void apply_spot_fill(
     const MatchFill& fill)
 {
     const double notional = fill.quantity * fill.price;
-    const double fee = notional * kFeeRate;
+    const double fee_rate = fee_rate_for_fill(fill);
+    const double fee = notional * fee_rate;
+    const bool base_fee_on_buy = spot_buy_fee_paid_in_base(runtime_state) &&
+        fill.side == QTrading::Dto::Trading::OrderSide::Buy;
+    const double quantity_fee = base_fee_on_buy ? fill.quantity * fee_rate : 0.0;
+    const double net_quantity = fill.quantity - quantity_fee;
+
     if (fill.side == QTrading::Dto::Trading::OrderSide::Buy) {
-        account.apply_spot_cash_delta(-(notional + fee));
+        account.apply_spot_cash_delta(-(notional + (base_fee_on_buy ? 0.0 : fee)));
 
         auto* position = find_spot_inventory_position(runtime_state, fill.symbol);
         if (!position) {
@@ -67,7 +90,7 @@ void apply_spot_fill(
             created.id = next_position_id(runtime_state);
             created.order_id = fill.order_id;
             created.symbol = fill.symbol;
-            created.quantity = fill.quantity;
+            created.quantity = net_quantity;
             created.entry_price = fill.price;
             created.is_long = true;
             created.notional = created.quantity * created.entry_price;
@@ -77,12 +100,14 @@ void apply_spot_fill(
         }
 
         const double before = position->quantity;
-        const double after = before + fill.quantity;
+        const double after = before + net_quantity;
         if (after > kEpsilon) {
-            position->entry_price = ((position->entry_price * before) + (fill.price * fill.quantity)) / after;
+            position->entry_price = ((position->entry_price * before) + (fill.price * net_quantity)) / after;
         }
         position->quantity = after;
         position->notional = after * position->entry_price;
+        position->fee += fee;
+        position->fee_rate = fee_rate;
         return;
     }
 
@@ -109,7 +134,8 @@ void apply_perp_fill(
     const MatchFill& fill)
 {
     const double notional = fill.quantity * fill.price;
-    const double fee = notional * kFeeRate;
+    const double fee_rate = fee_rate_for_fill(fill);
+    const double fee = notional * fee_rate;
     double signed_fill = fill.side == QTrading::Dto::Trading::OrderSide::Buy ? fill.quantity : -fill.quantity;
     auto* position = find_perp_position(runtime_state, fill.symbol);
     if (fill.reduce_only) {
@@ -143,7 +169,7 @@ void apply_perp_fill(
         created.maintenance_margin = 0.0;
         created.fee = fee;
         created.leverage = 1.0;
-        created.fee_rate = kFeeRate;
+        created.fee_rate = fee_rate;
         created.instrument_type = QTrading::Dto::Trading::InstrumentType::Perp;
         runtime_state.positions.emplace_back(std::move(created));
         return;
@@ -175,7 +201,7 @@ void apply_perp_fill(
     position->is_long = next_signed > 0.0;
     position->notional = position->quantity * position->entry_price;
     position->fee += fee;
-    position->fee_rate = kFeeRate;
+    position->fee_rate = fee_rate;
     position->instrument_type = QTrading::Dto::Trading::InstrumentType::Perp;
 }
 

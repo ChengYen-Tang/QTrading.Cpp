@@ -55,6 +55,12 @@ void SnapshotBuilder::Fill(const BinanceExchange& exchange, Contracts::StatusSna
     const auto perp_balance = exchange.account_state().get_perp_balance();
     const auto spot_balance = exchange.account_state().get_spot_balance();
     const double total_cash_balance = exchange.account_state().get_total_cash_balance();
+    const double perp_available_balance = std::max(
+        0.0,
+        perp_balance.WalletBalance - perp_balance.PositionInitialMargin - runtime_state.perp_open_order_initial_margin);
+    const double spot_available_balance = std::max(
+        0.0,
+        spot_balance.WalletBalance - spot_balance.PositionInitialMargin - runtime_state.spot_open_order_initial_margin);
 
     const double uncertainty_bps = std::max(0.0, runtime_state.simulation_config.uncertainty_band_bps);
     const double spot_inventory_value = compute_spot_inventory_value(runtime_state, snapshot_state);
@@ -65,14 +71,14 @@ void SnapshotBuilder::Fill(const BinanceExchange& exchange, Contracts::StatusSna
     out.ts_exchange = snapshot_state.ts_exchange;
     out.wallet_balance = perp_balance.WalletBalance;
     out.margin_balance = perp_balance.MarginBalance;
-    out.available_balance = perp_balance.AvailableBalance;
+    out.available_balance = perp_available_balance;
     out.unrealized_pnl = perp_balance.UnrealizedPnl;
     out.total_unrealized_pnl = perp_balance.UnrealizedPnl;
     out.perp_wallet_balance = perp_balance.WalletBalance;
     out.perp_margin_balance = perp_balance.MarginBalance;
-    out.perp_available_balance = perp_balance.AvailableBalance;
+    out.perp_available_balance = perp_available_balance;
     out.spot_cash_balance = spot_balance.WalletBalance;
-    out.spot_available_balance = spot_balance.AvailableBalance;
+    out.spot_available_balance = spot_available_balance;
     out.spot_inventory_value = spot_inventory_value;
     out.spot_ledger_value = spot_ledger_value;
     out.total_cash_balance = total_cash_balance;

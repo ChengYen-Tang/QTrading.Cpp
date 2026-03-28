@@ -21,10 +21,12 @@ class OrderEntryService final {
 public:
     static bool Execute(
         State::BinanceExchangeRuntimeState& runtime_state,
-        const Account& account,
+        Account& account,
         State::StepKernelState& step_state,
         const Contracts::OrderCommandRequest& request,
         std::optional<Contracts::OrderRejectInfo>& reject);
+
+    static void SyncOpenOrderMargins(State::BinanceExchangeRuntimeState& runtime_state);
 
     static void CancelOpenOrders(
         State::BinanceExchangeRuntimeState& runtime_state,

@@ -68,7 +68,6 @@ private:
     static double validate_non_negative_(double value, const char* field);
     static void validate_non_negative_int_(int value, const char* field);
     static QTrading::Dto::Account::BalanceSnapshot make_balance_(double wallet);
-    static void sync_snapshot_(QTrading::Dto::Account::BalanceSnapshot& snapshot);
     void sync_total_cash_();
 
     QTrading::Dto::Account::BalanceSnapshot spot_balance_{ make_balance_(1'000'000.0) };

@@ -25,6 +25,7 @@ struct MatchFill {
     QTrading::Dto::Trading::PositionSide position_side{ QTrading::Dto::Trading::PositionSide::Both };
     bool reduce_only{ false };
     bool close_position{ false };
+    bool is_taker{ false };
     double quantity{ 0.0 };
     double price{ 0.0 };
 };

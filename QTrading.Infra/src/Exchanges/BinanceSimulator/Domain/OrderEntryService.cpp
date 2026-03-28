@@ -15,6 +15,15 @@ namespace {
 constexpr double kFeeRate = 0.001;
 constexpr double kEpsilon = 1e-12;
 
+double spot_buy_reservation_multiplier(const State::BinanceExchangeRuntimeState& runtime_state)
+{
+    if (runtime_state.simulation_config.spot_commission_mode ==
+        Config::SpotCommissionMode::BaseOnBuyQuoteOnSell) {
+        return 1.0;
+    }
+    return 1.0 + kFeeRate;
+}
+
 bool symbol_exists(
     const State::StepKernelState& step_state,
     const std::string& symbol)
@@ -231,22 +240,36 @@ double sum_spot_buy_reservations(const State::BinanceExchangeRuntimeState& runti
         }
         const double price = order.price > 0.0 ? order.price : order.quote_order_qty > 0.0 ? 1.0 : 0.0;
         const double quote = order.quote_order_qty > 0.0 ? order.quote_order_qty : order.quantity * price;
-        reserved += quote * (1.0 + kFeeRate);
+        reserved += quote * spot_buy_reservation_multiplier(runtime_state);
     }
     return reserved;
 }
 
-bool has_duplicate_client_order_id(const State::BinanceExchangeRuntimeState& runtime_state, const std::string& client_id)
+double sum_perp_open_order_reservations(const State::BinanceExchangeRuntimeState& runtime_state)
 {
-    if (client_id.empty()) {
-        return false;
-    }
+    double reserved = 0.0;
     for (const auto& order : runtime_state.orders) {
-        if (order.client_order_id == client_id) {
-            return true;
+        if (order.instrument_type != QTrading::Dto::Trading::InstrumentType::Perp ||
+            order.reduce_only ||
+            order.close_position) {
+            continue;
         }
+        const double price = order.price > 0.0 ? order.price : 0.0;
+        if (price <= 0.0) {
+            continue;
+        }
+        const auto it = runtime_state.symbol_leverage.find(order.symbol);
+        const double leverage = it == runtime_state.symbol_leverage.end() ? 1.0 : it->second;
+        const double notional = order.quantity * price;
+        reserved += leverage > 0.0 ? (notional / leverage) : notional;
     }
-    return false;
+    return reserved;
+}
+
+void sync_open_order_margins(State::BinanceExchangeRuntimeState& runtime_state)
+{
+    runtime_state.spot_open_order_initial_margin = sum_spot_buy_reservations(runtime_state);
+    runtime_state.perp_open_order_initial_margin = sum_perp_open_order_reservations(runtime_state);
 }
 
 const QTrading::dto::Position* find_perp_position(
@@ -271,13 +294,6 @@ double reducible_perp_quantity(
         return 0.0;
     }
 
-    if (request.position_side == QTrading::Dto::Trading::PositionSide::Long && !position->is_long) {
-        return 0.0;
-    }
-    if (request.position_side == QTrading::Dto::Trading::PositionSide::Short && position->is_long) {
-        return 0.0;
-    }
-
     const bool order_is_buy = request.side == QTrading::Dto::Trading::OrderSide::Buy;
     const bool reduces = (position->is_long && !order_is_buy) || (!position->is_long && order_is_buy);
     if (!reduces) {
@@ -290,7 +306,7 @@ double reducible_perp_quantity(
 
 bool OrderEntryService::Execute(
     State::BinanceExchangeRuntimeState& runtime_state,
-    const Account& account,
+    Account& account,
     State::StepKernelState& step_state,
     const Contracts::OrderCommandRequest& request,
     std::optional<Contracts::OrderRejectInfo>& reject)
@@ -299,13 +315,6 @@ bool OrderEntryService::Execute(
 
     if (!symbol_exists(step_state, request.symbol)) {
         reject = Contracts::OrderRejectInfo{ Contracts::OrderRejectInfo::Code::UnknownSymbol, "unknown symbol" };
-        return false;
-    }
-
-    if (has_duplicate_client_order_id(runtime_state, request.client_order_id)) {
-        reject = Contracts::OrderRejectInfo{
-            Contracts::OrderRejectInfo::Code::DuplicateClientOrderId,
-            "duplicate client order id" };
         return false;
     }
 
@@ -366,10 +375,9 @@ bool OrderEntryService::Execute(
                 return false;
             }
             const double notional = quantity * ref_price;
-            const double needed = notional * (1.0 + kFeeRate);
-            const double reserved_buy = sum_spot_buy_reservations(runtime_state);
-            const double available = account.get_spot_balance().AvailableBalance - reserved_buy;
-            if (available + kEpsilon < needed) {
+            const double needed = notional * spot_buy_reservation_multiplier(runtime_state);
+            const double available = account.get_spot_cash_balance() - runtime_state.spot_open_order_initial_margin;
+            if (needed > available + kEpsilon) {
                 reject = Contracts::OrderRejectInfo{
                     Contracts::OrderRejectInfo::Code::SpotInsufficientCash,
                     "insufficient spot cash" };
@@ -408,8 +416,14 @@ bool OrderEntryService::Execute(
     order.close_position = request.close_position;
     order.quote_order_qty = request.quote_order_qty;
     runtime_state.orders.emplace_back(std::move(order));
+    sync_open_order_margins(runtime_state);
     ++step_state.account_state_version;
     return true;
+}
+
+void OrderEntryService::SyncOpenOrderMargins(State::BinanceExchangeRuntimeState& runtime_state)
+{
+    sync_open_order_margins(runtime_state);
 }
 
 void OrderEntryService::CancelOpenOrders(
@@ -426,6 +440,7 @@ void OrderEntryService::CancelOpenOrders(
         }),
         orders.end());
     if (orders.size() != before) {
+        SyncOpenOrderMargins(runtime_state);
         ++step_state.account_state_version;
     }
 }

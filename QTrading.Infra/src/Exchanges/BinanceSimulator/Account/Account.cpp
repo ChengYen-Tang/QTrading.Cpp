@@ -22,14 +22,10 @@ QTrading::Dto::Account::BalanceSnapshot Account::make_balance_(double wallet)
     snapshot.MarginBalance = wallet;
     snapshot.AvailableBalance = wallet;
     snapshot.Equity = wallet;
+    snapshot.OpenOrderInitialMargin = 0.0;
+    snapshot.PositionInitialMargin = 0.0;
+    snapshot.MaintenanceMargin = 0.0;
     return snapshot;
-}
-
-void Account::sync_snapshot_(QTrading::Dto::Account::BalanceSnapshot& snapshot)
-{
-    snapshot.MarginBalance = snapshot.WalletBalance;
-    snapshot.AvailableBalance = snapshot.WalletBalance;
-    snapshot.Equity = snapshot.WalletBalance;
 }
 
 void Account::sync_total_cash_()
@@ -70,7 +66,9 @@ double Account::total_unrealized_pnl() const
 void Account::apply_spot_cash_delta(double delta)
 {
     spot_balance_.WalletBalance += delta;
-    sync_snapshot_(spot_balance_);
+    spot_balance_.MarginBalance = spot_balance_.WalletBalance;
+    spot_balance_.AvailableBalance = spot_balance_.WalletBalance - spot_balance_.PositionInitialMargin;
+    spot_balance_.Equity = spot_balance_.WalletBalance;
     sync_total_cash_();
     ++state_version_;
 }
@@ -78,7 +76,9 @@ void Account::apply_spot_cash_delta(double delta)
 void Account::apply_perp_wallet_delta(double delta)
 {
     perp_balance_.WalletBalance += delta;
-    sync_snapshot_(perp_balance_);
+    perp_balance_.MarginBalance = perp_balance_.WalletBalance;
+    perp_balance_.AvailableBalance = perp_balance_.WalletBalance - perp_balance_.PositionInitialMargin;
+    perp_balance_.Equity = perp_balance_.WalletBalance;
     sync_total_cash_();
     ++state_version_;
 }

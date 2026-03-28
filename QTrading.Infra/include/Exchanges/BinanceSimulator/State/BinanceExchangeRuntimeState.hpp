@@ -26,6 +26,8 @@ struct BinanceExchangeRuntimeState {
     std::vector<QTrading::dto::Order> orders;
     std::vector<Contracts::AsyncOrderAck> async_order_acks;
     std::unordered_map<std::string, double> symbol_leverage;
+    double spot_open_order_initial_margin{ 0.0 };
+    double perp_open_order_initial_margin{ 0.0 };
     Contracts::StatusSnapshot last_status_snapshot{};
     Contracts::EventPublishMode event_publish_mode{ Contracts::EventPublishMode::LegacyDirect };
     Contracts::SideEffectAdapterConfig side_effect_adapters{};

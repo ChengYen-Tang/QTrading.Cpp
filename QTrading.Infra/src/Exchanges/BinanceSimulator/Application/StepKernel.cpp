@@ -17,6 +17,7 @@
 #include "Exchanges/BinanceSimulator/Domain/FundingEligibilityDecision.hpp"
 #include "Exchanges/BinanceSimulator/Domain/LiquidationExecution.hpp"
 #include "Exchanges/BinanceSimulator/Domain/MatchingEngine.hpp"
+#include "Exchanges/BinanceSimulator/Domain/OrderEntryService.hpp"
 #include "Exchanges/BinanceSimulator/Domain/ReferencePriceResolver.hpp"
 #include "Exchanges/BinanceSimulator/Output/ChannelPublisher.hpp"
 #include "Exchanges/BinanceSimulator/Output/StepObservableContext.hpp"
@@ -347,10 +348,16 @@ void emit_status_log_if_needed(
     row.unreal_pnl = perp.UnrealizedPnl;
     row.equity = perp.Equity;
     row.perp_wallet_balance = perp.WalletBalance;
-    row.perp_available_balance = perp.AvailableBalance;
+    const double perp_available_balance = std::max(
+        0.0,
+        perp.WalletBalance - perp.PositionInitialMargin - runtime_state.perp_open_order_initial_margin);
+    const double spot_available_balance = std::max(
+        0.0,
+        spot.WalletBalance - spot.PositionInitialMargin - runtime_state.spot_open_order_initial_margin);
+    row.perp_available_balance = perp_available_balance;
     row.perp_ledger_value = perp.Equity;
     row.spot_cash_balance = spot.WalletBalance;
-    row.spot_available_balance = spot.AvailableBalance;
+    row.spot_available_balance = spot_available_balance;
     row.spot_inventory_value = spot_inventory_value;
     row.spot_ledger_value = spot_ledger_value;
     row.total_cash_balance = total_cash;
@@ -599,6 +606,7 @@ bool StepKernel::run_step() const
             orders_maybe_changed = true;
             positions_maybe_changed = true;
         }
+        Domain::OrderEntryService::SyncOpenOrderMargins(runtime_state);
     }
 
     Output::StepObservableContext observable_ctx{};

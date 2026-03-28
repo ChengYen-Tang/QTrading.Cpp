@@ -1052,6 +1052,145 @@ TEST_F(BinanceExchangeFixture, TransferBetweenLedgersRespectsAvailableBalance)
     EXPECT_FALSE(exchange.account.transfer_perp_to_spot(1000.0));
 }
 
+TEST_F(BinanceExchangeFixture, SpotAndPerpUseDifferentDefaultFeeTables)
+{
+    WriteCsv("spot.csv", {
+        { 0,100,100,100,100,1000, 30000,100,1,0,0 }
+    });
+    WriteCsv("perp.csv", {
+        { 0,100,100,100,100,1000, 30000,100,1,0,0 }
+    });
+
+    Account::AccountInitConfig init{};
+    init.spot_initial_cash = 1000.0;
+    init.perp_initial_wallet = 1000.0;
+    BinanceExchange exchange = MakeExchangeWithInit({
+        { "BTCUSDT_SPOT",
+            (tmp_dir / "spot.csv").string(),
+            std::nullopt,
+            std::nullopt,
+            std::nullopt,
+            QTrading::Dto::Trading::InstrumentType::Spot },
+        { "BTCUSDT_PERP",
+            (tmp_dir / "perp.csv").string(),
+            std::nullopt,
+            std::nullopt,
+            std::nullopt,
+            QTrading::Dto::Trading::InstrumentType::Perp },
+    }, init);
+
+    ASSERT_TRUE(exchange.spot.place_order("BTCUSDT_SPOT", 1.0, 100.0, QTrading::Dto::Trading::OrderSide::Buy));
+    ASSERT_TRUE(exchange.perp.place_order("BTCUSDT_PERP", 1.0, 100.0, QTrading::Dto::Trading::OrderSide::Buy));
+
+    ASSERT_TRUE(exchange.step());
+    (void)exchange.get_market_channel()->Receive();
+
+    EXPECT_NEAR(exchange.account.get_spot_balance().WalletBalance, 899.9, 1e-12);
+    EXPECT_NEAR(exchange.account.get_perp_balance().WalletBalance, 999.95, 1e-12);
+    EXPECT_EQ(exchange.get_all_open_orders().size(), 0u);
+    ASSERT_EQ(exchange.get_all_positions().size(), 2u);
+}
+
+TEST_F(BinanceExchangeFixture, SpotBaseFeeModeBuyUsesBaseCommissionAndNotionalCashflow)
+{
+    WriteCsv("spot_base_fee_buy.csv", {
+        { 0,100,100,100,100,1000, 30000,100,1,0,0 }
+    });
+
+    Account::AccountInitConfig init{};
+    init.spot_initial_cash = 1000.0;
+    init.perp_initial_wallet = 0.0;
+    BinanceExchange exchange = MakeExchangeWithInit({
+        { "BTCUSDT_SPOT",
+            (tmp_dir / "spot_base_fee_buy.csv").string(),
+            std::nullopt,
+            std::nullopt,
+            std::nullopt,
+            QTrading::Dto::Trading::InstrumentType::Spot },
+    }, init);
+
+    auto cfg = exchange.simulation_config();
+    cfg.spot_commission_mode = QTrading::Infra::Exchanges::BinanceSim::Config::SpotCommissionMode::BaseOnBuyQuoteOnSell;
+    exchange.apply_simulation_config(cfg);
+
+    ASSERT_TRUE(exchange.spot.place_order("BTCUSDT_SPOT", 1.0, 100.0, QTrading::Dto::Trading::OrderSide::Buy));
+    ASSERT_TRUE(exchange.step());
+    (void)exchange.get_market_channel()->Receive();
+
+    ASSERT_EQ(exchange.get_all_positions().size(), 1u);
+    const auto& pos = exchange.get_all_positions()[0];
+    EXPECT_EQ(pos.instrument_type, QTrading::Dto::Trading::InstrumentType::Spot);
+    EXPECT_TRUE(pos.is_long);
+    EXPECT_NEAR(pos.quantity, 0.999, 1e-12);
+    EXPECT_NEAR(exchange.account.get_spot_balance().WalletBalance, 900.0, 1e-12);
+    EXPECT_EQ(exchange.get_all_open_orders().size(), 0u);
+}
+
+TEST_F(BinanceExchangeFixture, SpotBaseFeeModeSellStillUsesQuoteCommission)
+{
+    WriteCsv("spot_base_fee_sell.csv", {
+        { 0,100,100,100,100,1000, 30000,100,1,0,0 },
+        { 60000,100,100,100,100,1000, 90000,100,1,0,0 }
+    });
+
+    Account::AccountInitConfig init{};
+    init.spot_initial_cash = 1000.0;
+    init.perp_initial_wallet = 0.0;
+    BinanceExchange exchange = MakeExchangeWithInit({
+        { "BTCUSDT_SPOT",
+            (tmp_dir / "spot_base_fee_sell.csv").string(),
+            std::nullopt,
+            std::nullopt,
+            std::nullopt,
+            QTrading::Dto::Trading::InstrumentType::Spot },
+    }, init);
+
+    auto cfg = exchange.simulation_config();
+    cfg.spot_commission_mode = QTrading::Infra::Exchanges::BinanceSim::Config::SpotCommissionMode::BaseOnBuyQuoteOnSell;
+    exchange.apply_simulation_config(cfg);
+
+    ASSERT_TRUE(exchange.spot.place_order("BTCUSDT_SPOT", 1.0, 100.0, QTrading::Dto::Trading::OrderSide::Buy));
+    ASSERT_TRUE(exchange.step());
+    (void)exchange.get_market_channel()->Receive();
+
+    ASSERT_TRUE(exchange.spot.place_order("BTCUSDT_SPOT", 0.999, 100.0, QTrading::Dto::Trading::OrderSide::Sell));
+    ASSERT_TRUE(exchange.step());
+    (void)exchange.get_market_channel()->Receive();
+
+    EXPECT_TRUE(exchange.get_all_positions().empty());
+    EXPECT_NEAR(exchange.account.get_spot_balance().WalletBalance, 999.8001, 1e-9);
+    EXPECT_EQ(exchange.get_all_open_orders().size(), 0u);
+}
+
+TEST_F(BinanceExchangeFixture, SpotBaseFeeModeOpenOrderReserveUsesNotionalOnly)
+{
+    WriteCsv("spot_base_fee_reserve.csv", {
+        { 0,100,100,100,100,1000, 30000,100,1,0,0 }
+    });
+
+    Account::AccountInitConfig init{};
+    init.spot_initial_cash = 100.0;
+    init.perp_initial_wallet = 0.0;
+    BinanceExchange exchange = MakeExchangeWithInit({
+        { "BTCUSDT_SPOT",
+            (tmp_dir / "spot_base_fee_reserve.csv").string(),
+            std::nullopt,
+            std::nullopt,
+            std::nullopt,
+            QTrading::Dto::Trading::InstrumentType::Spot },
+    }, init);
+
+    auto cfg = exchange.simulation_config();
+    cfg.spot_commission_mode = QTrading::Infra::Exchanges::BinanceSim::Config::SpotCommissionMode::BaseOnBuyQuoteOnSell;
+    exchange.apply_simulation_config(cfg);
+
+    ASSERT_TRUE(exchange.spot.place_order("BTCUSDT_SPOT", 1.0, 100.0, QTrading::Dto::Trading::OrderSide::Buy));
+    BinanceExchange::StatusSnapshot snapshot{};
+    exchange.FillStatusSnapshot(snapshot);
+    EXPECT_NEAR(snapshot.spot_cash_balance, 100.0, 1e-12);
+    EXPECT_NEAR(snapshot.spot_available_balance, 0.0, 1e-12);
+}
+
 // Source case: BinanceExchangeTests.SnapshotConsistent/DomainFacadeRoutesByInstrumentType (perp fill path).
 TEST_F(BinanceExchangeFixture, PerpMarketBuyCreatesPositionAndDebitsFee)
 {
@@ -1075,7 +1214,7 @@ TEST_F(BinanceExchangeFixture, PerpMarketBuyCreatesPositionAndDebitsFee)
     EXPECT_EQ(exchange.get_all_positions()[0].instrument_type, QTrading::Dto::Trading::InstrumentType::Perp);
     EXPECT_NEAR(exchange.get_all_positions()[0].quantity, 2.0, 1e-12);
     const auto perp_balance = exchange.account.get_perp_balance();
-    EXPECT_NEAR(perp_balance.WalletBalance, 999.8, 1e-9);
+    EXPECT_NEAR(perp_balance.WalletBalance, 999.9, 1e-9);
 }
 
 TEST_F(BinanceExchangeFixture, OrderChannelPublishesWhenOrderBookChangesInCurrentKernel)
@@ -1734,7 +1873,7 @@ TEST_F(BinanceExchangeFixture, LiquidationDistressCancelsPerpOrdersAndReducesExp
     exchange.FillStatusSnapshot(snapshot);
     EXPECT_EQ(exchange.get_all_positions().size(), 0u);
     EXPECT_EQ(exchange.get_all_open_orders().size(), 0u);
-    EXPECT_NEAR(snapshot.wallet_balance, -44055.0, 1e-6);
+    EXPECT_NEAR(snapshot.wallet_balance, -44030.0, 1e-6);
 }
 
 TEST_F(BinanceExchangeFixture, LiquidationRemainsNoOpWithoutDistressInCurrentKernel)
@@ -1760,7 +1899,7 @@ TEST_F(BinanceExchangeFixture, LiquidationRemainsNoOpWithoutDistressInCurrentKer
     exchange.FillStatusSnapshot(snapshot);
     ASSERT_EQ(exchange.get_all_positions().size(), 1u);
     EXPECT_NEAR(exchange.get_all_positions()[0].quantity, 1.0, 1e-12);
-    EXPECT_NEAR(snapshot.wallet_balance, 999.9, 1e-9);
+    EXPECT_NEAR(snapshot.wallet_balance, 999.95, 1e-9);
 }
 
 TEST_F(BinanceExchangeFixture, LiquidationEligibilityCheckDoesNotMutatePositionFieldsWithoutReductionInCurrentKernel)
@@ -1831,7 +1970,7 @@ TEST_F(BinanceExchangeFixture, LiquidationSkipsWhenRawMarkContextMissingInCurren
     EXPECT_EQ(exchange.get_all_positions().size(), 1u);
     EXPECT_NEAR(exchange.get_all_positions()[0].quantity, 500.0, 1e-9);
     EXPECT_EQ(exchange.get_all_open_orders().size(), 0u);
-    EXPECT_NEAR(snapshot.wallet_balance, 950.0, 1e-9);
+    EXPECT_NEAR(snapshot.wallet_balance, 975.0, 1e-9);
 }
 
 TEST_F(BinanceExchangeLogFixture, ReducedObservabilityStatusPrecedesEventRowsInCurrentKernel)

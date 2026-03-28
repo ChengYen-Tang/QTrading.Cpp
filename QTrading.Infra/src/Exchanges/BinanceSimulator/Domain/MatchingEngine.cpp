@@ -129,6 +129,10 @@ void MatchingEngine::RunStep(
         }
 
         const double fill_price = compute_fill_price(order, kline);
+        const bool is_taker = order.price <= 0.0 ||
+            (order.side == QTrading::Dto::Trading::OrderSide::Buy
+                ? kline.ClosePrice <= order.price + kEpsilon
+                : kline.ClosePrice + kEpsilon >= order.price);
         const double request_qty = std::max(0.0, order.quantity);
         double max_fill_qty = std::min(request_qty, liquidity_left[symbol_index]);
         if (order.instrument_type == QTrading::Dto::Trading::InstrumentType::Perp && order.reduce_only) {
@@ -159,6 +163,7 @@ void MatchingEngine::RunStep(
         fill.position_side = order.position_side;
         fill.reduce_only = order.reduce_only;
         fill.close_position = order.close_position;
+        fill.is_taker = is_taker;
         fill.quantity = fill_qty;
         fill.price = fill_price;
         out_fills.emplace_back(std::move(fill));

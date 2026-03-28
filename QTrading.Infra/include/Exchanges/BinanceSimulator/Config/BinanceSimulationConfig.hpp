@@ -4,7 +4,13 @@
 
 namespace QTrading::Infra::Exchanges::BinanceSim::Config {
 
+enum class SpotCommissionMode {
+    QuoteOnBuyQuoteOnSell = 0,
+    BaseOnBuyQuoteOnSell = 1,
+};
+
 struct SimulationConfig {
+    SpotCommissionMode spot_commission_mode{ SpotCommissionMode::QuoteOnBuyQuoteOnSell };
     Contracts::FundingApplyTiming funding_apply_timing{ Contracts::FundingApplyTiming::BeforeMatching };
     double uncertainty_band_bps{ 0.0 };
     double basis_warning_bps{ 0.0 };
