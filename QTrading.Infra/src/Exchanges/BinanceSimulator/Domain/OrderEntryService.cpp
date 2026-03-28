@@ -281,6 +281,11 @@ bool has_duplicate_client_order_id(
     return false;
 }
 
+bool has_open_positions_or_orders(const State::BinanceExchangeRuntimeState& runtime_state)
+{
+    return !runtime_state.positions.empty() || !runtime_state.orders.empty();
+}
+
 void sync_open_order_margins(State::BinanceExchangeRuntimeState& runtime_state);
 
 bool is_self_trade_conflict(
@@ -328,11 +333,13 @@ void sync_open_order_margins(State::BinanceExchangeRuntimeState& runtime_state)
 
 const QTrading::dto::Position* find_perp_position(
     const State::BinanceExchangeRuntimeState& runtime_state,
-    const std::string& symbol)
+    const std::string& symbol,
+    std::optional<bool> is_long)
 {
     for (const auto& position : runtime_state.positions) {
         if (position.instrument_type == QTrading::Dto::Trading::InstrumentType::Perp &&
-            position.symbol == symbol) {
+            position.symbol == symbol &&
+            (!is_long.has_value() || position.is_long == *is_long)) {
             return &position;
         }
     }
@@ -343,7 +350,12 @@ double reducible_perp_quantity(
     const State::BinanceExchangeRuntimeState& runtime_state,
     const Contracts::OrderCommandRequest& request)
 {
-    const auto* position = find_perp_position(runtime_state, request.symbol);
+    const std::optional<bool> target_is_long = request.position_side == QTrading::Dto::Trading::PositionSide::Long
+        ? std::optional<bool>(true)
+        : request.position_side == QTrading::Dto::Trading::PositionSide::Short
+              ? std::optional<bool>(false)
+              : std::optional<bool>();
+    const auto* position = find_perp_position(runtime_state, request.symbol, target_is_long);
     if (!position || position->quantity <= kEpsilon) {
         return 0.0;
     }
@@ -356,7 +368,44 @@ double reducible_perp_quantity(
     return position->quantity;
 }
 
+bool request_opens_target(
+    const Contracts::OrderCommandRequest& request,
+    bool target_is_long)
+{
+    return (target_is_long && request.side == QTrading::Dto::Trading::OrderSide::Buy) ||
+        (!target_is_long && request.side == QTrading::Dto::Trading::OrderSide::Sell);
+}
+
+bool request_closes_target(
+    const Contracts::OrderCommandRequest& request,
+    bool target_is_long)
+{
+    return (target_is_long && request.side == QTrading::Dto::Trading::OrderSide::Sell) ||
+        (!target_is_long && request.side == QTrading::Dto::Trading::OrderSide::Buy);
+}
+
 } // namespace
+
+bool OrderEntryService::SetPositionMode(
+    State::BinanceExchangeRuntimeState& runtime_state,
+    State::StepKernelState& step_state,
+    bool hedge_mode,
+    std::optional<Contracts::OrderRejectInfo>& reject)
+{
+    reject.reset();
+    if (runtime_state.hedge_mode == hedge_mode) {
+        return true;
+    }
+    if (has_open_positions_or_orders(runtime_state)) {
+        reject = Contracts::OrderRejectInfo{
+            Contracts::OrderRejectInfo::Code::Unknown,
+            "cannot switch position mode with open positions or orders" };
+        return false;
+    }
+    runtime_state.hedge_mode = hedge_mode;
+    ++step_state.account_state_version;
+    return true;
+}
 
 bool OrderEntryService::Execute(
     State::BinanceExchangeRuntimeState& runtime_state,
@@ -439,20 +488,69 @@ bool OrderEntryService::Execute(
             }
         }
     }
-    if (request.instrument_type == QTrading::Dto::Trading::InstrumentType::Perp &&
-        (request.reduce_only || request.close_position)) {
-        const double reducible = reducible_perp_quantity(runtime_state, request);
-        if (reducible <= kEpsilon) {
-            reject = Contracts::OrderRejectInfo{
-                Contracts::OrderRejectInfo::Code::ReduceOnlyNoReduciblePosition,
-                "no reducible perp position" };
-            return false;
+    if (request.instrument_type == QTrading::Dto::Trading::InstrumentType::Perp) {
+        if (runtime_state.hedge_mode) {
+            if (request.kind != Contracts::OrderCommandKind::PerpClosePosition &&
+                request.position_side == QTrading::Dto::Trading::PositionSide::Both) {
+                reject = Contracts::OrderRejectInfo{
+                    Contracts::OrderRejectInfo::Code::HedgeModePositionSideRequired,
+                    "hedge mode requires explicit position side" };
+                return false;
+            }
+            if (request.reduce_only && !request.close_position && runtime_state.strict_binance_mode) {
+                reject = Contracts::OrderRejectInfo{
+                    Contracts::OrderRejectInfo::Code::StrictHedgeReduceOnlyDisabled,
+                    "strict hedge reduce_only is disabled" };
+                return false;
+            }
+            if (request.reduce_only || request.close_position) {
+                const bool target_is_long =
+                    request.position_side == QTrading::Dto::Trading::PositionSide::Long;
+                if (!request_closes_target(request, target_is_long)) {
+                    reject = Contracts::OrderRejectInfo{
+                        Contracts::OrderRejectInfo::Code::ReduceOnlyNoReduciblePosition,
+                        "hedge mode order side does not match target position side" };
+                    return false;
+                }
+                const auto* position = find_perp_position(runtime_state, request.symbol, target_is_long);
+                if (!position || position->quantity <= kEpsilon) {
+                    reject = Contracts::OrderRejectInfo{
+                        Contracts::OrderRejectInfo::Code::ReduceOnlyNoReduciblePosition,
+                        "no reducible perp position" };
+                    return false;
+                }
+                if (request.kind == Contracts::OrderCommandKind::PerpClosePosition) {
+                    quantity = position->quantity;
+                }
+                else if (quantity > position->quantity + kEpsilon) {
+                    quantity = position->quantity;
+                }
+            }
+            else {
+                const bool target_is_long =
+                    request.position_side == QTrading::Dto::Trading::PositionSide::Long;
+                if (!request_opens_target(request, target_is_long)) {
+                    reject = Contracts::OrderRejectInfo{
+                        Contracts::OrderRejectInfo::Code::HedgeModePositionSideRequired,
+                        "hedge mode order side does not match target position side" };
+                    return false;
+                }
+            }
         }
-        if (request.kind == Contracts::OrderCommandKind::PerpClosePosition) {
-            quantity = reducible;
-        }
-        else if (quantity > reducible + kEpsilon) {
-            quantity = reducible;
+        else if (request.reduce_only || request.close_position) {
+            const double reducible = reducible_perp_quantity(runtime_state, request);
+            if (reducible <= kEpsilon) {
+                reject = Contracts::OrderRejectInfo{
+                    Contracts::OrderRejectInfo::Code::ReduceOnlyNoReduciblePosition,
+                    "no reducible perp position" };
+                return false;
+            }
+            if (request.kind == Contracts::OrderCommandKind::PerpClosePosition) {
+                quantity = reducible;
+            }
+            else if (quantity > reducible + kEpsilon) {
+                quantity = reducible;
+            }
         }
     }
     if (request.stp_mode != static_cast<int>(Account::SelfTradePreventionMode::None)) {

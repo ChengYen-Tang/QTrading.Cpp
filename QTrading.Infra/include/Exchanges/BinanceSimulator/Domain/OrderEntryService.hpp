@@ -26,6 +26,12 @@ public:
         const Contracts::OrderCommandRequest& request,
         std::optional<Contracts::OrderRejectInfo>& reject);
 
+    static bool SetPositionMode(
+        State::BinanceExchangeRuntimeState& runtime_state,
+        State::StepKernelState& step_state,
+        bool hedge_mode,
+        std::optional<Contracts::OrderRejectInfo>& reject);
+
     static void SyncOpenOrderMargins(State::BinanceExchangeRuntimeState& runtime_state);
 
     static bool CancelOrderById(

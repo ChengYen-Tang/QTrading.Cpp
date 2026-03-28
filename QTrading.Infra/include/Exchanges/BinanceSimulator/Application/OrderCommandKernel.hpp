@@ -42,6 +42,8 @@ public:
         QTrading::Dto::Trading::PositionSide position_side, double price,
         const std::string& client_order_id, Account::SelfTradePreventionMode stp_mode) const;
 
+    bool SetPositionMode(bool hedge_mode) const;
+
     void CancelOpenOrders(QTrading::Dto::Trading::InstrumentType instrument_type, const std::string& symbol) const;
 
     /// Called by StepKernel once per successful step to resolve due async requests.

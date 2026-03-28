@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <optional>
 #include <string>
 
 #include "Exchanges/BinanceSimulator/Account/Account.hpp"
@@ -57,11 +58,13 @@ QTrading::dto::Position* find_spot_inventory_position(
 
 QTrading::dto::Position* find_perp_position(
     State::BinanceExchangeRuntimeState& runtime_state,
-    const std::string& symbol)
+    const std::string& symbol,
+    std::optional<bool> is_long = std::nullopt)
 {
     for (auto& position : runtime_state.positions) {
         if (position.instrument_type == QTrading::Dto::Trading::InstrumentType::Perp &&
-            position.symbol == symbol) {
+            position.symbol == symbol &&
+            (!is_long.has_value() || position.is_long == *is_long)) {
             return &position;
         }
     }
@@ -137,6 +140,72 @@ void apply_perp_fill(
     const double fee_rate = fee_rate_for_fill(fill);
     const double fee = notional * fee_rate;
     double signed_fill = fill.side == QTrading::Dto::Trading::OrderSide::Buy ? fill.quantity : -fill.quantity;
+    if (runtime_state.hedge_mode) {
+        const bool target_is_long = fill.position_side == QTrading::Dto::Trading::PositionSide::Long;
+        auto* position = find_perp_position(runtime_state, fill.symbol, target_is_long);
+        if (fill.reduce_only || fill.close_position) {
+            if (!position) {
+                return;
+            }
+            const auto closes_side = target_is_long
+                ? QTrading::Dto::Trading::OrderSide::Sell
+                : QTrading::Dto::Trading::OrderSide::Buy;
+            if (fill.side != closes_side) {
+                return;
+            }
+            const double effective = std::min(position->quantity, fill.quantity);
+            if (effective <= kEpsilon) {
+                return;
+            }
+            account.apply_perp_wallet_delta(-fee);
+            position->quantity = std::max(0.0, position->quantity - effective);
+            position->notional = position->quantity * position->entry_price;
+            if (position->quantity <= kEpsilon) {
+                const int closed_id = position->id;
+                runtime_state.positions.erase(
+                    std::remove_if(runtime_state.positions.begin(), runtime_state.positions.end(),
+                        [&](const QTrading::dto::Position& candidate) {
+                            return candidate.id == closed_id;
+                        }),
+                    runtime_state.positions.end());
+            }
+            return;
+        }
+
+        account.apply_perp_wallet_delta(-fee);
+        if (!position) {
+            QTrading::dto::Position created{};
+            created.id = next_position_id(runtime_state);
+            created.order_id = fill.order_id;
+            created.symbol = fill.symbol;
+            created.quantity = fill.quantity;
+            created.entry_price = fill.price;
+            created.is_long = fill.side == QTrading::Dto::Trading::OrderSide::Buy;
+            created.notional = created.quantity * created.entry_price;
+            created.initial_margin = 0.0;
+            created.maintenance_margin = 0.0;
+            created.fee = fee;
+            created.leverage = 1.0;
+            created.fee_rate = fee_rate;
+            created.instrument_type = QTrading::Dto::Trading::InstrumentType::Perp;
+            runtime_state.positions.emplace_back(std::move(created));
+            return;
+        }
+
+        const double before = position->quantity;
+        const double after = before + fill.quantity;
+        if (after > kEpsilon) {
+            position->entry_price = ((position->entry_price * before) + (fill.price * fill.quantity)) / after;
+        }
+        position->quantity = after;
+        position->is_long = target_is_long;
+        position->notional = position->quantity * position->entry_price;
+        position->fee += fee;
+        position->fee_rate = fee_rate;
+        position->instrument_type = QTrading::Dto::Trading::InstrumentType::Perp;
+        return;
+    }
+
     auto* position = find_perp_position(runtime_state, fill.symbol);
     if (fill.reduce_only) {
         if (!position) {
@@ -225,3 +294,4 @@ void FillSettlementEngine::Apply(
 }
 
 } // namespace QTrading::Infra::Exchanges::BinanceSim::Domain
+

@@ -7,6 +7,8 @@ struct AccountInitConfig {
     double spot_initial_cash{ 1'000'000.0 };
     double perp_initial_wallet{ 0.0 };
     int vip_level{ 0 };
+    bool hedge_mode{ false };
+    bool strict_binance_mode{ true };
 };
 
 } // namespace QTrading::Infra::Exchanges::BinanceSim::Contracts

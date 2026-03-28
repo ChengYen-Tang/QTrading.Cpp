@@ -22,6 +22,8 @@ namespace QTrading::Infra::Exchanges::BinanceSim::State {
 /// Holds account/order/channel-adjacent data that is not part of replay cursors.
 struct BinanceExchangeRuntimeState {
     std::shared_ptr<QTrading::Log::Logger> logger{};
+    bool hedge_mode{ false };
+    bool strict_binance_mode{ true };
     std::vector<QTrading::dto::Position> positions;
     std::vector<QTrading::dto::Order> orders;
     std::vector<Contracts::AsyncOrderAck> async_order_acks;

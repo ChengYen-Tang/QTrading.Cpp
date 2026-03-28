@@ -100,6 +100,30 @@ std::filesystem::path write_single_kline_csv(const std::string& file_name, doubl
     return path;
 }
 
+QTrading::dto::Position make_perp_position(
+    const std::string& symbol,
+    bool is_long,
+    double quantity = 1.0,
+    double entry_price = 100.0)
+{
+    QTrading::dto::Position position{};
+    position.id = 1;
+    position.order_id = 1;
+    position.symbol = symbol;
+    position.quantity = quantity;
+    position.entry_price = entry_price;
+    position.is_long = is_long;
+    position.unrealized_pnl = 0.0;
+    position.notional = quantity * entry_price;
+    position.initial_margin = 10.0;
+    position.maintenance_margin = 0.0;
+    position.fee = 0.0;
+    position.leverage = 10.0;
+    position.fee_rate = 0.001;
+    position.instrument_type = QTrading::Dto::Trading::InstrumentType::Perp;
+    return position;
+}
+
 } // namespace
 
 TEST(OrderEntryServiceTest, InstrumentFiltersRejectInvalidPriceTickAndRange)
@@ -368,4 +392,204 @@ TEST(OrderEntryServiceTest, StpExpireBothCancelsRestingAndRejectsIncomingOrder)
     ASSERT_TRUE(reject.has_value());
     EXPECT_EQ(reject->code, OrderRejectInfo::Code::StpExpiredBoth);
     EXPECT_TRUE(runtime_state.orders.empty());
+}
+
+TEST(OrderEntryServiceTest, SwitchingModeWithoutPositionsSucceeds)
+{
+    BinanceExchangeRuntimeState runtime_state{};
+    StepKernelState step_state = make_step_state_with_perp_symbol();
+    std::optional<OrderRejectInfo> reject{};
+
+    EXPECT_TRUE(OrderEntryService::SetPositionMode(runtime_state, step_state, true, reject));
+    EXPECT_FALSE(reject.has_value());
+    EXPECT_TRUE(runtime_state.hedge_mode);
+}
+
+TEST(OrderEntryServiceTest, SwitchingModeWithOpenPositionsFails)
+{
+    BinanceExchangeRuntimeState runtime_state{};
+    StepKernelState step_state = make_step_state_with_perp_symbol();
+    runtime_state.positions.push_back(make_perp_position("BTCUSDT", true));
+
+    std::optional<OrderRejectInfo> reject{};
+    EXPECT_FALSE(OrderEntryService::SetPositionMode(runtime_state, step_state, true, reject));
+    EXPECT_TRUE(reject.has_value());
+    EXPECT_FALSE(runtime_state.hedge_mode);
+}
+
+TEST(OrderEntryServiceTest, SwitchingModeWithOpenOrdersFails)
+{
+    BinanceExchangeRuntimeState runtime_state{};
+    StepKernelState step_state = make_step_state_with_perp_symbol();
+    runtime_state.orders.push_back(QTrading::dto::Order{
+        1,
+        "BTCUSDT",
+        1.0,
+        100.0,
+        QTrading::Dto::Trading::OrderSide::Buy,
+        QTrading::Dto::Trading::PositionSide::Both,
+        false,
+        -1,
+        QTrading::Dto::Trading::InstrumentType::Perp,
+        {},
+        0,
+        false,
+        0.0,
+        false });
+
+    std::optional<OrderRejectInfo> reject{};
+    EXPECT_FALSE(OrderEntryService::SetPositionMode(runtime_state, step_state, true, reject));
+    EXPECT_TRUE(reject.has_value());
+    EXPECT_FALSE(runtime_state.hedge_mode);
+}
+
+TEST(OrderEntryServiceTest, HedgeMode_OrderRequiresExplicitPositionSide_IsRejectedWithoutException)
+{
+    BinanceExchangeRuntimeState runtime_state{};
+    runtime_state.hedge_mode = true;
+    StepKernelState step_state = make_step_state_with_perp_symbol();
+    Account account(10000.0, 0);
+    std::optional<OrderRejectInfo> reject{};
+
+    auto request = make_perp_limit_request(1.0, 100.0);
+    EXPECT_FALSE(OrderEntryService::Execute(runtime_state, account, step_state, request, reject));
+    ASSERT_TRUE(reject.has_value());
+    EXPECT_EQ(reject->code, OrderRejectInfo::Code::HedgeModePositionSideRequired);
+    EXPECT_TRUE(runtime_state.orders.empty());
+}
+
+TEST(OrderEntryServiceTest, HedgeModeReduceOnlyOrderRejectedByDefault)
+{
+    BinanceExchangeRuntimeState runtime_state{};
+    runtime_state.hedge_mode = true;
+    runtime_state.strict_binance_mode = true;
+    StepKernelState step_state = make_step_state_with_perp_symbol();
+    Account account(10000.0, 0);
+    std::optional<OrderRejectInfo> reject{};
+
+    runtime_state.positions.push_back(make_perp_position("BTCUSDT", true));
+
+    auto request = make_perp_limit_request(0.5, 100.0);
+    request.side = QTrading::Dto::Trading::OrderSide::Sell;
+    request.position_side = QTrading::Dto::Trading::PositionSide::Long;
+    request.reduce_only = true;
+
+    EXPECT_FALSE(OrderEntryService::Execute(runtime_state, account, step_state, request, reject));
+    ASSERT_TRUE(reject.has_value());
+    EXPECT_EQ(reject->code, OrderRejectInfo::Code::StrictHedgeReduceOnlyDisabled);
+    EXPECT_TRUE(runtime_state.orders.empty());
+}
+
+TEST(OrderEntryServiceTest, CompatibilityModeAllowsHedgeReduceOnlyWhenStrictDisabled)
+{
+    BinanceExchangeRuntimeState runtime_state{};
+    runtime_state.hedge_mode = true;
+    runtime_state.strict_binance_mode = false;
+    StepKernelState step_state = make_step_state_with_perp_symbol();
+    Account account(10000.0, 0);
+    std::optional<OrderRejectInfo> reject{};
+
+    runtime_state.positions.push_back(make_perp_position("BTCUSDT", true));
+
+    auto request = make_perp_limit_request(0.5, 100.0);
+    request.side = QTrading::Dto::Trading::OrderSide::Sell;
+    request.position_side = QTrading::Dto::Trading::PositionSide::Long;
+    request.reduce_only = true;
+
+    ASSERT_TRUE(OrderEntryService::Execute(runtime_state, account, step_state, request, reject));
+    EXPECT_FALSE(reject.has_value());
+    ASSERT_EQ(runtime_state.orders.size(), 1u);
+    EXPECT_DOUBLE_EQ(runtime_state.orders[0].quantity, 0.5);
+
+    const auto market = make_single_symbol_market("BTCUSDT", 100.0, 100.0, 100.0, 100.0, 1.0, 0);
+    std::vector<QTrading::Infra::Exchanges::BinanceSim::Domain::MatchFill> fills{};
+    QTrading::Infra::Exchanges::BinanceSim::Domain::MatchingEngine::RunStep(
+        runtime_state,
+        step_state,
+        market,
+        fills);
+    QTrading::Infra::Exchanges::BinanceSim::Domain::FillSettlementEngine::Apply(
+        runtime_state,
+        account,
+        fills);
+    ASSERT_EQ(runtime_state.positions.size(), 1u);
+    EXPECT_NEAR(runtime_state.positions[0].quantity, 0.5, 1e-12);
+}
+
+TEST(OrderEntryServiceTest, HedgeModeReduceOnly_WrongSideOrNoMatchingPosition_IsRejectedWithoutException)
+{
+    BinanceExchangeRuntimeState runtime_state{};
+    runtime_state.hedge_mode = true;
+    runtime_state.strict_binance_mode = false;
+    StepKernelState step_state = make_step_state_with_perp_symbol();
+    Account account(10000.0, 0);
+    std::optional<OrderRejectInfo> reject{};
+
+    runtime_state.positions.push_back(make_perp_position("BTCUSDT", true));
+
+    auto wrong_side = make_perp_limit_request(0.5, 100.0);
+    wrong_side.side = QTrading::Dto::Trading::OrderSide::Buy;
+    wrong_side.position_side = QTrading::Dto::Trading::PositionSide::Long;
+    wrong_side.reduce_only = true;
+    EXPECT_FALSE(OrderEntryService::Execute(runtime_state, account, step_state, wrong_side, reject));
+    ASSERT_TRUE(reject.has_value());
+    EXPECT_EQ(reject->code, OrderRejectInfo::Code::ReduceOnlyNoReduciblePosition);
+
+    auto no_match = make_perp_limit_request(0.5, 100.0);
+    no_match.side = QTrading::Dto::Trading::OrderSide::Buy;
+    no_match.position_side = QTrading::Dto::Trading::PositionSide::Short;
+    no_match.reduce_only = true;
+    EXPECT_FALSE(OrderEntryService::Execute(runtime_state, account, step_state, no_match, reject));
+    ASSERT_TRUE(reject.has_value());
+    EXPECT_EQ(reject->code, OrderRejectInfo::Code::ReduceOnlyNoReduciblePosition);
+}
+
+TEST(OrderEntryServiceTest, ReduceOnly_HedgeMode_RequiresExplicitPositionSide)
+{
+    BinanceExchangeRuntimeState runtime_state{};
+    runtime_state.hedge_mode = true;
+    runtime_state.strict_binance_mode = false;
+    StepKernelState step_state = make_step_state_with_perp_symbol();
+    Account account(10000.0, 0);
+    std::optional<OrderRejectInfo> reject{};
+
+    runtime_state.positions.push_back(make_perp_position("BTCUSDT", true));
+
+    auto request = make_perp_limit_request(0.5, 100.0);
+    request.side = QTrading::Dto::Trading::OrderSide::Sell;
+    request.reduce_only = true;
+    request.position_side = QTrading::Dto::Trading::PositionSide::Both;
+
+    EXPECT_FALSE(OrderEntryService::Execute(runtime_state, account, step_state, request, reject));
+    ASSERT_TRUE(reject.has_value());
+    EXPECT_EQ(reject->code, OrderRejectInfo::Code::HedgeModePositionSideRequired);
+}
+
+TEST(OrderEntryServiceTest, ReduceOnly_HedgeMode_DirectionMustCloseCorrectSide)
+{
+    BinanceExchangeRuntimeState runtime_state{};
+    runtime_state.hedge_mode = true;
+    runtime_state.strict_binance_mode = false;
+    StepKernelState step_state = make_step_state_with_perp_symbol();
+    Account account(10000.0, 0);
+    std::optional<OrderRejectInfo> reject{};
+
+    runtime_state.positions.push_back(make_perp_position("BTCUSDT", true));
+    runtime_state.positions.push_back(make_perp_position("BTCUSDT", false));
+
+    auto wrong_long = make_perp_limit_request(0.5, 100.0);
+    wrong_long.side = QTrading::Dto::Trading::OrderSide::Buy;
+    wrong_long.position_side = QTrading::Dto::Trading::PositionSide::Long;
+    wrong_long.reduce_only = true;
+    EXPECT_FALSE(OrderEntryService::Execute(runtime_state, account, step_state, wrong_long, reject));
+    ASSERT_TRUE(reject.has_value());
+    EXPECT_EQ(reject->code, OrderRejectInfo::Code::ReduceOnlyNoReduciblePosition);
+
+    auto wrong_short = make_perp_limit_request(0.5, 100.0);
+    wrong_short.side = QTrading::Dto::Trading::OrderSide::Sell;
+    wrong_short.position_side = QTrading::Dto::Trading::PositionSide::Short;
+    wrong_short.reduce_only = true;
+    EXPECT_FALSE(OrderEntryService::Execute(runtime_state, account, step_state, wrong_short, reject));
+    ASSERT_TRUE(reject.has_value());
+    EXPECT_EQ(reject->code, OrderRejectInfo::Code::ReduceOnlyNoReduciblePosition);
 }
