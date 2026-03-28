@@ -7,6 +7,7 @@ add_executable(QTrading.Infra.Tests
   Exchanges/BinanceSimulator/Domain/AccountPolicyExecutionServiceTests.cpp
   Exchanges/BinanceSimulator/Domain/OrderEntryServiceTests.cpp
   Exchanges/BinanceSimulator/BinanceExchangeReplayTests.cpp
+  Exchanges/BinanceSimulator/BinanceExchangeTests.cpp
 )
 
 target_include_directories(QTrading.Infra.Tests
