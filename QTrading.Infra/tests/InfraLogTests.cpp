@@ -1,13 +1,19 @@
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <fstream>
 #include <limits>
 #include <tuple>
+#include <unordered_map>
 #include <vector>
 
 #include <gtest/gtest.h>
 
+#define private public
 #include "Exchanges/BinanceSimulator/BinanceExchange.hpp"
+#undef private
+#include "Exchanges/BinanceSimulator/Support/BinanceExchangeSkeletonSupport.hpp"
+#include "Exchanges/BinanceSimulator/State/BinanceExchangeRuntimeState.hpp"
 #include "Global.hpp"
 #include "ReplaySemanticsInputPinning.hpp"
 #include "InfraLogTestFixture.hpp"
@@ -17,6 +23,198 @@ namespace {
 struct InfraLogFixtureAccess : InfraLogTestFixture {
     using InfraLogTestFixture::BuildLegacyLogContractSnapshot;
     using InfraLogTestFixture::RegisterDefaultModules;
+};
+
+struct Contracts {
+    struct OrderRejectInfo {
+        struct Code {
+            static constexpr int SpotNoInventory = 24;
+        };
+    };
+    static constexpr int SpotNoInventory = OrderRejectInfo::Code::SpotNoInventory;
+};
+
+using BinanceExchangeImpl = QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+
+class AccountShim : public Account {
+public:
+    enum class IntraBarPathMode { MonteCarloPath = 0 };
+    enum class SpotCommissionMode { BaseOnBuyQuoteOnSell = 0 };
+    enum class KlineVolumeSplitMode { LegacyTotalOnly = 0 };
+    enum class CommissionAsset { None = -1, BaseAsset = 0, QuoteAsset = 1 };
+    enum class CommissionModelSource { ImputedBuyBase = 1 };
+
+    using Account::Account;
+
+    void set_intra_bar_path_mode(IntraBarPathMode) {}
+    void set_intra_bar_random_seed(uint64_t) {}
+    void set_intra_bar_monte_carlo_samples(size_t) {}
+    void set_strict_binance_mode(bool value) { strict_binance_mode = value; }
+    void set_position_mode(bool hedge) { hedge_mode = hedge; }
+    void set_symbol_leverage(const std::string& symbol, double value) { symbol_leverage[symbol] = value; }
+    void set_spot_commission_mode(SpotCommissionMode) {}
+    void set_kline_volume_split_mode(KlineVolumeSplitMode) {}
+    void set_market_impact_slippage_enabled(bool) {}
+    void set_market_impact_slippage_params(double, double, double, double, double) {}
+    void set_taker_probability_model_enabled(bool) {}
+    void set_taker_probability_model_coefficients(double, double, double, double, double) {}
+    void set_limit_fill_probability_enabled(bool) {}
+    void set_limit_fill_probability_coefficients(double, double, double, double, double) {}
+
+    bool place_order(
+        const std::string& symbol,
+        double quantity,
+        double price,
+        QTrading::Dto::Trading::OrderSide side,
+        QTrading::Dto::Trading::PositionSide position_side)
+    {
+        QTrading::dto::Order order{};
+        order.id = static_cast<int64_t>(open_orders_.size() + 1);
+        order.symbol = symbol;
+        order.quantity = quantity;
+        order.price = price;
+        order.side = side;
+        order.position_side = position_side;
+        order.instrument_type = QTrading::Dto::Trading::InstrumentType::Perp;
+        open_orders_.push_back(order);
+        return true;
+    }
+
+    void update_positions(
+        const std::unordered_map<std::string, QTrading::Dto::Market::Binance::TradeKlineDto>&,
+        const std::unordered_map<std::string, double>&)
+    {
+        positions_.clear();
+        for (const auto& order : open_orders_) {
+            QTrading::dto::Position position{};
+            position.id = order.id;
+            position.order_id = order.id;
+            position.symbol = order.symbol;
+            position.quantity = std::abs(order.quantity);
+            position.entry_price = order.price;
+            position.is_long = order.side == QTrading::Dto::Trading::OrderSide::Buy;
+            position.instrument_type = order.instrument_type;
+            positions_.push_back(position);
+        }
+    }
+
+    const std::vector<QTrading::dto::Position>& get_all_positions() const { return positions_; }
+    const std::vector<QTrading::dto::Order>& get_all_orders() const { return open_orders_; }
+
+    bool strict_binance_mode{ true };
+    bool hedge_mode{ false };
+    std::unordered_map<std::string, double> symbol_leverage{};
+
+private:
+    std::vector<QTrading::dto::Position> positions_{};
+    std::vector<QTrading::dto::Order> open_orders_{};
+};
+
+class BinanceExchangeCompat {
+public:
+    using SymbolDataset = BinanceExchangeImpl::SymbolDataset;
+    using StatusSnapshot = BinanceExchangeImpl::StatusSnapshot;
+    using SimulationConfig = BinanceExchangeImpl::SimulationConfig;
+    using AsyncOrderAck = QTrading::Infra::Exchanges::BinanceSim::Contracts::AsyncOrderAck;
+    using ReferencePriceSource = QTrading::Infra::Exchanges::BinanceSim::Contracts::ReferencePriceSource;
+    using FundingApplyTiming = QTrading::Infra::Exchanges::BinanceSim::Contracts::FundingApplyTiming;
+    struct Contracts {
+        static constexpr int SpotNoInventory = 24;
+    };
+
+    BinanceExchangeCompat(
+        const std::vector<SymbolDataset>& datasets,
+        std::shared_ptr<QTrading::Log::Logger> logger,
+        const Account::AccountInitConfig& account_init,
+        uint64_t run_id = 0)
+        : impl_(datasets, std::move(logger), account_init, run_id),
+          spot(impl_.spot),
+          perp(impl_.perp),
+          account(impl_.account)
+    {
+    }
+
+    BinanceExchangeCompat(
+        std::initializer_list<SymbolDataset> datasets,
+        std::shared_ptr<QTrading::Log::Logger> logger,
+        std::shared_ptr<AccountShim> legacy_account,
+        uint64_t run_id = 0)
+        : impl_(std::vector<SymbolDataset>(datasets), std::move(logger), build_init_config_(*legacy_account), run_id),
+          spot(impl_.spot),
+          perp(impl_.perp),
+          account(impl_.account)
+    {
+        apply_legacy_account_(*legacy_account);
+    }
+
+    QTrading::Infra::Exchanges::BinanceSim::Api::SpotApi& spot;
+    QTrading::Infra::Exchanges::BinanceSim::Api::PerpApi& perp;
+    QTrading::Infra::Exchanges::BinanceSim::Api::AccountApi& account;
+
+    bool step() { return impl_.step(); }
+    void close() { impl_.close(); }
+    auto get_market_channel() { return impl_.get_market_channel(); }
+    auto get_position_channel() { return impl_.get_position_channel(); }
+    auto get_order_channel() { return impl_.get_order_channel(); }
+    const std::vector<QTrading::dto::Position>& get_all_positions() const { return impl_.get_all_positions(); }
+    const std::vector<QTrading::dto::Order>& get_all_open_orders() const { return impl_.get_all_open_orders(); }
+    void FillStatusSnapshot(StatusSnapshot& out) const { impl_.FillStatusSnapshot(out); }
+    void set_symbol_leverage(const std::string& symbol, double value) { impl_.set_symbol_leverage(symbol, value); }
+    double get_symbol_leverage(const std::string& symbol) const { return impl_.get_symbol_leverage(symbol); }
+    void set_order_latency_bars(size_t bars) { impl_.runtime_state_->order_latency_bars = bars; }
+    void set_mark_index_basis_thresholds_bps(double warning_bps, double stress_bps)
+    {
+        auto cfg = impl_.simulation_config();
+        cfg.basis_warning_bps = warning_bps;
+        cfg.basis_stress_bps = stress_bps;
+        impl_.apply_simulation_config(cfg);
+    }
+    void set_basis_stress_blocks_opening_orders(bool enabled)
+    {
+        auto cfg = impl_.simulation_config();
+        cfg.basis_stress_blocks_opening_orders = enabled;
+        impl_.apply_simulation_config(cfg);
+    }
+    void set_uncertainty_band_bps(double bps)
+    {
+        auto cfg = impl_.simulation_config();
+        cfg.uncertainty_band_bps = bps;
+        impl_.apply_simulation_config(cfg);
+    }
+    void set_funding_apply_timing(FundingApplyTiming timing)
+    {
+        auto cfg = impl_.simulation_config();
+        cfg.funding_apply_timing = timing;
+        impl_.apply_simulation_config(cfg);
+    }
+    std::vector<AsyncOrderAck> drain_async_order_acks()
+    {
+        std::vector<AsyncOrderAck> out{};
+        out.swap(impl_.runtime_state_->async_order_acks);
+        return out;
+    }
+
+private:
+    static Account::AccountInitConfig build_init_config_(const AccountShim& legacy)
+    {
+        Account::AccountInitConfig cfg{};
+        cfg.perp_initial_wallet = legacy.get_perp_balance().WalletBalance;
+        cfg.spot_initial_cash = legacy.get_spot_balance().WalletBalance;
+        return cfg;
+    }
+
+    void apply_legacy_account_(const AccountShim& legacy)
+    {
+        impl_.runtime_state_->strict_binance_mode = legacy.strict_binance_mode;
+        impl_.runtime_state_->hedge_mode = legacy.hedge_mode;
+        for (const auto& [symbol, leverage] : legacy.symbol_leverage) {
+            impl_.set_symbol_leverage(symbol, leverage);
+        }
+        impl_.runtime_state_->orders = legacy.get_all_orders();
+        impl_.runtime_state_->positions = legacy.get_all_positions();
+    }
+
+    BinanceExchangeImpl impl_;
 };
 
 void WriteBinanceCsv(
@@ -501,15 +699,15 @@ protected:
         return snapshot;
     }
 
-    static std::shared_ptr<Account> MakeDeterministicAccount(
+    static std::shared_ptr<AccountShim> MakeDeterministicAccount(
         double perp_initial_wallet = 1000.0,
         double spot_initial_cash = 0.0)
     {
         Account::AccountInitConfig cfg{};
         cfg.perp_initial_wallet = perp_initial_wallet;
         cfg.spot_initial_cash = spot_initial_cash;
-        auto account = std::make_shared<Account>(cfg);
-        account->set_intra_bar_path_mode(Account::IntraBarPathMode::MonteCarloPath);
+        auto account = std::make_shared<AccountShim>(cfg);
+        account->set_intra_bar_path_mode(AccountShim::IntraBarPathMode::MonteCarloPath);
         account->set_intra_bar_random_seed(kRandomSeed);
         account->set_intra_bar_monte_carlo_samples(kMonteCarloSamples);
         return account;
@@ -589,7 +787,7 @@ protected:
 
     std::vector<LegacyLogContractSnapshot> RunReplayOnce(const std::string& replay_name)
     {
-        using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+        using BinanceExchange = BinanceExchangeCompat;
 
         const fs::path replay_dir = tmp_dir / replay_name;
         fs::create_directories(replay_dir);
@@ -628,8 +826,8 @@ protected:
 
         Account::AccountInitConfig cfg{};
         cfg.perp_initial_wallet = 1000.0;
-        auto account = std::make_shared<Account>(cfg);
-        account->set_intra_bar_path_mode(Account::IntraBarPathMode::MonteCarloPath);
+        auto account = std::make_shared<AccountShim>(cfg);
+        account->set_intra_bar_path_mode(AccountShim::IntraBarPathMode::MonteCarloPath);
         account->set_intra_bar_random_seed(kRandomSeed);
         account->set_intra_bar_monte_carlo_samples(kMonteCarloSamples);
 
@@ -1115,7 +1313,7 @@ TEST_F(InfraLogTestFixture, RunMetadataAppearsFirstAfterLoggerInitialization)
 
 TEST_F(InfraLogTestFixture, StepRowsUseMarketTimestampAsTsExchangeWithinSingleStep)
 {
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
 
     WriteBinanceCsv(
         tmp_dir / "btc.csv",
@@ -1134,8 +1332,7 @@ TEST_F(InfraLogTestFixture, StepRowsUseMarketTimestampAsTsExchangeWithinSingleSt
                 { "ETHUSDT", (tmp_dir / "eth.csv").string() }
             },
             logger,
-            1000.0,
-            0,
+            QTrading::Infra::Exchanges::BinanceSim::Support::BuildInitConfig(1000.0, 0),
             expected_run_id);
         auto market_channel = exchange.get_market_channel();
 
@@ -1163,7 +1360,7 @@ TEST_F(InfraLogTestFixture, StepRowsUseMarketTimestampAsTsExchangeWithinSingleSt
 
 TEST_F(InfraLogTestFixture, EventSeqIsMonotonicWithinSingleStepAcrossEventModules)
 {
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
     using QTrading::Log::FileLogger::FeatherV2::AccountEventDto;
     using QTrading::Log::FileLogger::FeatherV2::MarketEventDto;
 
@@ -1181,8 +1378,7 @@ TEST_F(InfraLogTestFixture, EventSeqIsMonotonicWithinSingleStepAcrossEventModule
                 { "ETHUSDT", (tmp_dir / "eth.csv").string() }
             },
             logger,
-            1000.0,
-            0,
+            QTrading::Infra::Exchanges::BinanceSim::Support::BuildInitConfig(1000.0, 0),
             2400u);
         auto market_channel = exchange.get_market_channel();
 
@@ -1230,7 +1426,7 @@ TEST_F(InfraLogTestFixture, EventSeqIsMonotonicWithinSingleStepAcrossEventModule
 
 TEST_F(InfraLogTestFixture, StepSeqIncrementsByExactlyOnePerStep)
 {
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
     using QTrading::Log::FileLogger::FeatherV2::MarketEventDto;
 
     WriteBinanceCsv(
@@ -1244,8 +1440,7 @@ TEST_F(InfraLogTestFixture, StepSeqIncrementsByExactlyOnePerStep)
         BinanceExchange exchange(
             { { "BTCUSDT", (tmp_dir / "btc.csv").string() } },
             logger,
-            1000.0,
-            0,
+            QTrading::Infra::Exchanges::BinanceSim::Support::BuildInitConfig(1000.0, 0),
             2500u);
         auto market_channel = exchange.get_market_channel();
 
@@ -1271,7 +1466,7 @@ TEST_F(InfraLogTestFixture, StepSeqIncrementsByExactlyOnePerStep)
 
 TEST_F(InfraLogTestFixture, ReplayWindowFirstStepKeepsCorrectTsExchange)
 {
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
     using QTrading::Log::FileLogger::FeatherV2::MarketEventDto;
 
     WriteBinanceCsv(
@@ -1290,8 +1485,7 @@ TEST_F(InfraLogTestFixture, ReplayWindowFirstStepKeepsCorrectTsExchange)
         BinanceExchange exchange(
             { { "BTCUSDT", (tmp_dir / "btc.csv").string() } },
             logger,
-            1000.0,
-            0,
+            QTrading::Infra::Exchanges::BinanceSim::Support::BuildInitConfig(1000.0, 0),
             2600u);
         auto market_channel = exchange.get_market_channel();
 
@@ -1316,7 +1510,7 @@ TEST_F(InfraLogTestFixture, ReplayWindowFirstStepKeepsCorrectTsExchange)
 
 TEST_F(InfraLogTestFixture, FundingOnlyStepProducesCorrectTsExchange)
 {
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
     using QTrading::Log::FileLogger::FeatherV2::FundingEventDto;
 
     WriteBinanceCsv(
@@ -1341,8 +1535,7 @@ TEST_F(InfraLogTestFixture, FundingOnlyStepProducesCorrectTsExchange)
                 }
             },
             logger,
-            1000.0,
-            0,
+            QTrading::Infra::Exchanges::BinanceSim::Support::BuildInitConfig(1000.0, 0),
             2700u);
         auto market_channel = exchange.get_market_channel();
 
@@ -1372,7 +1565,7 @@ TEST_F(InfraLogTestFixture, AsyncOrderAckAndOrderEventKeepSubmittedDueResolvedSt
 {
     using QTrading::Dto::Trading::OrderSide;
     using QTrading::Dto::Trading::PositionSide;
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
     using QTrading::Log::FileLogger::FeatherV2::OrderEventDto;
     using QTrading::Log::FileLogger::FeatherV2::OrderEventType;
 
@@ -1390,8 +1583,7 @@ TEST_F(InfraLogTestFixture, AsyncOrderAckAndOrderEventKeepSubmittedDueResolvedSt
         BinanceExchange exchange(
             { { "BTCUSDT", (tmp_dir / "btc.csv").string() } },
             logger,
-            1000.0,
-            0,
+            QTrading::Infra::Exchanges::BinanceSim::Support::BuildInitConfig(1000.0, 0),
             2800u);
         exchange.set_order_latency_bars(1);
         auto market_channel = exchange.get_market_channel();
@@ -1447,7 +1639,7 @@ TEST_F(InfraLogTestFixture, AsyncOrderAckAndOrderEventKeepSubmittedDueResolvedSt
 TEST_F(InfraLogTestFixture, FirstFillProducesAccountSnapshotAlignedWithFillStatusSnapshot)
 {
     using QTrading::Dto::Trading::OrderSide;
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
 
     WriteBinanceCsv(
         tmp_dir / "btc.csv",
@@ -1458,8 +1650,7 @@ TEST_F(InfraLogTestFixture, FirstFillProducesAccountSnapshotAlignedWithFillStatu
         BinanceExchange exchange(
             { { "BTCUSDT", (tmp_dir / "btc.csv").string() } },
             logger,
-            500.0,
-            0,
+            QTrading::Infra::Exchanges::BinanceSim::Support::BuildInitConfig(500.0, 0),
             2900u);
         auto market_channel = exchange.get_market_channel();
 
@@ -1494,7 +1685,7 @@ TEST_F(InfraLogTestFixture, DualLedgerAccountSnapshotContainsStableSpotAndPerpFi
 {
     using QTrading::Dto::Trading::InstrumentType;
     using QTrading::Dto::Trading::OrderSide;
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
 
     WriteBinanceCsv(
         tmp_dir / "btc_spot.csv",
@@ -1563,7 +1754,7 @@ TEST_F(InfraLogTestFixture, PositionSnapshotCarriesInstrumentTypeDirectionQuanti
 {
     using QTrading::Dto::Trading::InstrumentType;
     using QTrading::Dto::Trading::OrderSide;
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
 
     WriteBinanceCsv(
         tmp_dir / "btc_spot.csv",
@@ -1641,7 +1832,7 @@ TEST_F(InfraLogTestFixture, OrderSnapshotCarriesInstrumentTypeReduceOnlyClosePos
 {
     using QTrading::Dto::Trading::OrderSide;
     using QTrading::Dto::Trading::PositionSide;
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
 
     WriteBinanceCsv(
         tmp_dir / "btc.csv",
@@ -1653,7 +1844,7 @@ TEST_F(InfraLogTestFixture, OrderSnapshotCarriesInstrumentTypeReduceOnlyClosePos
     Account::AccountInitConfig cfg{};
     cfg.perp_initial_wallet = 1000.0;
     cfg.strict_binance_mode = false;
-    auto account = std::make_shared<Account>(cfg);
+    auto account = std::make_shared<AccountShim>(cfg);
     account->set_position_mode(true);
     account->set_symbol_leverage("BTCUSDT", 10.0);
 
@@ -1723,7 +1914,7 @@ TEST_F(InfraLogTestFixture, OrderSnapshotCarriesInstrumentTypeReduceOnlyClosePos
 TEST_F(InfraLogTestFixture, UnchangedPositionAndOrderDoNotEmitExtraSnapshotRows)
 {
     using QTrading::Dto::Trading::OrderSide;
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
 
     WriteBinanceCsv(
         tmp_dir / "btc.csv",
@@ -1737,8 +1928,7 @@ TEST_F(InfraLogTestFixture, UnchangedPositionAndOrderDoNotEmitExtraSnapshotRows)
         BinanceExchange exchange(
             { { "BTCUSDT", (tmp_dir / "btc.csv").string() } },
             logger,
-            1000.0,
-            0,
+            QTrading::Infra::Exchanges::BinanceSim::Support::BuildInitConfig(1000.0, 0),
             3300u);
         auto market_channel = exchange.get_market_channel();
 
@@ -1762,7 +1952,7 @@ TEST_F(InfraLogTestFixture, UnchangedPositionAndOrderDoNotEmitExtraSnapshotRows)
 TEST_F(InfraLogTestFixture, PositionChangeWithoutOrderChangeEmitsOnlyPositionSnapshot)
 {
     using QTrading::Dto::Trading::OrderSide;
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
 
     WriteBinanceCsv(
         tmp_dir / "btc.csv",
@@ -1775,8 +1965,7 @@ TEST_F(InfraLogTestFixture, PositionChangeWithoutOrderChangeEmitsOnlyPositionSna
         BinanceExchange exchange(
             { { "BTCUSDT", (tmp_dir / "btc.csv").string() } },
             logger,
-            1000.0,
-            0,
+            QTrading::Infra::Exchanges::BinanceSim::Support::BuildInitConfig(1000.0, 0),
             3400u);
         auto market_channel = exchange.get_market_channel();
 
@@ -1807,7 +1996,7 @@ TEST_F(InfraLogTestFixture, PositionChangeWithoutOrderChangeEmitsOnlyPositionSna
 TEST_F(InfraLogTestFixture, OrderChangeWithoutPositionChangeEmitsOnlyOrderSnapshot)
 {
     using QTrading::Dto::Trading::OrderSide;
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
 
     WriteBinanceCsv(
         tmp_dir / "btc.csv",
@@ -1817,8 +2006,7 @@ TEST_F(InfraLogTestFixture, OrderChangeWithoutPositionChangeEmitsOnlyOrderSnapsh
         BinanceExchange exchange(
             { { "BTCUSDT", (tmp_dir / "btc.csv").string() } },
             logger,
-            1000.0,
-            0,
+            QTrading::Infra::Exchanges::BinanceSim::Support::BuildInitConfig(1000.0, 0),
             3500u);
         auto market_channel = exchange.get_market_channel();
 
@@ -1992,7 +2180,7 @@ TEST_F(InfraLogTestFixture, FilterRowsByModuleKeepsOnlyRequestedModuleInArrivalO
 
 TEST_F(InfraLogTestFixture, AssertSingleStepEnvelopeValidatesMarketEventRowsFromSingleStep)
 {
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
     using QTrading::Log::FileLogger::FeatherV2::MarketEventDto;
 
     WriteBinanceCsv(
@@ -2011,8 +2199,7 @@ TEST_F(InfraLogTestFixture, AssertSingleStepEnvelopeValidatesMarketEventRowsFrom
                 { "ETHUSDT", (tmp_dir / "eth.csv").string() }
             },
             logger,
-            1000.0,
-            0,
+            QTrading::Infra::Exchanges::BinanceSim::Support::BuildInitConfig(1000.0, 0),
             expected_run_id);
         auto market_channel = exchange.get_market_channel();
 
@@ -2108,7 +2295,7 @@ TEST_F(DeterministicReplayFixture, InfraLogSameReplayTwiceProducesIdenticalLegac
 
 TEST_F(DeterministicReplayFixture, SingleSymbolGoldenReplayProducesExpectedLegacyLogContractSnapshots)
 {
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
 
     const auto actual = RunGoldenScenario(
         "golden-single-symbol",
@@ -2157,7 +2344,7 @@ TEST_F(DeterministicReplayFixture, SingleSymbolGoldenReplayProducesExpectedLegac
 
 TEST_F(DeterministicReplayFixture, DualSymbolHolesGoldenReplayProducesExpectedLegacyLogContractSnapshots)
 {
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
 
     const auto actual = RunGoldenScenario(
         "golden-dual-symbol-holes",
@@ -2225,7 +2412,7 @@ TEST_F(DeterministicReplayFixture, DualSymbolHolesGoldenReplayProducesExpectedLe
 TEST_F(DeterministicReplayFixture, FundingInterpolationGoldenReplayProducesExpectedLegacyLogContractSnapshots)
 {
     using QTrading::Dto::Trading::OrderSide;
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
 
     const auto actual = RunGoldenScenario(
         "golden-funding-interpolation",
@@ -2281,7 +2468,7 @@ TEST_F(DeterministicReplayFixture, SpotPerpMixedBookGoldenReplayProducesExpected
 {
     using QTrading::Dto::Trading::InstrumentType;
     using QTrading::Dto::Trading::OrderSide;
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
 
     const auto actual = RunGoldenScenario(
         "golden-spot-perp-mixed",
@@ -2337,7 +2524,7 @@ TEST_F(DeterministicReplayFixture, HedgeModeGoldenReplayProducesExpectedLegacyLo
 {
     using QTrading::Dto::Trading::OrderSide;
     using QTrading::Dto::Trading::PositionSide;
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
 
     const auto actual = RunGoldenScenario(
         "golden-hedge-mode",
@@ -2379,7 +2566,7 @@ TEST_F(DeterministicReplayFixture, LiquidationGoldenReplayProducesExpectedLegacy
     using QTrading::Dto::Market::Binance::TradeKlineDto;
     using QTrading::Dto::Trading::OrderSide;
     using QTrading::Dto::Trading::PositionSide;
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
 
     const auto actual = RunGoldenScenario(
         "golden-liquidation",
@@ -2391,7 +2578,7 @@ TEST_F(DeterministicReplayFixture, LiquidationGoldenReplayProducesExpectedLegacy
                 replay_dir / "liq_mark.csv",
                 { { 0u, 1.0, 1.0, 1.0, 1.0, 10000.0, 30000u, 10000.0, 1, 0.0, 0.0 } });
 
-            auto account = std::make_shared<Account>(350000.0, 0);
+            auto account = std::make_shared<AccountShim>(350000.0, 0);
             account->set_symbol_leverage("BTCUSDT", 75.0);
             ASSERT_TRUE(account->place_order("BTCUSDT", 5000.0, 500.0, OrderSide::Buy, PositionSide::Both));
             TradeKlineDto open_kline{};
@@ -2443,7 +2630,7 @@ TEST_F(DeterministicReplayFixture, AsyncLatencyAndRejectionGoldenReplayProducesE
 {
     using QTrading::Dto::Trading::OrderSide;
     using QTrading::Dto::Trading::PositionSide;
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
 
     BinanceExchange::AsyncOrderAck rejected_ack{};
     const auto actual = RunGoldenScenario(
@@ -2518,7 +2705,7 @@ TEST_F(DeterministicReplayFixture, AsyncLatencyAndRejectionGoldenReplayProducesE
 TEST_F(DeterministicReplayFixture, BasisStressOverlayBlockGoldenReplayProducesExpectedLegacyLogContractSnapshots)
 {
     using QTrading::Dto::Trading::OrderSide;
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
 
     BinanceExchange::StatusSnapshot snap{};
     const auto actual = RunGoldenScenario(
@@ -2569,7 +2756,7 @@ TEST_F(DeterministicReplayFixture, BasisStressOverlayBlockGoldenReplayProducesEx
 TEST_F(InfraLogTestFixture, OrderEventAcceptedIsEmittedWhenNewOrderRemainsOpen)
 {
     using QTrading::Dto::Trading::OrderSide;
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
     using QTrading::Log::FileLogger::FeatherV2::OrderEventDto;
     using QTrading::Log::FileLogger::FeatherV2::OrderEventType;
 
@@ -2581,8 +2768,7 @@ TEST_F(InfraLogTestFixture, OrderEventAcceptedIsEmittedWhenNewOrderRemainsOpen)
         BinanceExchange exchange(
             { { "BTCUSDT", (tmp_dir / "accepted.csv").string() } },
             logger,
-            1000.0,
-            0,
+            QTrading::Infra::Exchanges::BinanceSim::Support::BuildInitConfig(1000.0, 0),
             3600u);
         auto market_channel = exchange.get_market_channel();
 
@@ -2609,7 +2795,7 @@ TEST_F(InfraLogTestFixture, OrderEventAcceptedIsEmittedWhenNewOrderRemainsOpen)
 TEST_F(InfraLogTestFixture, OrderEventFilledCarriesExecQtyExecPriceAndRemainingQty)
 {
     using QTrading::Dto::Trading::OrderSide;
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
     using QTrading::Log::FileLogger::FeatherV2::OrderEventDto;
     using QTrading::Log::FileLogger::FeatherV2::OrderEventType;
 
@@ -2621,8 +2807,7 @@ TEST_F(InfraLogTestFixture, OrderEventFilledCarriesExecQtyExecPriceAndRemainingQ
         BinanceExchange exchange(
             { { "BTCUSDT", (tmp_dir / "filled.csv").string() } },
             logger,
-            1000.0,
-            0,
+            QTrading::Infra::Exchanges::BinanceSim::Support::BuildInitConfig(1000.0, 0),
             3700u);
         auto market_channel = exchange.get_market_channel();
 
@@ -2648,7 +2833,7 @@ TEST_F(InfraLogTestFixture, OrderEventFilledCarriesExecQtyExecPriceAndRemainingQ
 TEST_F(InfraLogTestFixture, OrderEventCanceledIsEmittedWhenOpenOrderIsCanceled)
 {
     using QTrading::Dto::Trading::OrderSide;
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
     using QTrading::Log::FileLogger::FeatherV2::OrderEventDto;
     using QTrading::Log::FileLogger::FeatherV2::OrderEventType;
 
@@ -2663,8 +2848,7 @@ TEST_F(InfraLogTestFixture, OrderEventCanceledIsEmittedWhenOpenOrderIsCanceled)
         BinanceExchange exchange(
             { { "BTCUSDT", (tmp_dir / "canceled.csv").string() } },
             logger,
-            1000.0,
-            0,
+            QTrading::Infra::Exchanges::BinanceSim::Support::BuildInitConfig(1000.0, 0),
             3800u);
         auto market_channel = exchange.get_market_channel();
 
@@ -2693,7 +2877,7 @@ TEST_F(InfraLogTestFixture, OrderEventCanceledIsEmittedWhenOpenOrderIsCanceled)
 TEST_F(InfraLogTestFixture, OrderEventLifecycleKeepsAcceptedFilledCanceledForPartialThenCancel)
 {
     using QTrading::Dto::Trading::OrderSide;
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
     using QTrading::Log::FileLogger::FeatherV2::OrderEventDto;
     using QTrading::Log::FileLogger::FeatherV2::OrderEventType;
 
@@ -2709,8 +2893,7 @@ TEST_F(InfraLogTestFixture, OrderEventLifecycleKeepsAcceptedFilledCanceledForPar
         BinanceExchange exchange(
             { { "BTCUSDT", (tmp_dir / "partial_cancel.csv").string() } },
             logger,
-            1000.0,
-            0,
+            QTrading::Infra::Exchanges::BinanceSim::Support::BuildInitConfig(1000.0, 0),
             3900u);
         auto market_channel = exchange.get_market_channel();
 
@@ -2750,7 +2933,7 @@ TEST_F(InfraLogTestFixture, OrderEventFeeFieldsAreCorrectForSpotAndPerpFills)
 {
     using QTrading::Dto::Trading::InstrumentType;
     using QTrading::Dto::Trading::OrderSide;
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
     using QTrading::Log::FileLogger::FeatherV2::OrderEventDto;
     using QTrading::Log::FileLogger::FeatherV2::OrderEventType;
 
@@ -2818,13 +3001,13 @@ TEST_F(InfraLogTestFixture, OrderEventFeeFieldsAreCorrectForSpotAndPerpFills)
 
     EXPECT_NEAR(spot_event->fee, 0.1, 1e-12);
     EXPECT_NEAR(spot_event->fee_rate, 0.001, 1e-12);
-    EXPECT_EQ(spot_event->fee_asset, static_cast<int32_t>(Account::CommissionAsset::QuoteAsset));
+    EXPECT_EQ(spot_event->fee_asset, static_cast<int32_t>(AccountShim::CommissionAsset::QuoteAsset));
     EXPECT_NEAR(spot_event->fee_native, 0.1, 1e-12);
     EXPECT_NEAR(spot_event->fee_quote_equiv, 0.1, 1e-12);
 
     EXPECT_NEAR(perp_event->fee, 0.2, 1e-12);
     EXPECT_NEAR(perp_event->fee_rate, 0.0005, 1e-12);
-    EXPECT_EQ(perp_event->fee_asset, static_cast<int32_t>(Account::CommissionAsset::None));
+    EXPECT_EQ(perp_event->fee_asset, static_cast<int32_t>(AccountShim::CommissionAsset::None));
     EXPECT_NEAR(perp_event->fee_native, 0.2, 1e-12);
     EXPECT_NEAR(perp_event->fee_quote_equiv, 0.2, 1e-12);
 }
@@ -2833,7 +3016,7 @@ TEST_F(InfraLogTestFixture, OrderEventCapturesSpotBaseFeeCommissionAndCashflowFi
 {
     using QTrading::Dto::Trading::InstrumentType;
     using QTrading::Dto::Trading::OrderSide;
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
     using QTrading::Log::FileLogger::FeatherV2::OrderEventDto;
 
     WriteBinanceCsv(
@@ -2843,8 +3026,8 @@ TEST_F(InfraLogTestFixture, OrderEventCapturesSpotBaseFeeCommissionAndCashflowFi
     Account::AccountInitConfig cfg{};
     cfg.spot_initial_cash = 1000.0;
     cfg.perp_initial_wallet = 0.0;
-    auto account = std::make_shared<Account>(cfg);
-    account->set_spot_commission_mode(Account::SpotCommissionMode::BaseOnBuyQuoteOnSell);
+    auto account = std::make_shared<AccountShim>(cfg);
+    account->set_spot_commission_mode(AccountShim::SpotCommissionMode::BaseOnBuyQuoteOnSell);
 
     {
         BinanceExchange exchange(
@@ -2876,8 +3059,8 @@ TEST_F(InfraLogTestFixture, OrderEventCapturesSpotBaseFeeCommissionAndCashflowFi
     ASSERT_NE(order_event, nullptr);
     EXPECT_EQ(
         order_event->commission_model_source,
-        static_cast<int32_t>(Account::CommissionModelSource::ImputedBuyBase));
-    EXPECT_EQ(order_event->fee_asset, static_cast<int32_t>(Account::CommissionAsset::BaseAsset));
+        static_cast<int32_t>(AccountShim::CommissionModelSource::ImputedBuyBase));
+    EXPECT_EQ(order_event->fee_asset, static_cast<int32_t>(AccountShim::CommissionAsset::BaseAsset));
     EXPECT_NEAR(order_event->spot_cash_delta, -100.0, 1e-12);
     EXPECT_NEAR(order_event->spot_inventory_delta, 0.999, 1e-12);
 }
@@ -2885,7 +3068,7 @@ TEST_F(InfraLogTestFixture, OrderEventCapturesSpotBaseFeeCommissionAndCashflowFi
 TEST_F(InfraLogTestFixture, OrderEventReflectsModeledExecutionResultsWhenExecutionModelsEnabled)
 {
     using QTrading::Dto::Trading::OrderSide;
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
     using QTrading::Log::FileLogger::FeatherV2::OrderEventDto;
     using QTrading::Log::FileLogger::FeatherV2::OrderEventType;
 
@@ -2902,8 +3085,8 @@ TEST_F(InfraLogTestFixture, OrderEventReflectsModeledExecutionResultsWhenExecuti
     {
         Account::AccountInitConfig cfg{};
         cfg.perp_initial_wallet = 100000.0;
-        auto account = std::make_shared<Account>(cfg);
-        account->set_kline_volume_split_mode(Account::KlineVolumeSplitMode::LegacyTotalOnly);
+        auto account = std::make_shared<AccountShim>(cfg);
+        account->set_kline_volume_split_mode(AccountShim::KlineVolumeSplitMode::LegacyTotalOnly);
         account->set_market_impact_slippage_enabled(true);
         account->set_market_impact_slippage_params(0.0, 500.0, 1.0, 0.0, 0.0);
 
@@ -2922,8 +3105,8 @@ TEST_F(InfraLogTestFixture, OrderEventReflectsModeledExecutionResultsWhenExecuti
     {
         Account::AccountInitConfig cfg{};
         cfg.perp_initial_wallet = 100000.0;
-        auto account = std::make_shared<Account>(cfg);
-        account->set_kline_volume_split_mode(Account::KlineVolumeSplitMode::LegacyTotalOnly);
+        auto account = std::make_shared<AccountShim>(cfg);
+        account->set_kline_volume_split_mode(AccountShim::KlineVolumeSplitMode::LegacyTotalOnly);
         account->set_taker_probability_model_enabled(true);
         account->set_taker_probability_model_coefficients(-1.0, 2.0, 0.5, 0.5, 0.0);
 
@@ -2942,8 +3125,8 @@ TEST_F(InfraLogTestFixture, OrderEventReflectsModeledExecutionResultsWhenExecuti
     {
         Account::AccountInitConfig cfg{};
         cfg.perp_initial_wallet = 100000.0;
-        auto account = std::make_shared<Account>(cfg);
-        account->set_kline_volume_split_mode(Account::KlineVolumeSplitMode::LegacyTotalOnly);
+        auto account = std::make_shared<AccountShim>(cfg);
+        account->set_kline_volume_split_mode(AccountShim::KlineVolumeSplitMode::LegacyTotalOnly);
         account->set_limit_fill_probability_enabled(true);
         account->set_limit_fill_probability_coefficients(1.0, 2.0, 2.0, 0.0, 0.0);
 
@@ -2999,7 +3182,7 @@ TEST_F(InfraLogTestFixture, OrderEventPreservesQuoteOrderQtyForQuoteBasedMarketB
 {
     using QTrading::Dto::Trading::InstrumentType;
     using QTrading::Dto::Trading::OrderSide;
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
     using QTrading::Log::FileLogger::FeatherV2::OrderEventDto;
     using QTrading::Log::FileLogger::FeatherV2::OrderEventType;
 
@@ -3054,7 +3237,7 @@ TEST_F(InfraLogTestFixture, OrderEventPreservesQuoteOrderQtyForQuoteBasedMarketB
 TEST_F(InfraLogTestFixture, RejectedAsyncOrderDoesNotEmitAcceptedOrFilledOrderEvents)
 {
     using QTrading::Dto::Trading::OrderSide;
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
     using QTrading::Log::FileLogger::FeatherV2::OrderEventDto;
     using QTrading::Log::FileLogger::FeatherV2::OrderEventType;
 
@@ -3072,8 +3255,7 @@ TEST_F(InfraLogTestFixture, RejectedAsyncOrderDoesNotEmitAcceptedOrFilledOrderEv
         BinanceExchange exchange(
             { { "BTCUSDT", (tmp_dir / "async_rejected.csv").string() } },
             logger,
-            1000.0,
-            0,
+            QTrading::Infra::Exchanges::BinanceSim::Support::BuildInitConfig(1000.0, 0),
             4400u);
         exchange.set_order_latency_bars(1);
         auto market_channel = exchange.get_market_channel();
@@ -3112,7 +3294,7 @@ TEST_F(InfraLogTestFixture, RejectedAsyncOrderDoesNotEmitAcceptedOrFilledOrderEv
 TEST_F(InfraLogTestFixture, PositionEventOpenedIsEmittedOnFirstOpen)
 {
     using QTrading::Dto::Trading::OrderSide;
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
     using QTrading::Log::FileLogger::FeatherV2::PositionEventDto;
     using QTrading::Log::FileLogger::FeatherV2::PositionEventType;
 
@@ -3124,8 +3306,7 @@ TEST_F(InfraLogTestFixture, PositionEventOpenedIsEmittedOnFirstOpen)
         BinanceExchange exchange(
             { { "BTCUSDT", (tmp_dir / "position_open.csv").string() } },
             logger,
-            1000.0,
-            0,
+            QTrading::Infra::Exchanges::BinanceSim::Support::BuildInitConfig(1000.0, 0),
             4500u);
         auto market_channel = exchange.get_market_channel();
 
@@ -3159,7 +3340,7 @@ TEST_F(InfraLogTestFixture, PositionEventOpenedIsEmittedOnFirstOpen)
 TEST_F(InfraLogTestFixture, PositionEventIncreasedIsEmittedWhenPositionAddsSize)
 {
     using QTrading::Dto::Trading::OrderSide;
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
     using QTrading::Log::FileLogger::FeatherV2::PositionEventDto;
     using QTrading::Log::FileLogger::FeatherV2::PositionEventType;
 
@@ -3174,8 +3355,7 @@ TEST_F(InfraLogTestFixture, PositionEventIncreasedIsEmittedWhenPositionAddsSize)
         BinanceExchange exchange(
             { { "BTCUSDT", (tmp_dir / "position_increase.csv").string() } },
             logger,
-            1000.0,
-            0,
+            QTrading::Infra::Exchanges::BinanceSim::Support::BuildInitConfig(1000.0, 0),
             4600u);
         auto market_channel = exchange.get_market_channel();
 
@@ -3214,7 +3394,7 @@ TEST_F(InfraLogTestFixture, PositionEventReducedIsEmittedWhenPositionShrinksWith
 {
     using QTrading::Dto::Trading::OrderSide;
     using QTrading::Dto::Trading::PositionSide;
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
     using QTrading::Log::FileLogger::FeatherV2::PositionEventDto;
     using QTrading::Log::FileLogger::FeatherV2::PositionEventType;
 
@@ -3229,8 +3409,7 @@ TEST_F(InfraLogTestFixture, PositionEventReducedIsEmittedWhenPositionShrinksWith
         BinanceExchange exchange(
             { { "BTCUSDT", (tmp_dir / "position_reduce.csv").string() } },
             logger,
-            1000.0,
-            0,
+            QTrading::Infra::Exchanges::BinanceSim::Support::BuildInitConfig(1000.0, 0),
             4700u);
         auto market_channel = exchange.get_market_channel();
 
@@ -3274,7 +3453,7 @@ TEST_F(InfraLogTestFixture, PositionEventReducedIsEmittedWhenPositionShrinksWith
 TEST_F(InfraLogTestFixture, PositionEventClosedIsEmittedOnFullClose)
 {
     using QTrading::Dto::Trading::OrderSide;
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
     using QTrading::Log::FileLogger::FeatherV2::PositionEventDto;
     using QTrading::Log::FileLogger::FeatherV2::PositionEventType;
 
@@ -3289,8 +3468,7 @@ TEST_F(InfraLogTestFixture, PositionEventClosedIsEmittedOnFullClose)
         BinanceExchange exchange(
             { { "BTCUSDT", (tmp_dir / "position_close.csv").string() } },
             logger,
-            1000.0,
-            0,
+            QTrading::Infra::Exchanges::BinanceSim::Support::BuildInitConfig(1000.0, 0),
             4800u);
         auto market_channel = exchange.get_market_channel();
 
@@ -3328,7 +3506,7 @@ TEST_F(InfraLogTestFixture, PositionEventDistinguishesLongAndShortSidesInHedgeMo
 {
     using QTrading::Dto::Trading::OrderSide;
     using QTrading::Dto::Trading::PositionSide;
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
     using QTrading::Log::FileLogger::FeatherV2::PositionEventDto;
     using QTrading::Log::FileLogger::FeatherV2::PositionEventType;
 
@@ -3338,7 +3516,7 @@ TEST_F(InfraLogTestFixture, PositionEventDistinguishesLongAndShortSidesInHedgeMo
 
     Account::AccountInitConfig cfg{};
     cfg.perp_initial_wallet = 1000.0;
-    auto account = std::make_shared<Account>(cfg);
+    auto account = std::make_shared<AccountShim>(cfg);
     account->set_position_mode(true);
     account->set_symbol_leverage("BTCUSDT", 10.0);
 
@@ -3391,7 +3569,7 @@ TEST_F(InfraLogTestFixture, PositionEventOneWayReverseKeepsOpenedClosedOpenedLif
 {
     using QTrading::Dto::Trading::OrderSide;
     using QTrading::Dto::Trading::PositionSide;
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
     using QTrading::Log::FileLogger::FeatherV2::PositionEventDto;
     using QTrading::Log::FileLogger::FeatherV2::PositionEventType;
 
@@ -3407,8 +3585,7 @@ TEST_F(InfraLogTestFixture, PositionEventOneWayReverseKeepsOpenedClosedOpenedLif
         BinanceExchange exchange(
             { { "BTCUSDT", (tmp_dir / "position_reverse.csv").string() } },
             logger,
-            1000.0,
-            0,
+            QTrading::Infra::Exchanges::BinanceSim::Support::BuildInitConfig(1000.0, 0),
             5000u);
         auto market_channel = exchange.get_market_channel();
 
@@ -3451,7 +3628,7 @@ TEST_F(InfraLogTestFixture, AccountEventSpotOpenCarriesCorrectSpotCashAndInvento
 {
     using QTrading::Dto::Trading::InstrumentType;
     using QTrading::Dto::Trading::OrderSide;
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
     using QTrading::Log::FileLogger::FeatherV2::AccountEventDto;
     using QTrading::Log::FileLogger::FeatherV2::AccountEventType;
     using QTrading::Log::FileLogger::FeatherV2::AccountLedger;
@@ -3511,7 +3688,7 @@ TEST_F(InfraLogTestFixture, AccountEventSpotOpenCarriesCorrectSpotCashAndInvento
 TEST_F(InfraLogTestFixture, AccountEventPerpOpenCarriesCorrectWalletMarginAndAvailableBalances)
 {
     using QTrading::Dto::Trading::OrderSide;
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
     using QTrading::Log::FileLogger::FeatherV2::AccountEventDto;
     using QTrading::Log::FileLogger::FeatherV2::AccountLedger;
 
@@ -3524,8 +3701,7 @@ TEST_F(InfraLogTestFixture, AccountEventPerpOpenCarriesCorrectWalletMarginAndAva
         BinanceExchange exchange(
             { { "BTCUSDT", (tmp_dir / "account_event_perp_open.csv").string() } },
             logger,
-            1000.0,
-            0,
+            QTrading::Infra::Exchanges::BinanceSim::Support::BuildInitConfig(1000.0, 0),
             5200u);
         auto market_channel = exchange.get_market_channel();
 
@@ -3561,7 +3737,7 @@ TEST_F(InfraLogTestFixture, AccountEventPerpOpenCarriesCorrectWalletMarginAndAva
 TEST_F(InfraLogTestFixture, AccountEventFundingStepCarriesCorrectWalletDelta)
 {
     using QTrading::Dto::Trading::OrderSide;
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
     using QTrading::Log::FileLogger::FeatherV2::AccountEventDto;
     using QTrading::Log::FileLogger::FeatherV2::AccountLedger;
 
@@ -3591,8 +3767,7 @@ TEST_F(InfraLogTestFixture, AccountEventFundingStepCarriesCorrectWalletDelta)
                 std::optional<std::string>((tmp_dir / "funding.csv").string()),
                 (tmp_dir / "funding_mark.csv").string() } },
             logger,
-            1000.0,
-            0,
+            QTrading::Infra::Exchanges::BinanceSim::Support::BuildInitConfig(1000.0, 0),
             5300u);
         auto market_channel = exchange.get_market_channel();
 
@@ -3622,7 +3797,7 @@ TEST_F(InfraLogTestFixture, AccountEventFundingStepCarriesCorrectWalletDelta)
 
 TEST_F(InfraLogTestFixture, AccountEventTransfersReflectSpotAndPerpBalancesAfterTransfer)
 {
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
     using QTrading::Log::FileLogger::FeatherV2::AccountEventDto;
     using QTrading::Log::FileLogger::FeatherV2::AccountLedger;
 
@@ -3684,7 +3859,7 @@ TEST_F(InfraLogTestFixture, AccountEventLiquidationStepReconcilesWalletBalanceCh
     using QTrading::Dto::Trading::OrderSide;
     using QTrading::Dto::Trading::PositionSide;
     using QTrading::Dto::Market::Binance::TradeKlineDto;
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
     using QTrading::Log::FileLogger::FeatherV2::AccountEventDto;
 
     WriteBinanceCsv(
@@ -3698,7 +3873,7 @@ TEST_F(InfraLogTestFixture, AccountEventLiquidationStepReconcilesWalletBalanceCh
     BinanceExchange::StatusSnapshot post_liquidation{};
     size_t positions_before_liquidation = 0;
     size_t positions_after_liquidation = 0;
-    auto account = std::make_shared<Account>(350000.0, 0);
+    auto account = std::make_shared<AccountShim>(350000.0, 0);
     account->set_symbol_leverage("BTCUSDT", 75.0);
     ASSERT_TRUE(account->place_order("BTCUSDT", 5000.0, 500.0, OrderSide::Buy, PositionSide::Both));
     TradeKlineDto open_kline{};
@@ -3760,7 +3935,7 @@ TEST_F(InfraLogTestFixture, AccountEventAndOrderEventStayConsistentForSameFillFe
 {
     using QTrading::Dto::Trading::InstrumentType;
     using QTrading::Dto::Trading::OrderSide;
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
     using QTrading::Log::FileLogger::FeatherV2::AccountEventDto;
     using QTrading::Log::FileLogger::FeatherV2::OrderEventDto;
 
@@ -3771,8 +3946,8 @@ TEST_F(InfraLogTestFixture, AccountEventAndOrderEventStayConsistentForSameFillFe
     Account::AccountInitConfig cfg{};
     cfg.spot_initial_cash = 1000.0;
     cfg.perp_initial_wallet = 0.0;
-    auto account = std::make_shared<Account>(cfg);
-    account->set_spot_commission_mode(Account::SpotCommissionMode::BaseOnBuyQuoteOnSell);
+    auto account = std::make_shared<AccountShim>(cfg);
+    account->set_spot_commission_mode(AccountShim::SpotCommissionMode::BaseOnBuyQuoteOnSell);
 
     {
         BinanceExchange exchange(
@@ -3819,7 +3994,7 @@ TEST_F(InfraLogTestFixture, AccountEventAndOrderEventStayConsistentForSameFillFe
 
 TEST_F(InfraLogTestFixture, MarketEventCarriesTradeMarkAndIndexPricesPerSymbol)
 {
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
     using QTrading::Log::FileLogger::FeatherV2::MarketEventDto;
 
     WriteBinanceCsv(
@@ -3860,8 +4035,7 @@ TEST_F(InfraLogTestFixture, MarketEventCarriesTradeMarkAndIndexPricesPerSymbol)
                     (tmp_dir / "eth_index.csv").string() }
             },
             logger,
-            1000.0,
-            0,
+            QTrading::Infra::Exchanges::BinanceSim::Support::BuildInitConfig(1000.0, 0),
             5700u);
         auto market_channel = exchange.get_market_channel();
 
@@ -3915,7 +4089,7 @@ TEST_F(InfraLogTestFixture, MarketEventCarriesTradeMarkAndIndexPricesPerSymbol)
 
 TEST_F(InfraLogTestFixture, MarketEventUsesAbsentFlagsForMissingSymbolDataInsteadOfDefaultValues)
 {
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
     using QTrading::Log::FileLogger::FeatherV2::MarketEventDto;
 
     WriteBinanceCsv(
@@ -3933,8 +4107,7 @@ TEST_F(InfraLogTestFixture, MarketEventUsesAbsentFlagsForMissingSymbolDataInstea
                 { "ETHUSDT", (tmp_dir / "eth_missing_at_step.csv").string() }
             },
             logger,
-            1000.0,
-            0,
+            QTrading::Infra::Exchanges::BinanceSim::Support::BuildInitConfig(1000.0, 0),
             5800u);
         auto market_channel = exchange.get_market_channel();
 
@@ -3972,7 +4145,7 @@ TEST_F(InfraLogTestFixture, MarketEventUsesAbsentFlagsForMissingSymbolDataInstea
 
 TEST_F(InfraLogTestFixture, MarketEventInterpolatedMarkAndIndexUseInterpolatedSource)
 {
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
     using QTrading::Log::FileLogger::FeatherV2::MarketEventDto;
 
     WriteBinanceCsv(
@@ -4000,8 +4173,7 @@ TEST_F(InfraLogTestFixture, MarketEventInterpolatedMarkAndIndexUseInterpolatedSo
                 (tmp_dir / "interp_mark.csv").string(),
                 (tmp_dir / "interp_index.csv").string() } },
             logger,
-            1000.0,
-            0,
+            QTrading::Infra::Exchanges::BinanceSim::Support::BuildInitConfig(1000.0, 0),
             5900u);
         auto market_channel = exchange.get_market_channel();
 
@@ -4030,7 +4202,7 @@ TEST_F(InfraLogTestFixture, MarketEventInterpolatedMarkAndIndexUseInterpolatedSo
 
 TEST_F(InfraLogTestFixture, MarketEventRawMarkAndIndexUseRawSourceWhenPresent)
 {
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
     using QTrading::Log::FileLogger::FeatherV2::MarketEventDto;
 
     WriteBinanceCsv(
@@ -4052,8 +4224,7 @@ TEST_F(InfraLogTestFixture, MarketEventRawMarkAndIndexUseRawSourceWhenPresent)
                 (tmp_dir / "raw_mark.csv").string(),
                 (tmp_dir / "raw_index.csv").string() } },
             logger,
-            1000.0,
-            0,
+            QTrading::Infra::Exchanges::BinanceSim::Support::BuildInitConfig(1000.0, 0),
             6000u);
         auto market_channel = exchange.get_market_channel();
 
@@ -4083,7 +4254,7 @@ TEST_F(InfraLogTestFixture, MarketEventRawMarkAndIndexUseRawSourceWhenPresent)
 TEST_F(InfraLogTestFixture, MarketSnapshotUncertaintyBandAndBasisDiagnosticsMatchStatusSnapshot)
 {
     using QTrading::Dto::Trading::OrderSide;
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
     using QTrading::Log::FileLogger::FeatherV2::MarketEventDto;
 
     WriteBinanceCsv(
@@ -4124,8 +4295,7 @@ TEST_F(InfraLogTestFixture, MarketSnapshotUncertaintyBandAndBasisDiagnosticsMatc
                     (tmp_dir / "eth_diag_index.csv").string() }
             },
             logger,
-            1000.0,
-            0,
+            QTrading::Infra::Exchanges::BinanceSim::Support::BuildInitConfig(1000.0, 0),
             6100u);
         exchange.set_uncertainty_band_bps(20.0);
         exchange.set_mark_index_basis_thresholds_bps(500.0, 1500.0);
@@ -4173,7 +4343,7 @@ TEST_F(InfraLogTestFixture, MarketSnapshotUncertaintyBandAndBasisDiagnosticsMatc
 TEST_F(InfraLogTestFixture, FundingEventIsEmittedWhenFundingCsvHasApplicableRows)
 {
     using QTrading::Dto::Trading::OrderSide;
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
     using QTrading::Log::FileLogger::FeatherV2::FundingEventDto;
 
     WriteBinanceCsv(
@@ -4193,8 +4363,7 @@ TEST_F(InfraLogTestFixture, FundingEventIsEmittedWhenFundingCsvHasApplicableRows
                 (tmp_dir / "funding_emitted_trade.csv").string(),
                 std::optional<std::string>((tmp_dir / "funding_emitted.csv").string()) } },
             logger,
-            1000.0,
-            0,
+            QTrading::Infra::Exchanges::BinanceSim::Support::BuildInitConfig(1000.0, 0),
             6200u);
         auto market_channel = exchange.get_market_channel();
 
@@ -4220,7 +4389,7 @@ TEST_F(InfraLogTestFixture, FundingEventExplicitMarkPriceCarriesCorrectRateMarkA
 {
     using QTrading::Dto::Trading::InstrumentType;
     using QTrading::Dto::Trading::OrderSide;
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
     using QTrading::Log::FileLogger::FeatherV2::FundingEventDto;
 
     WriteBinanceCsv(
@@ -4240,8 +4409,7 @@ TEST_F(InfraLogTestFixture, FundingEventExplicitMarkPriceCarriesCorrectRateMarkA
                 (tmp_dir / "funding_explicit_trade.csv").string(),
                 std::optional<std::string>((tmp_dir / "funding_explicit.csv").string()) } },
             logger,
-            1000.0,
-            0,
+            QTrading::Infra::Exchanges::BinanceSim::Support::BuildInitConfig(1000.0, 0),
             6300u);
         auto market_channel = exchange.get_market_channel();
 
@@ -4274,7 +4442,7 @@ TEST_F(InfraLogTestFixture, FundingEventExplicitMarkPriceCarriesCorrectRateMarkA
 TEST_F(InfraLogTestFixture, FundingEventInterpolatedMarkPriceRemainsCorrectAndSourceIsInterpolated)
 {
     using QTrading::Dto::Trading::OrderSide;
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
     using QTrading::Log::FileLogger::FeatherV2::FundingEventDto;
 
     WriteBinanceCsv(
@@ -4301,8 +4469,7 @@ TEST_F(InfraLogTestFixture, FundingEventInterpolatedMarkPriceRemainsCorrectAndSo
                 std::optional<std::string>((tmp_dir / "funding_interpolated.csv").string()),
                 (tmp_dir / "funding_interpolated_mark.csv").string() } },
             logger,
-            1000.0,
-            0,
+            QTrading::Infra::Exchanges::BinanceSim::Support::BuildInitConfig(1000.0, 0),
             6400u);
         auto market_channel = exchange.get_market_channel();
 
@@ -4330,7 +4497,7 @@ TEST_F(InfraLogTestFixture, FundingEventInterpolatedMarkPriceRemainsCorrectAndSo
 TEST_F(InfraLogTestFixture, FundingEventTimingBeforeAndAfterMatchingProduceExpectedDifferences)
 {
     using QTrading::Dto::Trading::OrderSide;
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
     using QTrading::Log::FileLogger::FeatherV2::FundingEventDto;
 
     WriteBinanceCsv(
@@ -4350,8 +4517,7 @@ TEST_F(InfraLogTestFixture, FundingEventTimingBeforeAndAfterMatchingProduceExpec
             { { "BTCUSDT", (tmp_dir / "funding_timing_trade.csv").string(),
                 std::optional<std::string>((tmp_dir / "funding_timing.csv").string()) } },
             logger,
-            1000.0,
-            0,
+            QTrading::Infra::Exchanges::BinanceSim::Support::BuildInitConfig(1000.0, 0),
             6500u);
         exchange.set_funding_apply_timing(BinanceExchange::FundingApplyTiming::BeforeMatching);
         auto market_channel = exchange.get_market_channel();
@@ -4372,8 +4538,7 @@ TEST_F(InfraLogTestFixture, FundingEventTimingBeforeAndAfterMatchingProduceExpec
             { { "BTCUSDT", (tmp_dir / "funding_timing_trade.csv").string(),
                 std::optional<std::string>((tmp_dir / "funding_timing.csv").string()) } },
             logger,
-            1000.0,
-            0,
+            QTrading::Infra::Exchanges::BinanceSim::Support::BuildInitConfig(1000.0, 0),
             6501u);
         exchange.set_funding_apply_timing(BinanceExchange::FundingApplyTiming::AfterMatching);
         auto market_channel = exchange.get_market_channel();
@@ -4419,7 +4584,7 @@ TEST_F(InfraLogTestFixture, FundingEventTimingBeforeAndAfterMatchingProduceExpec
 TEST_F(InfraLogTestFixture, FundingSkippedNoMarkStatisticsStayConsistentWithFundingEvents)
 {
     using QTrading::Dto::Trading::OrderSide;
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
     using QTrading::Log::FileLogger::FeatherV2::FundingEventDto;
 
     WriteBinanceCsv(
@@ -4438,8 +4603,7 @@ TEST_F(InfraLogTestFixture, FundingSkippedNoMarkStatisticsStayConsistentWithFund
             { { "BTCUSDT", (tmp_dir / "funding_skipped_trade.csv").string(),
                 std::optional<std::string>((tmp_dir / "funding_skipped.csv").string()) } },
             logger,
-            1000.0,
-            0,
+            QTrading::Infra::Exchanges::BinanceSim::Support::BuildInitConfig(1000.0, 0),
             6600u);
         auto market_channel = exchange.get_market_channel();
 
@@ -4472,7 +4636,7 @@ TEST_F(InfraLogTestFixture, AsyncAckLatencyPublishesPendingBeforeAcceptedOrRejec
 {
     using QTrading::Dto::Trading::OrderSide;
     using QTrading::Dto::Trading::PositionSide;
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
 
     WriteBinanceCsv(
         tmp_dir / "ack_accepted.csv",
@@ -4499,8 +4663,7 @@ TEST_F(InfraLogTestFixture, AsyncAckLatencyPublishesPendingBeforeAcceptedOrRejec
                 { "ETHUSDT", (tmp_dir / "ack_rejected.csv").string() }
             },
             logger,
-            1000.0,
-            0,
+            QTrading::Infra::Exchanges::BinanceSim::Support::BuildInitConfig(1000.0, 0),
             6700u);
         exchange.set_order_latency_bars(1);
         auto market_channel = exchange.get_market_channel();
@@ -4566,7 +4729,7 @@ TEST_F(InfraLogTestFixture, PendingAsyncAckDoesNotEmitAcceptedOrderEventEarly)
 {
     using QTrading::Dto::Trading::OrderSide;
     using QTrading::Dto::Trading::PositionSide;
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
     using QTrading::Log::FileLogger::FeatherV2::OrderEventDto;
     using QTrading::Log::FileLogger::FeatherV2::OrderEventType;
 
@@ -4581,8 +4744,7 @@ TEST_F(InfraLogTestFixture, PendingAsyncAckDoesNotEmitAcceptedOrderEventEarly)
         BinanceExchange exchange(
             { { "BTCUSDT", (tmp_dir / "pending_no_event.csv").string() } },
             logger,
-            1000.0,
-            0,
+            QTrading::Infra::Exchanges::BinanceSim::Support::BuildInitConfig(1000.0, 0),
             6800u);
         exchange.set_order_latency_bars(1);
         auto market_channel = exchange.get_market_channel();
@@ -4622,7 +4784,7 @@ TEST_F(InfraLogTestFixture, PendingAsyncAckDoesNotEmitAcceptedOrderEventEarly)
 TEST_F(InfraLogTestFixture, RejectedAsyncAckCarriesRejectAndBinanceErrorDetails)
 {
     using QTrading::Dto::Trading::OrderSide;
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
 
     WriteBinanceCsv(
         tmp_dir / "ack_reject_detail.csv",
@@ -4636,8 +4798,7 @@ TEST_F(InfraLogTestFixture, RejectedAsyncAckCarriesRejectAndBinanceErrorDetails)
         BinanceExchange exchange(
             { { "BTCUSDT", (tmp_dir / "ack_reject_detail.csv").string() } },
             logger,
-            1000.0,
-            0,
+            QTrading::Infra::Exchanges::BinanceSim::Support::BuildInitConfig(1000.0, 0),
             6900u);
         exchange.set_order_latency_bars(1);
         auto market_channel = exchange.get_market_channel();
@@ -4669,7 +4830,7 @@ TEST_F(InfraLogTestFixture, AcceptedAsyncAckAppearsBeforeSnapshotAndEventVisibil
 {
     using QTrading::Dto::Trading::OrderSide;
     using QTrading::Dto::Trading::PositionSide;
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
 
     WriteBinanceCsv(
         tmp_dir / "ack_snapshot_visibility.csv",
@@ -4683,8 +4844,7 @@ TEST_F(InfraLogTestFixture, AcceptedAsyncAckAppearsBeforeSnapshotAndEventVisibil
         BinanceExchange exchange(
             { { "BTCUSDT", (tmp_dir / "ack_snapshot_visibility.csv").string() } },
             logger,
-            1000.0,
-            0,
+            QTrading::Infra::Exchanges::BinanceSim::Support::BuildInitConfig(1000.0, 0),
             7000u);
         exchange.set_order_latency_bars(1);
         auto market_channel = exchange.get_market_channel();
@@ -4726,7 +4886,7 @@ TEST_F(InfraLogTestFixture, AcceptedAsyncAckAppearsBeforeSnapshotAndEventVisibil
 TEST_F(InfraLogTestFixture, StatusSnapshotsAreEmittedBeforeSameStepEvents)
 {
     using QTrading::Dto::Trading::OrderSide;
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
     using QTrading::Log::FileLogger::FeatherV2::AccountEventDto;
     using QTrading::Log::FileLogger::FeatherV2::FundingEventDto;
     using QTrading::Log::FileLogger::FeatherV2::MarketEventDto;
@@ -4747,8 +4907,7 @@ TEST_F(InfraLogTestFixture, StatusSnapshotsAreEmittedBeforeSameStepEvents)
         BinanceExchange exchange(
             { { "BTCUSDT", (tmp_dir / QTrading::Infra::Tests::ReplaySemanticsPinning::kStatusSnapshotsBeforeEventsTradeCsv).string() } },
             logger,
-            1000.0,
-            0,
+            QTrading::Infra::Exchanges::BinanceSim::Support::BuildInitConfig(1000.0, 0),
             QTrading::Infra::Tests::ReplaySemanticsPinning::kStatusSnapshotsBeforeEvents.run_id);
         auto market_channel = exchange.get_market_channel();
 
@@ -4822,7 +4981,7 @@ TEST_F(InfraLogTestFixture, StatusSnapshotsAreEmittedBeforeSameStepEvents)
 TEST_F(InfraLogTestFixture, EventModulesPreserveMarketFundingAccountPositionOrderOrdering)
 {
     using QTrading::Dto::Trading::OrderSide;
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
     using QTrading::Log::FileLogger::FeatherV2::AccountEventDto;
     using QTrading::Log::FileLogger::FeatherV2::FundingEventDto;
     using QTrading::Log::FileLogger::FeatherV2::MarketEventDto;
@@ -4852,8 +5011,7 @@ TEST_F(InfraLogTestFixture, EventModulesPreserveMarketFundingAccountPositionOrde
                 (tmp_dir / QTrading::Infra::Tests::ReplaySemanticsPinning::kEventModuleOrderingTradeCsv).string(),
                 (tmp_dir / QTrading::Infra::Tests::ReplaySemanticsPinning::kEventModuleOrderingFundingCsv).string() } },
             logger,
-            1000.0,
-            0,
+            QTrading::Infra::Exchanges::BinanceSim::Support::BuildInitConfig(1000.0, 0),
             QTrading::Infra::Tests::ReplaySemanticsPinning::kEventModuleOrdering.run_id);
         auto market_channel = exchange.get_market_channel();
 
@@ -4924,7 +5082,7 @@ TEST_F(InfraLogTestFixture, EventModulesPreserveMarketFundingAccountPositionOrde
 TEST_F(InfraLogTestFixture, AsyncAckPendingResolvedAndRejectMappingStayStable)
 {
     using QTrading::Dto::Trading::OrderSide;
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
     using QTrading::Log::FileLogger::FeatherV2::OrderEventDto;
     using QTrading::Log::FileLogger::FeatherV2::OrderEventType;
 
@@ -4947,8 +5105,7 @@ TEST_F(InfraLogTestFixture, AsyncAckPendingResolvedAndRejectMappingStayStable)
         BinanceExchange exchange(
             { { "BTCUSDT", (tmp_dir / QTrading::Infra::Tests::ReplaySemanticsPinning::kAsyncAckRejectMappingTradeCsv).string() } },
             logger,
-            1000.0,
-            0,
+            QTrading::Infra::Exchanges::BinanceSim::Support::BuildInitConfig(1000.0, 0),
             QTrading::Infra::Tests::ReplaySemanticsPinning::kAsyncAckRejectMapping.run_id);
         exchange.set_order_latency_bars(1);
         auto market_channel = exchange.get_market_channel();
@@ -4995,7 +5152,7 @@ TEST_F(InfraLogTestFixture, AsyncAckPendingResolvedAndRejectMappingStayStable)
 TEST_F(InfraLogTestFixture, FundingAndFillSameStepBeforeAfterMatchingRemainStable)
 {
     using QTrading::Dto::Trading::OrderSide;
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
     using QTrading::Log::FileLogger::FeatherV2::FundingEventDto;
 
     SCOPED_TRACE(::testing::Message()
@@ -5026,8 +5183,7 @@ TEST_F(InfraLogTestFixture, FundingAndFillSameStepBeforeAfterMatchingRemainStabl
             { { "BTCUSDT", (tmp_dir / QTrading::Infra::Tests::ReplaySemanticsPinning::kFundingFillSameStepTradeCsv).string(),
                 std::optional<std::string>((tmp_dir / QTrading::Infra::Tests::ReplaySemanticsPinning::kFundingFillSameStepFundingCsv).string()) } },
             logger,
-            1000.0,
-            0,
+            QTrading::Infra::Exchanges::BinanceSim::Support::BuildInitConfig(1000.0, 0),
             run_id);
         exchange.set_funding_apply_timing(timing);
         auto market_channel = exchange.get_market_channel();
@@ -5100,7 +5256,7 @@ TEST_F(InfraLogTestFixture, LiquidationSyntheticFillContractRemainsVisible)
     using QTrading::Dto::Market::Binance::TradeKlineDto;
     using QTrading::Dto::Trading::OrderSide;
     using QTrading::Dto::Trading::PositionSide;
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
     using QTrading::Log::FileLogger::FeatherV2::AccountEventDto;
     using QTrading::Log::FileLogger::FeatherV2::PositionEventDto;
 
@@ -5117,7 +5273,7 @@ TEST_F(InfraLogTestFixture, LiquidationSyntheticFillContractRemainsVisible)
         tmp_dir / QTrading::Infra::Tests::ReplaySemanticsPinning::kLiquidationSyntheticFillMarkCsv,
         { { 0u, 1.0, 1.0, 1.0, 1.0, 10000.0, 30000u, 10000.0, 1, 0.0, 0.0 } });
 
-    auto account = std::make_shared<Account>(350000.0, 0);
+    auto account = std::make_shared<AccountShim>(350000.0, 0);
     account->set_symbol_leverage("BTCUSDT", 75.0);
     ASSERT_TRUE(account->place_order("BTCUSDT", 5000.0, 500.0, OrderSide::Buy, PositionSide::Both));
     TradeKlineDto open_kline{};
@@ -5197,7 +5353,7 @@ TEST_F(InfraLogTestFixture, LiquidationSyntheticFillContractRemainsVisible)
 TEST_F(InfraLogTestFixture, MarketEventAndFundingEventKeepExistingArrivalOrderWithinSingleStep)
 {
     using QTrading::Dto::Trading::OrderSide;
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
     using QTrading::Log::FileLogger::FeatherV2::FundingEventDto;
     using QTrading::Log::FileLogger::FeatherV2::MarketEventDto;
 
@@ -5218,8 +5374,7 @@ TEST_F(InfraLogTestFixture, MarketEventAndFundingEventKeepExistingArrivalOrderWi
                 (tmp_dir / "event_order_market.csv").string(),
                 (tmp_dir / "event_order_funding.csv").string() } },
             logger,
-            1000.0,
-            0,
+            QTrading::Infra::Exchanges::BinanceSim::Support::BuildInitConfig(1000.0, 0),
             7100u);
         auto market_channel = exchange.get_market_channel();
 
@@ -5260,7 +5415,7 @@ TEST_F(InfraLogTestFixture, MarketEventAndFundingEventKeepExistingArrivalOrderWi
 TEST_F(InfraLogTestFixture, OrderPositionAndAccountEventKeepExistingArrivalOrderWithinSingleStep)
 {
     using QTrading::Dto::Trading::OrderSide;
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
 
     WriteBinanceCsv(
         tmp_dir / "event_order_fill.csv",
@@ -5270,8 +5425,7 @@ TEST_F(InfraLogTestFixture, OrderPositionAndAccountEventKeepExistingArrivalOrder
         BinanceExchange exchange(
             { { "BTCUSDT", (tmp_dir / "event_order_fill.csv").string() } },
             logger,
-            1000.0,
-            0,
+            QTrading::Infra::Exchanges::BinanceSim::Support::BuildInitConfig(1000.0, 0),
             7200u);
         auto market_channel = exchange.get_market_channel();
 
@@ -5296,7 +5450,7 @@ TEST_F(InfraLogTestFixture, OrderPositionAndAccountEventKeepExistingArrivalOrder
 TEST_F(InfraLogTestFixture, SnapshotLogAndEventLogKeepExistingArrivalOrderWithinSingleStep)
 {
     using QTrading::Dto::Trading::OrderSide;
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
 
     WriteBinanceCsv(
         tmp_dir / "event_snapshot_vs_event.csv",
@@ -5306,8 +5460,7 @@ TEST_F(InfraLogTestFixture, SnapshotLogAndEventLogKeepExistingArrivalOrderWithin
         BinanceExchange exchange(
             { { "BTCUSDT", (tmp_dir / "event_snapshot_vs_event.csv").string() } },
             logger,
-            1000.0,
-            0,
+            QTrading::Infra::Exchanges::BinanceSim::Support::BuildInitConfig(1000.0, 0),
             7300u);
         auto market_channel = exchange.get_market_channel();
 
@@ -5341,7 +5494,7 @@ TEST_F(InfraLogTestFixture, LiquidationStepKeepsExistingEventArrivalOrder)
     using QTrading::Dto::Market::Binance::TradeKlineDto;
     using QTrading::Dto::Trading::OrderSide;
     using QTrading::Dto::Trading::PositionSide;
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
 
     WriteBinanceCsv(
         tmp_dir / "event_liquidation_trade.csv",
@@ -5351,7 +5504,7 @@ TEST_F(InfraLogTestFixture, LiquidationStepKeepsExistingEventArrivalOrder)
         { { 0u, 1.0, 1.0, 1.0, 1.0, 10000.0, 30000u, 10000.0, 1, 0.0, 0.0 } });
 
     size_t positions_after_liquidation = 0;
-    auto account = std::make_shared<Account>(350000.0, 0);
+    auto account = std::make_shared<AccountShim>(350000.0, 0);
     account->set_symbol_leverage("BTCUSDT", 75.0);
     ASSERT_TRUE(account->place_order("BTCUSDT", 5000.0, 500.0, OrderSide::Buy, PositionSide::Both));
     TradeKlineDto open_kline{};
@@ -5409,7 +5562,7 @@ TEST_F(InfraLogTestFixture, FundingAndFillInSameStepKeepExistingEventArrivalOrde
     using QTrading::Log::FileLogger::FeatherV2::MarketEventDto;
     using QTrading::Log::FileLogger::FeatherV2::OrderEventDto;
     using QTrading::Log::FileLogger::FeatherV2::PositionEventDto;
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
 
     WriteBinanceCsv(
         tmp_dir / "event_funding_fill_trade.csv",
@@ -5428,8 +5581,7 @@ TEST_F(InfraLogTestFixture, FundingAndFillInSameStepKeepExistingEventArrivalOrde
                 (tmp_dir / "event_funding_fill_trade.csv").string(),
                 (tmp_dir / "event_funding_fill_funding.csv").string() } },
             logger,
-            1000.0,
-            0,
+            QTrading::Infra::Exchanges::BinanceSim::Support::BuildInitConfig(1000.0, 0),
             7500u);
         auto market_channel = exchange.get_market_channel();
 
@@ -5501,7 +5653,7 @@ TEST_F(InfraLogTestFixture, FundingAndFillInSameStepKeepExistingEventArrivalOrde
 TEST_F(InfraLogTestFixture, PositionSnapshotReplayMatchesRuntimePositionsAtEachStep)
 {
     using QTrading::Dto::Trading::OrderSide;
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
 
     struct RuntimePositionsAtTs {
         uint64_t ts{};
@@ -5521,8 +5673,7 @@ TEST_F(InfraLogTestFixture, PositionSnapshotReplayMatchesRuntimePositionsAtEachS
         BinanceExchange exchange(
             { { "BTCUSDT", (tmp_dir / "runtime_positions.csv").string() } },
             logger,
-            1000.0,
-            0,
+            QTrading::Infra::Exchanges::BinanceSim::Support::BuildInitConfig(1000.0, 0),
             7600u);
         auto market_channel = exchange.get_market_channel();
 
@@ -5570,7 +5721,7 @@ TEST_F(InfraLogTestFixture, PositionSnapshotReplayMatchesRuntimePositionsAtEachS
 TEST_F(InfraLogTestFixture, OrderSnapshotReplayMatchesRuntimeOpenOrdersAtEachStep)
 {
     using QTrading::Dto::Trading::OrderSide;
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
 
     struct RuntimeOrdersAtTs {
         uint64_t ts{};
@@ -5590,8 +5741,7 @@ TEST_F(InfraLogTestFixture, OrderSnapshotReplayMatchesRuntimeOpenOrdersAtEachSte
         BinanceExchange exchange(
             { { "BTCUSDT", (tmp_dir / "runtime_orders.csv").string() } },
             logger,
-            1000.0,
-            0,
+            QTrading::Infra::Exchanges::BinanceSim::Support::BuildInitConfig(1000.0, 0),
             7700u);
         auto market_channel = exchange.get_market_channel();
 
@@ -5647,7 +5797,7 @@ TEST_F(InfraLogTestFixture, OrderSnapshotReplayMatchesRuntimeOpenOrdersAtEachSte
 TEST_F(InfraLogTestFixture, AccountSnapshotLogMatchesFillStatusSnapshotPerChangedStep)
 {
     using QTrading::Dto::Trading::OrderSide;
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
 
     struct RuntimeAccountAtTs {
         uint64_t ts{};
@@ -5667,8 +5817,7 @@ TEST_F(InfraLogTestFixture, AccountSnapshotLogMatchesFillStatusSnapshotPerChange
         BinanceExchange exchange(
             { { "BTCUSDT", (tmp_dir / "runtime_account.csv").string() } },
             logger,
-            1000.0,
-            0,
+            QTrading::Infra::Exchanges::BinanceSim::Support::BuildInitConfig(1000.0, 0),
             7800u);
         auto market_channel = exchange.get_market_channel();
 
@@ -5723,7 +5872,7 @@ TEST_F(InfraLogTestFixture, AccountSnapshotLogMatchesFillStatusSnapshotPerChange
 TEST_F(InfraLogTestFixture, AggregatedFillFeesMatchAccountWalletChange)
 {
     using QTrading::Dto::Trading::OrderSide;
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
     using QTrading::Log::FileLogger::FeatherV2::AccountEventDto;
     using QTrading::Log::FileLogger::FeatherV2::OrderEventDto;
     using QTrading::Log::FileLogger::FeatherV2::OrderEventType;
@@ -5741,8 +5890,7 @@ TEST_F(InfraLogTestFixture, AggregatedFillFeesMatchAccountWalletChange)
         BinanceExchange exchange(
             { { "BTCUSDT", (tmp_dir / "runtime_fill_fees.csv").string() } },
             logger,
-            1000.0,
-            0,
+            QTrading::Infra::Exchanges::BinanceSim::Support::BuildInitConfig(1000.0, 0),
             7900u);
         auto market_channel = exchange.get_market_channel();
 
@@ -5787,7 +5935,7 @@ TEST_F(InfraLogTestFixture, AggregatedFillFeesMatchAccountWalletChange)
 TEST_F(InfraLogTestFixture, AggregatedFundingEventsMatchAccountEventAndSnapshotWalletChange)
 {
     using QTrading::Dto::Trading::OrderSide;
-    using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+    using BinanceExchange = BinanceExchangeCompat;
     using QTrading::Log::FileLogger::FeatherV2::AccountEventDto;
     using QTrading::Log::FileLogger::FeatherV2::FundingEventDto;
 
@@ -5814,8 +5962,7 @@ TEST_F(InfraLogTestFixture, AggregatedFundingEventsMatchAccountEventAndSnapshotW
                 (tmp_dir / "runtime_funding_trade.csv").string(),
                 (tmp_dir / "runtime_funding.csv").string() } },
             logger,
-            1000.0,
-            0,
+            QTrading::Infra::Exchanges::BinanceSim::Support::BuildInitConfig(1000.0, 0),
             8000u);
         auto market_channel = exchange.get_market_channel();
 
@@ -5859,3 +6006,7 @@ TEST_F(InfraLogTestFixture, AggregatedFundingEventsMatchAccountEventAndSnapshotW
     EXPECT_NEAR(final_snap.wallet_balance - initial_snap.wallet_balance, funding_sum, 1e-9);
     EXPECT_NEAR(funding_wallet_delta_sum, funding_sum, 1e-9);
 }
+
+
+
+
