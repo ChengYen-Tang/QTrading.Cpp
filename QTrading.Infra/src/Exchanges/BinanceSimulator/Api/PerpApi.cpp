@@ -1,6 +1,10 @@
+#include <cmath>
+
 #include "Exchanges/BinanceSimulator/BinanceExchange.hpp"
 #include "Exchanges/BinanceSimulator/Application/OrderCommandKernel.hpp"
+#include "Exchanges/BinanceSimulator/State/BinanceExchangeRuntimeState.hpp"
 #include "Exchanges/BinanceSimulator/Support/BinanceExchangeSkeletonSupport.hpp"
+#include "Exchanges/BinanceSimulator/State/StepKernelState.hpp"
 
 namespace QTrading::Infra::Exchanges::BinanceSim::Api {
 
@@ -67,14 +71,47 @@ double PerpApi::get_symbol_leverage(const std::string& symbol) const
 
 namespace QTrading::Infra::Exchanges::BinanceSim {
 
-void BinanceExchange::set_symbol_leverage(const std::string&, double)
+namespace {
+
+bool is_spot_symbol(
+    const State::StepKernelState& step_state,
+    const std::string& symbol)
 {
-    // Leverage is not modeled in the current hard-prune skeleton.
+    const auto it = step_state.symbol_to_id.find(symbol);
+    if (it == step_state.symbol_to_id.end()) {
+        return false;
+    }
+    const size_t symbol_id = it->second;
+    if (symbol_id >= step_state.symbol_instrument_type_by_id.size()) {
+        return false;
+    }
+    return step_state.symbol_instrument_type_by_id[symbol_id] ==
+        QTrading::Dto::Trading::InstrumentType::Spot;
 }
 
-double BinanceExchange::get_symbol_leverage(const std::string&) const
+} // namespace
+
+void BinanceExchange::set_symbol_leverage(const std::string& symbol, double new_leverage)
 {
-    return 1.0;
+    if (!(new_leverage > 0.0) || !std::isfinite(new_leverage)) {
+        return;
+    }
+    if (is_spot_symbol(*step_kernel_state_, symbol)) {
+        return;
+    }
+    runtime_state_->symbol_leverage[symbol] = new_leverage;
+}
+
+double BinanceExchange::get_symbol_leverage(const std::string& symbol) const
+{
+    if (is_spot_symbol(*step_kernel_state_, symbol)) {
+        return 1.0;
+    }
+    const auto it = runtime_state_->symbol_leverage.find(symbol);
+    if (it == runtime_state_->symbol_leverage.end()) {
+        return 1.0;
+    }
+    return it->second;
 }
 
 } // namespace QTrading::Infra::Exchanges::BinanceSim

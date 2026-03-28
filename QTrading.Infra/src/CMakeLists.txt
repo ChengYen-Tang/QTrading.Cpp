@@ -1,5 +1,6 @@
 add_library(QTrading.Infra.Library STATIC
   Exchanges/BinanceSimulator/Account/Account.cpp
+  Exchanges/BinanceSimulator/Account/AccountPolicies.cpp
   Data/Binance/FundingRateData.cpp
   Exchanges/BinanceSimulator/Adapters/AccountFacadeAdapter.cpp
   Data/Binance/MarketData.cpp

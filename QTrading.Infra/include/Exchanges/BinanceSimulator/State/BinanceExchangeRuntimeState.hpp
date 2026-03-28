@@ -3,6 +3,8 @@
 #include <deque>
 #include <memory>
 #include <optional>
+#include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "Dto/Order.hpp"
@@ -23,6 +25,7 @@ struct BinanceExchangeRuntimeState {
     std::vector<QTrading::dto::Position> positions;
     std::vector<QTrading::dto::Order> orders;
     std::vector<Contracts::AsyncOrderAck> async_order_acks;
+    std::unordered_map<std::string, double> symbol_leverage;
     Contracts::StatusSnapshot last_status_snapshot{};
     Contracts::EventPublishMode event_publish_mode{ Contracts::EventPublishMode::LegacyDirect };
     Contracts::SideEffectAdapterConfig side_effect_adapters{};

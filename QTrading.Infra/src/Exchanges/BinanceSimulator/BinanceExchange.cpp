@@ -97,6 +97,7 @@ void BinanceExchange::initialize_step_kernel_state_(const std::vector<SymbolData
     step_kernel_state_->run_id = run_id;
     step_kernel_state_->symbols.reserve(datasets.size());
     step_kernel_state_->symbol_to_id.reserve(datasets.size());
+    step_kernel_state_->symbol_instrument_type_by_id.reserve(datasets.size());
     step_kernel_state_->market_data.reserve(datasets.size());
     step_kernel_state_->funding_data_pool.reserve(datasets.size());
     step_kernel_state_->mark_data_pool.reserve(datasets.size());
@@ -122,6 +123,8 @@ void BinanceExchange::initialize_step_kernel_state_(const std::vector<SymbolData
         const auto& ds = datasets[i];
         step_kernel_state_->symbols.push_back(ds.symbol);
         step_kernel_state_->symbol_to_id.emplace(ds.symbol, i);
+        step_kernel_state_->symbol_instrument_type_by_id.push_back(
+            ds.instrument_type.value_or(QTrading::Dto::Trading::InstrumentType::Perp));
         step_kernel_state_->market_data.emplace_back(ds.symbol, ds.kline_csv);
         if (ds.funding_csv.has_value()) {
             step_kernel_state_->funding_data_id_by_symbol[i] =

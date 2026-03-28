@@ -1,6 +1,7 @@
 #include "Exchanges/BinanceSimulator/Domain/AccountPolicyExecutionService.hpp"
 
 #include <cmath>
+#include <unordered_map>
 #include <utility>
 
 namespace QTrading::Infra::Exchanges::BinanceSim::Domain {
@@ -83,10 +84,22 @@ AccountPolicyUpdateResult AccountPolicyExecutionService::ApplyUpdates(
 
     std::vector<QTrading::dto::Order> remaining_orders{};
     remaining_orders.reserve(open_orders.size());
+    std::unordered_map<std::string, double> remaining_volume_by_symbol{};
+    remaining_volume_by_symbol.reserve(symbol_kline.size());
 
     for (const auto& order : open_orders) {
         const auto kline_it = symbol_kline.find(order.symbol);
         if (kline_it == symbol_kline.end()) {
+            remaining_orders.push_back(order);
+            continue;
+        }
+        auto volume_it = remaining_volume_by_symbol.find(order.symbol);
+        if (volume_it == remaining_volume_by_symbol.end()) {
+            volume_it = remaining_volume_by_symbol.emplace(
+                order.symbol,
+                std::max(0.0, kline_it->second.Volume)).first;
+        }
+        if (volume_it->second <= 0.0) {
             remaining_orders.push_back(order);
             continue;
         }
@@ -108,6 +121,13 @@ AccountPolicyUpdateResult AccountPolicyExecutionService::ApplyUpdates(
             continue;
         }
 
+        const double fill_quantity = std::min(order.quantity, volume_it->second);
+        if (!(fill_quantity > 0.0)) {
+            remaining_orders.push_back(order);
+            continue;
+        }
+        volume_it->second -= fill_quantity;
+
         double fill_price = default_execution_price(order, kline_it->second);
         if (policies.execution_price_ctx) {
             fill_price = policies.execution_price_ctx(order, market_context, 0.0, 0.0);
@@ -121,7 +141,7 @@ AccountPolicyUpdateResult AccountPolicyExecutionService::ApplyUpdates(
         const double taker_fee_rate = std::get<1>(fee_rates);
         const double fee_rate = can_fill_and_taker.second ? taker_fee_rate : maker_fee_rate;
 
-        const double notional = order.quantity * fill_price;
+        const double notional = fill_quantity * fill_price;
         const double fee = notional * fee_rate;
         result.perp_wallet_delta -= fee;
 
@@ -132,7 +152,7 @@ AccountPolicyUpdateResult AccountPolicyExecutionService::ApplyUpdates(
         position.id = static_cast<int>(positions.size() + 1);
         position.order_id = order.id;
         position.symbol = order.symbol;
-        position.quantity = order.quantity;
+        position.quantity = fill_quantity;
         position.entry_price = fill_price;
         position.is_long = order.side == QTrading::Dto::Trading::OrderSide::Buy;
         position.unrealized_pnl = 0.0;
@@ -144,6 +164,11 @@ AccountPolicyUpdateResult AccountPolicyExecutionService::ApplyUpdates(
         position.fee_rate = fee_rate;
         position.instrument_type = QTrading::Dto::Trading::InstrumentType::Perp;
         positions.push_back(std::move(position));
+        if (fill_quantity + 1e-12 < order.quantity) {
+            QTrading::dto::Order remaining = order;
+            remaining.quantity = order.quantity - fill_quantity;
+            remaining_orders.push_back(std::move(remaining));
+        }
         ++result.filled_count;
     }
 
@@ -152,4 +177,3 @@ AccountPolicyUpdateResult AccountPolicyExecutionService::ApplyUpdates(
 }
 
 } // namespace QTrading::Infra::Exchanges::BinanceSim::Domain
-
