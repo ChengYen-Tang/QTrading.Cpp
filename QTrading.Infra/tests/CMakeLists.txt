@@ -10,6 +10,7 @@ add_executable(QTrading.Infra.Tests
   Exchanges/BinanceSimulator/BinanceExchangeReplayTests.cpp
   Exchanges/BinanceSimulator/BinanceExchangeTests.cpp
   Exchanges/BinanceSimulator/PerformanceGuardrailTests.cpp
+  InfraLogFeatherRoundTripTests.cpp
 )
 
 target_include_directories(QTrading.Infra.Tests

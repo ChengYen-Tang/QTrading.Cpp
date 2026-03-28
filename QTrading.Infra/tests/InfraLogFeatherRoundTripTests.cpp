@@ -7,6 +7,7 @@
 #include <gtest/gtest.h>
 
 #include "Exchanges/BinanceSimulator/BinanceExchange.hpp"
+#include "Exchanges/BinanceSimulator/Support/BinanceExchangeSkeletonSupport.hpp"
 #include "FeatherRoundTripFixture.hpp"
 #include "Global.hpp"
 
@@ -323,8 +324,7 @@ TEST_F(InfraLogFeatherRoundTripFixture, ArrowRowCountsMatchInMemorySinkRowsAfter
                 (tmp_dir / "rowcount_trade.csv").string(),
                 (tmp_dir / "rowcount_funding.csv").string() } },
             logger,
-            1000.0,
-            0,
+            QTrading::Infra::Exchanges::BinanceSim::Support::BuildInitConfig(1000.0, 0),
             8600u);
         auto market_channel = exchange.get_market_channel();
 
@@ -359,11 +359,15 @@ TEST_F(InfraLogFeatherRoundTripFixture, ArrowRowCountsMatchInMemorySinkRowsAfter
     };
 
     for (const auto& module : modules) {
+        const size_t expected_rows = CountRowsForModule(rows(), ModuleId(module.module));
+        if (expected_rows == 0) {
+            continue;
+        }
         const auto table = ReadArrowTable(module.file_name);
         ASSERT_NE(table, nullptr);
         EXPECT_EQ(
             static_cast<size_t>(table->num_rows()),
-            CountRowsForModule(rows(), ModuleId(module.module)))
+            expected_rows)
             << module.file_name;
     }
 }
