@@ -75,6 +75,9 @@ struct StepKernelState {
     uint32_t log_module_account_id{ 0 };
     uint32_t log_module_market_event_id{ 0 };
     uint32_t log_module_funding_event_id{ 0 };
+    uint32_t log_module_account_event_id{ 0 };
+    uint32_t log_module_position_event_id{ 0 };
+    uint32_t log_module_order_event_id{ 0 };
     bool has_resolved_log_module_ids{ false };
     uint64_t last_published_account_state_version{ 0 };
     std::vector<QTrading::dto::Position> last_published_positions;

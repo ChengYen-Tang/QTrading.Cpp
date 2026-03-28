@@ -28,6 +28,9 @@
 #include "Exchanges/BinanceSimulator/State/StepKernelState.hpp"
 #include "FileLogger/FeatherV2/FundingEvent.hpp"
 #include "FileLogger/FeatherV2/MarketEvent.hpp"
+#include "FileLogger/FeatherV2/AccountEvent.hpp"
+#include "FileLogger/FeatherV2/PositionEvent.hpp"
+#include "FileLogger/FeatherV2/OrderEvent.hpp"
 #include "Global.hpp"
 #include "Logging/StepLogContext.hpp"
 #include "Enum/LogModule.hpp"
@@ -459,6 +462,12 @@ void resolve_log_module_ids_if_needed(
         QTrading::Log::LogModuleToString(QTrading::Log::LogModule::MarketEvent));
     step_state.log_module_funding_event_id = logger->GetModuleId(
         QTrading::Log::LogModuleToString(QTrading::Log::LogModule::FundingEvent));
+    step_state.log_module_account_event_id = logger->GetModuleId(
+        QTrading::Log::LogModuleToString(QTrading::Log::LogModule::AccountEvent));
+    step_state.log_module_position_event_id = logger->GetModuleId(
+        QTrading::Log::LogModuleToString(QTrading::Log::LogModule::PositionEvent));
+    step_state.log_module_order_event_id = logger->GetModuleId(
+        QTrading::Log::LogModuleToString(QTrading::Log::LogModule::OrderEvent));
     step_state.has_resolved_log_module_ids = true;
 }
 
@@ -581,6 +590,7 @@ void emit_market_funding_events(
     ctx.run_id = step_state.run_id;
     ctx.step_seq = observable_ctx.step_seq;
     ctx.ts_exchange = observable_ctx.ts_exchange;
+    ctx.event_seq = 1;
     ctx.ts_local = observable_ctx.ts_exchange;
 
     const auto& payload = *observable_ctx.market_payload;
@@ -696,6 +706,138 @@ void emit_market_funding_events(
     }
 }
 
+void emit_account_position_order_events(
+    const State::BinanceExchangeRuntimeState& runtime_state,
+    const Account& account,
+    const Output::StepObservableContext& observable_ctx,
+    const State::StepKernelState& step_state,
+    const std::shared_ptr<QTrading::Log::Logger>& logger)
+{
+    if (!logger) {
+        return;
+    }
+
+    Logging::StepLogContext ctx{};
+    ctx.run_id = step_state.run_id;
+    ctx.step_seq = observable_ctx.step_seq;
+    ctx.ts_exchange = observable_ctx.ts_exchange;
+    ctx.event_seq = 1;
+    ctx.ts_local = observable_ctx.ts_exchange;
+
+    const auto perp = account.get_perp_balance();
+    const auto spot = account.get_spot_balance();
+
+    if (step_state.log_module_account_event_id != QTrading::Log::Logger::kInvalidModuleId) {
+        QTrading::Log::FileLogger::FeatherV2::AccountEventDto account_event{};
+        account_event.run_id = ctx.run_id;
+        account_event.step_seq = ctx.step_seq;
+        account_event.event_seq = ctx.next_event_seq();
+        account_event.ts_local = ctx.ts_local;
+        account_event.ledger = static_cast<int32_t>(
+            QTrading::Log::FileLogger::FeatherV2::AccountLedger::Both);
+        account_event.event_type = static_cast<int32_t>(
+            QTrading::Log::FileLogger::FeatherV2::AccountEventType::BalanceSnapshot);
+        account_event.wallet_balance_after = perp.WalletBalance;
+        account_event.margin_balance_after = perp.Equity;
+        account_event.available_balance_after = std::max(
+            0.0,
+            perp.WalletBalance - perp.PositionInitialMargin - runtime_state.perp_open_order_initial_margin);
+        account_event.perp_wallet_balance_after = perp.WalletBalance;
+        account_event.perp_margin_balance_after = perp.Equity;
+        account_event.perp_available_balance_after = account_event.available_balance_after;
+        account_event.spot_wallet_balance_after = spot.WalletBalance;
+        account_event.spot_available_balance_after = std::max(
+            0.0,
+            spot.WalletBalance - spot.PositionInitialMargin - runtime_state.spot_open_order_initial_margin);
+        account_event.spot_inventory_value_after = 0.0;
+        account_event.spot_ledger_value_after =
+            account_event.spot_wallet_balance_after + account_event.spot_inventory_value_after;
+        account_event.total_cash_balance_after = account.get_total_cash_balance();
+        account_event.total_ledger_value_after =
+            account_event.perp_margin_balance_after + account_event.spot_ledger_value_after;
+        (void)logger->Log(step_state.log_module_account_event_id, account_event);
+    }
+
+    if (step_state.log_module_position_event_id != QTrading::Log::Logger::kInvalidModuleId) {
+        for (const auto& position : runtime_state.positions) {
+            QTrading::Log::FileLogger::FeatherV2::PositionEventDto event{};
+            event.run_id = ctx.run_id;
+            event.step_seq = ctx.step_seq;
+            event.event_seq = ctx.next_event_seq();
+            event.ts_local = ctx.ts_local;
+            event.position_id = position.id;
+            event.source_order_id = position.order_id;
+            event.symbol = position.symbol;
+            event.instrument_type = static_cast<int32_t>(position.instrument_type);
+            event.is_long = position.is_long;
+            event.event_type = static_cast<int32_t>(
+                QTrading::Log::FileLogger::FeatherV2::PositionEventType::Snapshot);
+            event.qty = position.quantity;
+            event.entry_price = position.entry_price;
+            event.notional = position.notional;
+            event.unrealized_pnl = position.unrealized_pnl;
+            event.initial_margin = position.initial_margin;
+            event.maintenance_margin = position.maintenance_margin;
+            event.leverage = position.leverage;
+            event.fee = position.fee;
+            event.fee_rate = position.fee_rate;
+            (void)logger->Log(step_state.log_module_position_event_id, event);
+        }
+    }
+
+    if (step_state.log_module_order_event_id != QTrading::Log::Logger::kInvalidModuleId) {
+        bool emitted_order_event = false;
+        for (const auto& order : runtime_state.orders) {
+            QTrading::Log::FileLogger::FeatherV2::OrderEventDto event{};
+            event.run_id = ctx.run_id;
+            event.step_seq = ctx.step_seq;
+            event.event_seq = ctx.next_event_seq();
+            event.ts_local = ctx.ts_local;
+            event.order_id = order.id;
+            event.symbol = order.symbol;
+            event.instrument_type = static_cast<int32_t>(order.instrument_type);
+            event.event_type = static_cast<int32_t>(
+                QTrading::Log::FileLogger::FeatherV2::OrderEventType::Accepted);
+            event.side = static_cast<int32_t>(order.side);
+            event.position_side = static_cast<int32_t>(order.position_side);
+            event.reduce_only = order.reduce_only;
+            event.close_position = order.close_position;
+            event.quote_order_qty = order.quote_order_qty;
+            event.qty = order.quantity;
+            event.price = order.price;
+            event.remaining_qty = order.quantity;
+            event.closing_position_id = order.closing_position_id;
+            (void)logger->Log(step_state.log_module_order_event_id, event);
+            emitted_order_event = true;
+        }
+        if (!emitted_order_event) {
+            for (const auto& position : runtime_state.positions) {
+                QTrading::Log::FileLogger::FeatherV2::OrderEventDto event{};
+                event.run_id = ctx.run_id;
+                event.step_seq = ctx.step_seq;
+                event.event_seq = ctx.next_event_seq();
+                event.ts_local = ctx.ts_local;
+                event.order_id = position.order_id;
+                event.symbol = position.symbol;
+                event.instrument_type = static_cast<int32_t>(position.instrument_type);
+                event.event_type = static_cast<int32_t>(
+                    QTrading::Log::FileLogger::FeatherV2::OrderEventType::Filled);
+                event.side = static_cast<int32_t>(
+                    position.is_long
+                        ? QTrading::Dto::Trading::OrderSide::Buy
+                        : QTrading::Dto::Trading::OrderSide::Sell);
+                event.position_side = static_cast<int32_t>(QTrading::Dto::Trading::PositionSide::Both);
+                event.qty = position.quantity;
+                event.exec_qty = position.quantity;
+                event.exec_price = position.entry_price;
+                event.remaining_qty = 0.0;
+                (void)logger->Log(step_state.log_module_order_event_id, event);
+                emitted_order_event = true;
+            }
+        }
+    }
+}
+
 void emit_reduced_step_logs(
     const State::BinanceExchangeRuntimeState& runtime_state,
     State::StepKernelState& step_state,
@@ -718,13 +860,13 @@ void emit_reduced_step_logs(
         logger,
         observable_ctx.account_state_version,
         step_state);
-    // Reduced-scope decision:
-    // - AccountEvent/PositionEvent/OrderEvent modules are intentionally not restored
-    //   yet for current kernel, to avoid implying full logger parity.
-    // - Event version debounce therefore applies to status snapshot only.
-    // - Market/Funding events remain per-step and are not suppressed by account
-    //   version gate in this reduced pipeline.
     emit_market_funding_events(step_state, runtime_state, observable_ctx, logger);
+    emit_account_position_order_events(
+        runtime_state,
+        account,
+        observable_ctx,
+        step_state,
+        logger);
 }
 
 } // namespace

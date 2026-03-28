@@ -9,6 +9,7 @@
 #include <gtest/gtest.h>
 
 #include "Exchanges/BinanceSimulator/BinanceExchange.hpp"
+#include "Exchanges/BinanceSimulator/Support/BinanceExchangeSkeletonSupport.hpp"
 #include "../../InfraLogTestFixture.hpp"
 
 using namespace QTrading::Infra::Exchanges::BinanceSim;
@@ -67,7 +68,10 @@ TEST_F(BinanceExchangeLogTestFixture, BinanceExchangeLogUsesSinkLogger)
     });
 
     {
-        BinanceExchange exchange({ { "BTCUSDT", (tmp_dir / "btc.csv").string() } }, logger, 1000.0);
+        BinanceExchange exchange(
+            { { "BTCUSDT", (tmp_dir / "btc.csv").string() } },
+            logger,
+            Support::BuildInitConfig(1000.0, 0));
         auto market_channel = exchange.get_market_channel();
 
         ASSERT_TRUE(exchange.step());
@@ -112,8 +116,7 @@ TEST_F(BinanceExchangeLogTestFixture, ChannelPayloadCanDirectlyValidateMarketLog
                 { "ETHUSDT", (tmp_dir / "eth.csv").string() }
             },
             logger,
-            1000.0,
-            0,
+            Support::BuildInitConfig(1000.0, 0),
             99887766ull);
 
         auto market_channel = exchange.get_market_channel();
@@ -208,8 +211,7 @@ TEST_F(BinanceExchangeLogTestFixture, LogContractKeepsModuleOrderingTimestampAnd
                 (tmp_dir / "btc.csv").string(),
                 std::optional<std::string>((tmp_dir / "btc_funding.csv").string()) } },
             logger,
-            1000.0,
-            0,
+            Support::BuildInitConfig(1000.0, 0),
             55667788ull);
 
         using QTrading::Dto::Trading::OrderSide;
