@@ -550,6 +550,312 @@ TEST(OrderEntryServiceTest, IntraBarPathModeUsesOpenMarketabilityForTakerClassif
     EXPECT_FALSE(fills[0].is_taker);
 }
 
+TEST(OrderEntryServiceTest, IntraBarMonteCarloPathWithFixedSeedIsDeterministic)
+{
+    auto run_once = [](uint64_t seed) -> double {
+        BinanceExchangeRuntimeState runtime_state{};
+        runtime_state.hedge_mode = true;
+        runtime_state.simulation_config.kline_volume_split_mode =
+            QTrading::Infra::Exchanges::BinanceSim::Config::KlineVolumeSplitMode::OppositePassiveSplit;
+        runtime_state.simulation_config.intra_bar_path_mode =
+            QTrading::Infra::Exchanges::BinanceSim::Config::IntraBarPathMode::MonteCarloPath;
+        runtime_state.simulation_config.intra_bar_random_seed = seed;
+        runtime_state.simulation_config.intra_bar_monte_carlo_samples = 257u;
+        StepKernelState step_state = make_step_state_with_perp_symbol();
+        Account account(100000.0, 0);
+        std::optional<OrderRejectInfo> reject{};
+
+        auto long_req = make_perp_limit_request(10.0, 95.0);
+        long_req.position_side = QTrading::Dto::Trading::PositionSide::Long;
+        EXPECT_TRUE(OrderEntryService::Execute(runtime_state, account, step_state, long_req, reject));
+        auto short_req = make_perp_limit_request(10.0, 105.0);
+        short_req.side = QTrading::Dto::Trading::OrderSide::Sell;
+        short_req.position_side = QTrading::Dto::Trading::PositionSide::Short;
+        EXPECT_TRUE(OrderEntryService::Execute(runtime_state, account, step_state, short_req, reject));
+
+        auto market = make_single_symbol_market("BTCUSDT", 100.0, 110.0, 90.0, 100.0, 10.0, 0);
+        if (!market.trade_klines_by_id[0].has_value()) {
+            return -1.0;
+        }
+        market.trade_klines_by_id[0]->TakerBuyBaseVolume = -1.0;
+        std::vector<QTrading::Infra::Exchanges::BinanceSim::Domain::MatchFill> fills{};
+        QTrading::Infra::Exchanges::BinanceSim::Domain::MatchingEngine::RunStep(
+            runtime_state,
+            step_state,
+            market,
+            fills);
+        QTrading::Infra::Exchanges::BinanceSim::Domain::FillSettlementEngine::Apply(
+            runtime_state,
+            account,
+            fills);
+
+        double long_qty = 0.0;
+        for (const auto& position : runtime_state.positions) {
+            if (position.instrument_type == QTrading::Dto::Trading::InstrumentType::Perp &&
+                position.is_long) {
+                long_qty += position.quantity;
+            }
+        }
+        return long_qty;
+    };
+
+    const double first = run_once(42ull);
+    const double second = run_once(42ull);
+    EXPECT_NEAR(first, second, 1e-12);
+    EXPECT_GT(first, 0.0);
+    EXPECT_LT(first, 10.0);
+}
+
+TEST(OrderEntryServiceTest, IntraBarMonteCarloPathUsesOpenMarketabilityForTakerClassification)
+{
+    BinanceExchangeRuntimeState runtime_state{};
+    runtime_state.simulation_config.intra_bar_path_mode =
+        QTrading::Infra::Exchanges::BinanceSim::Config::IntraBarPathMode::MonteCarloPath;
+    runtime_state.simulation_config.intra_bar_random_seed = 42ull;
+    runtime_state.simulation_config.intra_bar_monte_carlo_samples = 17u;
+    StepKernelState step_state = make_step_state_with_perp_symbol();
+    Account account(100000.0, 0);
+    std::optional<OrderRejectInfo> reject{};
+
+    ASSERT_TRUE(OrderEntryService::Execute(
+        runtime_state,
+        account,
+        step_state,
+        make_perp_limit_request(1.0, 100.0),
+        reject));
+
+    const auto market = make_single_symbol_market("BTCUSDT", 105.0, 106.0, 95.0, 99.0, 1000.0, 0);
+    std::vector<QTrading::Infra::Exchanges::BinanceSim::Domain::MatchFill> fills{};
+    QTrading::Infra::Exchanges::BinanceSim::Domain::MatchingEngine::RunStep(
+        runtime_state,
+        step_state,
+        market,
+        fills);
+
+    ASSERT_EQ(fills.size(), 1u);
+    EXPECT_FALSE(fills[0].is_taker);
+}
+
+TEST(OrderEntryServiceTest, TickVolumeSplit_UsesTakerBuyBaseVolumePools)
+{
+    BinanceExchangeRuntimeState runtime_state{};
+    runtime_state.hedge_mode = true;
+    runtime_state.simulation_config.kline_volume_split_mode =
+        QTrading::Infra::Exchanges::BinanceSim::Config::KlineVolumeSplitMode::OppositePassiveSplit;
+    StepKernelState step_state = make_step_state_with_perp_symbol();
+    Account account(100000.0, 0);
+    std::optional<OrderRejectInfo> reject{};
+
+    auto long_req = make_perp_limit_request(10.0, 95.0);
+    long_req.position_side = QTrading::Dto::Trading::PositionSide::Long;
+    ASSERT_TRUE(OrderEntryService::Execute(runtime_state, account, step_state, long_req, reject));
+    auto short_req = make_perp_limit_request(10.0, 105.0);
+    short_req.side = QTrading::Dto::Trading::OrderSide::Sell;
+    short_req.position_side = QTrading::Dto::Trading::PositionSide::Short;
+    ASSERT_TRUE(OrderEntryService::Execute(runtime_state, account, step_state, short_req, reject));
+
+    auto market = make_single_symbol_market("BTCUSDT", 100.0, 110.0, 90.0, 100.0, 10.0, 0);
+    ASSERT_TRUE(market.trade_klines_by_id[0].has_value());
+    market.trade_klines_by_id[0]->TakerBuyBaseVolume = 7.0;
+    std::vector<QTrading::Infra::Exchanges::BinanceSim::Domain::MatchFill> fills{};
+    QTrading::Infra::Exchanges::BinanceSim::Domain::MatchingEngine::RunStep(
+        runtime_state,
+        step_state,
+        market,
+        fills);
+    QTrading::Infra::Exchanges::BinanceSim::Domain::FillSettlementEngine::Apply(
+        runtime_state,
+        account,
+        fills);
+
+    double long_qty = 0.0;
+    double short_qty = 0.0;
+    for (const auto& position : runtime_state.positions) {
+        if (position.instrument_type != QTrading::Dto::Trading::InstrumentType::Perp) {
+            continue;
+        }
+        if (position.is_long) {
+            long_qty += position.quantity;
+        }
+        else {
+            short_qty += position.quantity;
+        }
+    }
+    EXPECT_NEAR(long_qty, 3.0, 1e-8);
+    EXPECT_NEAR(short_qty, 7.0, 1e-8);
+}
+
+TEST(OrderEntryServiceTest, TickVolumeSplit_Heuristic_CloseNearHighBiasesSellOrders)
+{
+    BinanceExchangeRuntimeState runtime_state{};
+    runtime_state.hedge_mode = true;
+    runtime_state.simulation_config.kline_volume_split_mode =
+        QTrading::Infra::Exchanges::BinanceSim::Config::KlineVolumeSplitMode::OppositePassiveSplit;
+    StepKernelState step_state = make_step_state_with_perp_symbol();
+    Account account(100000.0, 0);
+    std::optional<OrderRejectInfo> reject{};
+
+    auto long_req = make_perp_limit_request(10.0, 95.0);
+    long_req.position_side = QTrading::Dto::Trading::PositionSide::Long;
+    ASSERT_TRUE(OrderEntryService::Execute(runtime_state, account, step_state, long_req, reject));
+    auto short_req = make_perp_limit_request(10.0, 105.0);
+    short_req.side = QTrading::Dto::Trading::OrderSide::Sell;
+    short_req.position_side = QTrading::Dto::Trading::PositionSide::Short;
+    ASSERT_TRUE(OrderEntryService::Execute(runtime_state, account, step_state, short_req, reject));
+
+    auto market = make_single_symbol_market("BTCUSDT", 100.0, 110.0, 90.0, 109.0, 10.0, 0);
+    ASSERT_TRUE(market.trade_klines_by_id[0].has_value());
+    market.trade_klines_by_id[0]->TakerBuyBaseVolume = -1.0;
+    std::vector<QTrading::Infra::Exchanges::BinanceSim::Domain::MatchFill> fills{};
+    QTrading::Infra::Exchanges::BinanceSim::Domain::MatchingEngine::RunStep(
+        runtime_state,
+        step_state,
+        market,
+        fills);
+    QTrading::Infra::Exchanges::BinanceSim::Domain::FillSettlementEngine::Apply(
+        runtime_state,
+        account,
+        fills);
+
+    double long_qty = 0.0;
+    double short_qty = 0.0;
+    for (const auto& position : runtime_state.positions) {
+        if (position.instrument_type != QTrading::Dto::Trading::InstrumentType::Perp) {
+            continue;
+        }
+        if (position.is_long) {
+            long_qty += position.quantity;
+        }
+        else {
+            short_qty += position.quantity;
+        }
+    }
+    EXPECT_NEAR(long_qty, 0.5, 1e-6);
+    EXPECT_NEAR(short_qty, 9.5, 1e-6);
+}
+
+TEST(OrderEntryServiceTest, TickVolumeSplit_Heuristic_CloseNearLowBiasesBuyOrders)
+{
+    BinanceExchangeRuntimeState runtime_state{};
+    runtime_state.hedge_mode = true;
+    runtime_state.simulation_config.kline_volume_split_mode =
+        QTrading::Infra::Exchanges::BinanceSim::Config::KlineVolumeSplitMode::OppositePassiveSplit;
+    StepKernelState step_state = make_step_state_with_perp_symbol();
+    Account account(100000.0, 0);
+    std::optional<OrderRejectInfo> reject{};
+
+    auto long_req = make_perp_limit_request(10.0, 95.0);
+    long_req.position_side = QTrading::Dto::Trading::PositionSide::Long;
+    ASSERT_TRUE(OrderEntryService::Execute(runtime_state, account, step_state, long_req, reject));
+    auto short_req = make_perp_limit_request(10.0, 105.0);
+    short_req.side = QTrading::Dto::Trading::OrderSide::Sell;
+    short_req.position_side = QTrading::Dto::Trading::PositionSide::Short;
+    ASSERT_TRUE(OrderEntryService::Execute(runtime_state, account, step_state, short_req, reject));
+
+    auto market = make_single_symbol_market("BTCUSDT", 100.0, 110.0, 90.0, 91.0, 10.0, 0);
+    ASSERT_TRUE(market.trade_klines_by_id[0].has_value());
+    market.trade_klines_by_id[0]->TakerBuyBaseVolume = -1.0;
+    std::vector<QTrading::Infra::Exchanges::BinanceSim::Domain::MatchFill> fills{};
+    QTrading::Infra::Exchanges::BinanceSim::Domain::MatchingEngine::RunStep(
+        runtime_state,
+        step_state,
+        market,
+        fills);
+    QTrading::Infra::Exchanges::BinanceSim::Domain::FillSettlementEngine::Apply(
+        runtime_state,
+        account,
+        fills);
+
+    double long_qty = 0.0;
+    double short_qty = 0.0;
+    for (const auto& position : runtime_state.positions) {
+        if (position.instrument_type != QTrading::Dto::Trading::InstrumentType::Perp) {
+            continue;
+        }
+        if (position.is_long) {
+            long_qty += position.quantity;
+        }
+        else {
+            short_qty += position.quantity;
+        }
+    }
+    EXPECT_NEAR(long_qty, 9.5, 1e-6);
+    EXPECT_NEAR(short_qty, 0.5, 1e-6);
+}
+
+TEST(OrderEntryServiceTest, OpenOrderInitialMargin_MarketOrderUsesLastMarkWithBuffer)
+{
+    BinanceExchangeRuntimeState runtime_state{};
+    runtime_state.symbol_leverage["BTCUSDT"] = 10.0;
+    runtime_state.last_status_snapshot.prices.push_back(
+        QTrading::Infra::Exchanges::BinanceSim::Contracts::StatusPriceSnapshot{
+            "BTCUSDT", 0.0, false, 0.0, false, 100.0, true });
+    StepKernelState step_state = make_step_state_with_perp_symbol();
+    Account account(100000.0, 0);
+    std::optional<OrderRejectInfo> reject{};
+
+    ASSERT_TRUE(OrderEntryService::Execute(
+        runtime_state,
+        account,
+        step_state,
+        make_perp_market_request(2.0),
+        reject));
+    EXPECT_FALSE(reject.has_value());
+    EXPECT_NEAR(runtime_state.perp_open_order_initial_margin, (2.0 * 100.0 * 1.001) / 10.0, 1e-9);
+}
+
+TEST(OrderEntryServiceTest, OpenOrderInitialMargin_OneWayClosingDirectionDoesNotReserveMargin)
+{
+    BinanceExchangeRuntimeState runtime_state{};
+    runtime_state.symbol_leverage["BTCUSDT"] = 10.0;
+    runtime_state.positions.push_back(make_perp_position("BTCUSDT", true, 2.0, 100.0));
+    StepKernelState step_state = make_step_state_with_perp_symbol();
+    Account account(100000.0, 0);
+    std::optional<OrderRejectInfo> reject{};
+
+    auto request = make_perp_limit_request(1.0, 100.0);
+    request.side = QTrading::Dto::Trading::OrderSide::Sell;
+    ASSERT_TRUE(OrderEntryService::Execute(runtime_state, account, step_state, request, reject));
+    EXPECT_FALSE(reject.has_value());
+    EXPECT_NEAR(runtime_state.perp_open_order_initial_margin, 0.0, 1e-12);
+}
+
+TEST(OrderEntryServiceTest, OpenOrderInitialMargin_OneWayFlipReservesOnlyForOpeningOvershoot)
+{
+    BinanceExchangeRuntimeState runtime_state{};
+    runtime_state.symbol_leverage["BTCUSDT"] = 10.0;
+    runtime_state.positions.push_back(make_perp_position("BTCUSDT", true, 2.0, 100.0));
+    StepKernelState step_state = make_step_state_with_perp_symbol();
+    Account account(100000.0, 0);
+    std::optional<OrderRejectInfo> reject{};
+
+    auto request = make_perp_limit_request(5.0, 100.0);
+    request.side = QTrading::Dto::Trading::OrderSide::Sell;
+    ASSERT_TRUE(OrderEntryService::Execute(runtime_state, account, step_state, request, reject));
+    EXPECT_FALSE(reject.has_value());
+    EXPECT_NEAR(runtime_state.perp_open_order_initial_margin, 30.0, 1e-12);
+}
+
+TEST(OrderEntryServiceTest, OpenOrderInitialMargin_OneWayAggregatesMultipleOppositeOrders)
+{
+    BinanceExchangeRuntimeState runtime_state{};
+    runtime_state.symbol_leverage["BTCUSDT"] = 10.0;
+    runtime_state.positions.push_back(make_perp_position("BTCUSDT", true, 2.0, 100.0));
+    StepKernelState step_state = make_step_state_with_perp_symbol();
+    Account account(100000.0, 0);
+    std::optional<OrderRejectInfo> reject{};
+
+    auto first = make_perp_limit_request(2.0, 100.0);
+    first.side = QTrading::Dto::Trading::OrderSide::Sell;
+    ASSERT_TRUE(OrderEntryService::Execute(runtime_state, account, step_state, first, reject));
+    EXPECT_NEAR(runtime_state.perp_open_order_initial_margin, 0.0, 1e-12);
+
+    auto second = make_perp_limit_request(2.0, 100.0);
+    second.side = QTrading::Dto::Trading::OrderSide::Sell;
+    ASSERT_TRUE(OrderEntryService::Execute(runtime_state, account, step_state, second, reject));
+    EXPECT_NEAR(runtime_state.perp_open_order_initial_margin, 20.0, 1e-12);
+}
+
 TEST(OrderEntryServiceTest, CancelOrderByIdRemovesRemainingOpenOrderAndKeepsFilledPosition)
 {
     BinanceExchangeRuntimeState runtime_state{};

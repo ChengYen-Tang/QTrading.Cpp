@@ -704,6 +704,48 @@ TEST_F(BinanceExchangeFixture, SingleModeAutoReduceOppositePositionOpen)
     EXPECT_NEAR(positions[0].quantity, 1.0, 1e-12);
 }
 
+TEST_F(BinanceExchangeFixture, OneWayFlip_OvershootTransitionsCloseThenOpenThroughLifecycle)
+{
+    WriteCsv("btc.csv", {
+        {      0,100.0,100.0,100.0,100.0,2.0, 30000,200.0,1,0,0 },
+        {  60000,100.0,100.0,100.0,100.0,2.0, 90000,200.0,1,0,0 },
+        { 120000,100.0,100.0,100.0,100.0,3.0,150000,300.0,1,0,0 }
+    });
+
+    Account::AccountInitConfig init{};
+    init.spot_initial_cash = 0.0;
+    init.perp_initial_wallet = 50000.0;
+    BinanceExchange exchange(
+        { { "BTCUSDT", (tmp_dir / "btc.csv").string() } },
+        nullptr,
+        init);
+    exchange.set_symbol_leverage("BTCUSDT", 10.0);
+
+    ASSERT_TRUE(exchange.perp.place_order("BTCUSDT", 2.0, 100.0, QTrading::Dto::Trading::OrderSide::Buy));
+    ASSERT_TRUE(exchange.step());
+    (void)exchange.get_market_channel()->Receive();
+    ASSERT_EQ(exchange.get_all_positions().size(), 1u);
+    EXPECT_TRUE(exchange.get_all_positions()[0].is_long);
+    EXPECT_NEAR(exchange.get_all_positions()[0].quantity, 2.0, 1e-12);
+
+    ASSERT_TRUE(exchange.perp.place_order("BTCUSDT", 5.0, 100.0, QTrading::Dto::Trading::OrderSide::Sell));
+    ASSERT_EQ(exchange.get_all_open_orders().size(), 1u);
+    EXPECT_EQ(exchange.get_all_open_orders()[0].side, QTrading::Dto::Trading::OrderSide::Sell);
+
+    ASSERT_TRUE(exchange.step());
+    (void)exchange.get_market_channel()->Receive();
+    EXPECT_TRUE(exchange.get_all_positions().empty());
+    ASSERT_EQ(exchange.get_all_open_orders().size(), 1u);
+    EXPECT_NEAR(exchange.get_all_open_orders()[0].quantity, 3.0, 1e-12);
+
+    ASSERT_TRUE(exchange.step());
+    (void)exchange.get_market_channel()->Receive();
+    ASSERT_EQ(exchange.get_all_positions().size(), 1u);
+    EXPECT_FALSE(exchange.get_all_positions()[0].is_long);
+    EXPECT_NEAR(exchange.get_all_positions()[0].quantity, 3.0, 1e-12);
+    EXPECT_TRUE(exchange.get_all_open_orders().empty());
+}
+
 TEST_F(BinanceExchangeFixture, SingleMode_MultipleSymbols)
 {
     WriteCsv("btc.csv", {

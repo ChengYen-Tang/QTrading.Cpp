@@ -126,28 +126,28 @@
 - [x] `AccountTest.OhlcTrigger_SellLimitTriggersOnHigh`
 - [x] AccountTest.IntraBarExpectedPath_SplitsOppositePassiveLimitVolume
 - [x] AccountTest.IntraBarPathModeUsesOpenMarketabilityForTakerClassification
-- [ ] AccountTest.IntraBarMonteCarloPathWithFixedSeedIsDeterministic
+- [x] AccountTest.IntraBarMonteCarloPathWithFixedSeedIsDeterministic
 - [ ] AccountTest.LimitFillProbabilityModelUsesPenetrationAndSizeRatio
 - [x] `AccountTest.HedgeMode_OrderRequiresExplicitPositionSide_IsRejectedWithoutException`
 - [x] `AccountTest.ReduceOnlyWithoutReduciblePosition_IsRejectedWithoutException`
 - [x] `AccountTest.HedgeModeReduceOnly_WrongSideOrNoMatchingPosition_IsRejectedWithoutException`
-- [ ] AccountTest.OneWayFlip_OvershootTransitionsCloseThenOpenThroughLifecycle
+- [x] AccountTest.OneWayFlip_OvershootTransitionsCloseThenOpenThroughLifecycle
 - [x] `AccountTest.ReduceOnly_OneWayRejectsIfWouldIncreaseExposure`
 - [x] `AccountTest.ReduceOnly_HedgeMode_RequiresExplicitPositionSide`
 - [x] `AccountTest.ReduceOnly_HedgeMode_DirectionMustCloseCorrectSide`
-- [ ] AccountTest.OpenOrderInitialMargin_MarketOrderUsesLastMarkWithBuffer
+- [x] AccountTest.OpenOrderInitialMargin_MarketOrderUsesLastMarkWithBuffer
 - [ ] AccountTest.UnrealizedPnlUsesMarkOverrideNotTradeClose
-- [ ] AccountTest.OpenOrderInitialMargin_OneWayClosingDirectionDoesNotReserveMargin
-- [ ] AccountTest.OpenOrderInitialMargin_OneWayFlipReservesOnlyForOpeningOvershoot
+- [x] AccountTest.OpenOrderInitialMargin_OneWayClosingDirectionDoesNotReserveMargin
+- [x] AccountTest.OpenOrderInitialMargin_OneWayFlipReservesOnlyForOpeningOvershoot
 - [ ] AccountTest.MarketOrderFill_UsesExecutionSlippageBoundedByOHLC
 - [ ] AccountTest.LimitOrderFill_UsesExecutionSlippageButRespectsLimit
 - [ ] AccountTest.LimitOrderFill_ExecutionSlippageCanWorsenPriceWithinLimit
 - [ ] AccountTest.MarketImpactSlippageCurveWorsensLargeOrderMoreThanSmallOrder
 - [ ] AccountTest.MarketImpactSlippageRespectsLimitProtection
 - [ ] AccountTest.TakerProbabilityModelUsesDiscreteFeeRate
-- [ ] AccountTest.TickVolumeSplit_UsesTakerBuyBaseVolumePools
-- [ ] AccountTest.TickVolumeSplit_Heuristic_CloseNearHighBiasesSellOrders
-- [ ] AccountTest.TickVolumeSplit_Heuristic_CloseNearLowBiasesBuyOrders
+- [x] AccountTest.TickVolumeSplit_UsesTakerBuyBaseVolumePools
+- [x] AccountTest.TickVolumeSplit_Heuristic_CloseNearHighBiasesSellOrders
+- [x] AccountTest.TickVolumeSplit_Heuristic_CloseNearLowBiasesBuyOrders
 - [x] `AccountTest.ApplyFunding_LongPays`
 - [x] `AccountTest.ApplyFunding_ShortReceives`
 

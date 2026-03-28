@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+
 #include "Exchanges/BinanceSimulator/Contracts/BinanceExchangeRuntimeTypes.hpp"
 
 namespace QTrading::Infra::Exchanges::BinanceSim::Config {
@@ -12,6 +14,7 @@ enum class SpotCommissionMode {
 enum class IntraBarPathMode {
     CloseMarketability = 0,
     OpenMarketability = 1,
+    MonteCarloPath = 2,
 };
 
 enum class KlineVolumeSplitMode {
@@ -24,6 +27,8 @@ struct SimulationConfig {
     Contracts::FundingApplyTiming funding_apply_timing{ Contracts::FundingApplyTiming::BeforeMatching };
     IntraBarPathMode intra_bar_path_mode{ IntraBarPathMode::CloseMarketability };
     KlineVolumeSplitMode kline_volume_split_mode{ KlineVolumeSplitMode::TotalOnly };
+    uint64_t intra_bar_random_seed{ 42ull };
+    uint32_t intra_bar_monte_carlo_samples{ 1u };
     double uncertainty_band_bps{ 0.0 };
     double basis_warning_bps{ 0.0 };
     // Reserved risk-overlay controls kept for facade/config compatibility.

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <cmath>
 #include <limits>
 #include <numeric>
@@ -97,6 +98,40 @@ double infer_taker_buy_ratio(const QTrading::Dto::Market::Binance::TradeKlineDto
     return clamp01((kline.ClosePrice - kline.LowPrice) / range);
 }
 
+double deterministic_unit_random(uint64_t seed, uint64_t ts, size_t symbol_index, uint32_t sample_index) noexcept
+{
+    uint64_t x = seed;
+    x ^= (ts + 0x9e3779b97f4a7c15ull + (x << 6) + (x >> 2));
+    x ^= (static_cast<uint64_t>(symbol_index) + 0x9e3779b97f4a7c15ull + (x << 6) + (x >> 2));
+    x ^= (static_cast<uint64_t>(sample_index) + 0x9e3779b97f4a7c15ull + (x << 6) + (x >> 2));
+    x ^= x >> 12;
+    x ^= x << 25;
+    x ^= x >> 27;
+    const uint64_t r = x * 2685821657736338717ull;
+    return static_cast<double>(r >> 11) * (1.0 / 9007199254740992.0);
+}
+
+double resolve_taker_buy_ratio(
+    const QTrading::Dto::Market::Binance::TradeKlineDto& kline,
+    const Config::SimulationConfig& config,
+    uint64_t ts_exchange,
+    size_t symbol_index) noexcept
+{
+    const double base_ratio = infer_taker_buy_ratio(kline);
+    if (config.intra_bar_path_mode != Config::IntraBarPathMode::MonteCarloPath) {
+        return base_ratio;
+    }
+
+    const uint32_t samples = std::max<uint32_t>(1u, config.intra_bar_monte_carlo_samples);
+    uint32_t buy_hits = 0;
+    for (uint32_t i = 0; i < samples; ++i) {
+        if (deterministic_unit_random(config.intra_bar_random_seed, ts_exchange, symbol_index, i) < base_ratio) {
+            ++buy_hits;
+        }
+    }
+    return static_cast<double>(buy_hits) / static_cast<double>(samples);
+}
+
 } // namespace
 
 void MatchingEngine::RunStep(
@@ -123,9 +158,10 @@ void MatchingEngine::RunStep(
     const bool opposite_passive_split =
         runtime_state.simulation_config.kline_volume_split_mode ==
         Config::KlineVolumeSplitMode::OppositePassiveSplit;
+    const auto path_mode = runtime_state.simulation_config.intra_bar_path_mode;
     const bool open_marketability_path =
-        runtime_state.simulation_config.intra_bar_path_mode ==
-        Config::IntraBarPathMode::OpenMarketability;
+        path_mode == Config::IntraBarPathMode::OpenMarketability ||
+        path_mode == Config::IntraBarPathMode::MonteCarloPath;
     liquidity_left.assign(market.symbols->size(), 0.0);
     buy_liquidity_left.assign(market.symbols->size(), 0.0);
     sell_liquidity_left.assign(market.symbols->size(), 0.0);
@@ -141,7 +177,11 @@ void MatchingEngine::RunStep(
         const double base_liquidity = raw > 0.0 ? raw : std::numeric_limits<double>::infinity();
         liquidity_left[i] = base_liquidity;
         if (opposite_passive_split && std::isfinite(base_liquidity)) {
-            const double taker_buy_ratio = infer_taker_buy_ratio(*market.trade_klines_by_id[i]);
+            const double taker_buy_ratio = resolve_taker_buy_ratio(
+                *market.trade_klines_by_id[i],
+                runtime_state.simulation_config,
+                market.Timestamp,
+                i);
             buy_liquidity_left[i] = base_liquidity * taker_buy_ratio;
             sell_liquidity_left[i] = base_liquidity - buy_liquidity_left[i];
         }

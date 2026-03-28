@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <unordered_map>
 
 #include "Exchanges/BinanceSimulator/Account/Account.hpp"
 #include "Exchanges/BinanceSimulator/State/BinanceExchangeRuntimeState.hpp"
@@ -13,6 +14,7 @@ namespace QTrading::Infra::Exchanges::BinanceSim::Domain {
 namespace {
 
 constexpr double kFeeRate = 0.001;
+constexpr double kPerpMarketReservationBuffer = 1.001;
 constexpr double kEpsilon = 1e-12;
 
 double spot_buy_reservation_multiplier(const State::BinanceExchangeRuntimeState& runtime_state)
@@ -247,20 +249,77 @@ double sum_spot_buy_reservations(const State::BinanceExchangeRuntimeState& runti
 
 double sum_perp_open_order_reservations(const State::BinanceExchangeRuntimeState& runtime_state)
 {
+    auto resolve_perp_reference_price = [&](const QTrading::dto::Order& order) -> double {
+        if (order.price > 0.0) {
+            return order.price;
+        }
+        for (const auto& snapshot : runtime_state.last_status_snapshot.prices) {
+            if (snapshot.symbol != order.symbol) {
+                continue;
+            }
+            if (snapshot.has_mark_price && snapshot.mark_price > 0.0) {
+                return snapshot.mark_price * kPerpMarketReservationBuffer;
+            }
+            if (snapshot.has_trade_price && snapshot.trade_price > 0.0) {
+                return snapshot.trade_price * kPerpMarketReservationBuffer;
+            }
+            if (snapshot.has_price && snapshot.price > 0.0) {
+                return snapshot.price * kPerpMarketReservationBuffer;
+            }
+        }
+        return 0.0;
+    };
+
+    auto one_way_net_position_qty = [&](const std::string& symbol) -> double {
+        double net = 0.0;
+        for (const auto& position : runtime_state.positions) {
+            if (position.instrument_type != QTrading::Dto::Trading::InstrumentType::Perp ||
+                position.symbol != symbol) {
+                continue;
+            }
+            net += position.is_long ? position.quantity : -position.quantity;
+        }
+        return net;
+    };
+
     double reserved = 0.0;
+    std::unordered_map<std::string, double> effective_net_by_symbol{};
     for (const auto& order : runtime_state.orders) {
         if (order.instrument_type != QTrading::Dto::Trading::InstrumentType::Perp ||
             order.reduce_only ||
             order.close_position) {
             continue;
         }
-        const double price = order.price > 0.0 ? order.price : 0.0;
+        const double price = resolve_perp_reference_price(order);
         if (price <= 0.0) {
             continue;
         }
+
+        double opening_qty = std::max(0.0, order.quantity);
+        if (!runtime_state.hedge_mode && opening_qty > kEpsilon) {
+            auto net_it = effective_net_by_symbol.find(order.symbol);
+            if (net_it == effective_net_by_symbol.end()) {
+                net_it = effective_net_by_symbol.emplace(
+                    order.symbol,
+                    one_way_net_position_qty(order.symbol)).first;
+            }
+            const double net_position = net_it->second;
+            const double signed_order = order.side == QTrading::Dto::Trading::OrderSide::Buy
+                ? opening_qty
+                : -opening_qty;
+            if (std::abs(net_position) > kEpsilon && net_position * signed_order < 0.0) {
+                const double closing_qty = std::min(std::abs(net_position), std::abs(signed_order));
+                opening_qty = std::max(0.0, opening_qty - closing_qty);
+            }
+            net_it->second = net_position + signed_order;
+        }
+        if (opening_qty <= kEpsilon) {
+            continue;
+        }
+
         const auto it = runtime_state.symbol_leverage.find(order.symbol);
         const double leverage = it == runtime_state.symbol_leverage.end() ? 1.0 : it->second;
-        const double notional = order.quantity * price;
+        const double notional = opening_qty * price;
         reserved += leverage > 0.0 ? (notional / leverage) : notional;
     }
     return reserved;
