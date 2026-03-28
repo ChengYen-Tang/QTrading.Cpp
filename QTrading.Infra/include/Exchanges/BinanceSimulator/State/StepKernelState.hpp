@@ -40,6 +40,7 @@ struct StepKernelState {
     std::vector<std::string> symbols;
     std::unordered_map<std::string, size_t> symbol_to_id;
     std::vector<QTrading::Dto::Trading::InstrumentType> symbol_instrument_type_by_id;
+    std::vector<QTrading::Dto::Trading::InstrumentSpec> symbol_spec_by_id;
     std::shared_ptr<const std::vector<std::string>> symbols_shared;
     std::vector<MarketData> market_data;
     std::vector<FundingRateData> funding_data_pool;

@@ -19,17 +19,116 @@ bool symbol_exists(
     const State::StepKernelState& step_state,
     const std::string& symbol)
 {
-    return std::find(step_state.symbols.begin(), step_state.symbols.end(), symbol) != step_state.symbols.end();
+    return step_state.symbol_to_id.find(symbol) != step_state.symbol_to_id.end();
 }
 
 size_t find_symbol_index(const State::StepKernelState& step_state, const std::string& symbol)
 {
-    for (size_t i = 0; i < step_state.symbols.size(); ++i) {
-        if (step_state.symbols[i] == symbol) {
-            return i;
+    const auto it = step_state.symbol_to_id.find(symbol);
+    if (it == step_state.symbol_to_id.end()) {
+        return std::numeric_limits<size_t>::max();
+    }
+    return it->second;
+}
+
+double current_reference_price(
+    const State::StepKernelState& step_state,
+    const std::string& symbol);
+
+bool is_multiple_of_step(double value, double step_size)
+{
+    if (step_size <= 0.0) {
+        return true;
+    }
+    const double steps = std::round(value / step_size);
+    return std::abs((steps * step_size) - value) <= 1e-9;
+}
+
+bool validate_filters(
+    const State::StepKernelState& step_state,
+    const Contracts::OrderCommandRequest& request,
+    double quantity,
+    std::optional<Contracts::OrderRejectInfo>& reject)
+{
+    const size_t symbol_index = find_symbol_index(step_state, request.symbol);
+    if (symbol_index == std::numeric_limits<size_t>::max() ||
+        symbol_index >= step_state.symbol_spec_by_id.size()) {
+        return true;
+    }
+
+    const auto& spec = step_state.symbol_spec_by_id[symbol_index];
+
+    if (request.price > 0.0) {
+        if (spec.min_price > 0.0 && request.price + kEpsilon < spec.min_price) {
+            reject = Contracts::OrderRejectInfo{
+                Contracts::OrderRejectInfo::Code::PriceFilterBelowMin,
+                "price below min" };
+            return false;
+        }
+        if (spec.max_price > 0.0 && request.price - kEpsilon > spec.max_price) {
+            reject = Contracts::OrderRejectInfo{
+                Contracts::OrderRejectInfo::Code::PriceFilterAboveMax,
+                "price above max" };
+            return false;
+        }
+        if (spec.price_tick_size > 0.0 && !is_multiple_of_step(request.price, spec.price_tick_size)) {
+            reject = Contracts::OrderRejectInfo{
+                Contracts::OrderRejectInfo::Code::PriceFilterInvalidTick,
+                "invalid price tick" };
+            return false;
         }
     }
-    return std::numeric_limits<size_t>::max();
+
+    const bool is_market = request.price <= 0.0;
+    const double min_qty = is_market && spec.market_min_qty > 0.0 ? spec.market_min_qty : spec.min_qty;
+    const double max_qty = is_market && spec.market_max_qty > 0.0 ? spec.market_max_qty : spec.max_qty;
+    const double qty_step = is_market && spec.market_qty_step_size > 0.0 ? spec.market_qty_step_size : spec.qty_step_size;
+
+    if (min_qty > 0.0 && quantity + kEpsilon < min_qty) {
+        reject = Contracts::OrderRejectInfo{
+            Contracts::OrderRejectInfo::Code::LotSizeBelowMinQty,
+            "quantity below min" };
+        return false;
+    }
+    if (max_qty > 0.0 && quantity - kEpsilon > max_qty) {
+        reject = Contracts::OrderRejectInfo{
+            Contracts::OrderRejectInfo::Code::LotSizeAboveMaxQty,
+            "quantity above max" };
+        return false;
+    }
+    if (qty_step > 0.0 && !is_multiple_of_step(quantity, qty_step)) {
+        reject = Contracts::OrderRejectInfo{
+            Contracts::OrderRejectInfo::Code::LotSizeInvalidStep,
+            "invalid quantity step" };
+        return false;
+    }
+
+    if (spec.min_notional > 0.0 || spec.max_notional > 0.0) {
+        const double ref_price = request.price > 0.0
+            ? request.price
+            : current_reference_price(step_state, request.symbol);
+        if (ref_price <= 0.0) {
+            reject = Contracts::OrderRejectInfo{
+                Contracts::OrderRejectInfo::Code::NotionalNoReferencePrice,
+                "missing reference price for notional filter" };
+            return false;
+        }
+        const double notional = quantity * ref_price;
+        if (spec.min_notional > 0.0 && notional + kEpsilon < spec.min_notional) {
+            reject = Contracts::OrderRejectInfo{
+                Contracts::OrderRejectInfo::Code::NotionalBelowMin,
+                "notional below min" };
+            return false;
+        }
+        if (spec.max_notional > 0.0 && notional - kEpsilon > spec.max_notional) {
+            reject = Contracts::OrderRejectInfo{
+                Contracts::OrderRejectInfo::Code::NotionalAboveMax,
+                "notional above max" };
+            return false;
+        }
+    }
+
+    return true;
 }
 
 double current_reference_price(
@@ -182,6 +281,11 @@ bool OrderEntryService::Execute(
     if (request.kind != Contracts::OrderCommandKind::PerpClosePosition &&
         quantity <= 0.0) {
         reject = Contracts::OrderRejectInfo{ Contracts::OrderRejectInfo::Code::InvalidQuantity, "invalid quantity" };
+        return false;
+    }
+
+    if (request.kind != Contracts::OrderCommandKind::PerpClosePosition &&
+        !validate_filters(step_state, request, quantity, reject)) {
         return false;
     }
 
