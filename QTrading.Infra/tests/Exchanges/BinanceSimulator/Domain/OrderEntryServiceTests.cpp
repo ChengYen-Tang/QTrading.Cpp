@@ -856,6 +856,190 @@ TEST(OrderEntryServiceTest, OpenOrderInitialMargin_OneWayAggregatesMultipleOppos
     EXPECT_NEAR(runtime_state.perp_open_order_initial_margin, 20.0, 1e-12);
 }
 
+TEST(OrderEntryServiceTest, LimitFillProbabilityModelUsesPenetrationAndSizeRatio)
+{
+    BinanceExchangeRuntimeState runtime_state{};
+    runtime_state.simulation_config.limit_fill_probability_enabled = true;
+    runtime_state.simulation_config.limit_fill_probability_bias = 1.0;
+    runtime_state.simulation_config.limit_fill_probability_penetration_weight = 2.0;
+    runtime_state.simulation_config.limit_fill_probability_size_weight = 2.0;
+    StepKernelState step_state = make_step_state_with_perp_symbol();
+    Account account(100000.0, 0);
+    std::optional<OrderRejectInfo> reject{};
+
+    ASSERT_TRUE(OrderEntryService::Execute(runtime_state, account, step_state, make_perp_limit_request(10.0, 99.0), reject));
+    ASSERT_TRUE(OrderEntryService::Execute(runtime_state, account, step_state, make_perp_limit_request(10.0, 91.0), reject));
+    auto market = make_single_symbol_market("BTCUSDT", 100.0, 110.0, 90.0, 100.0, 100.0, 0);
+    std::vector<QTrading::Infra::Exchanges::BinanceSim::Domain::MatchFill> fills{};
+    QTrading::Infra::Exchanges::BinanceSim::Domain::MatchingEngine::RunStep(runtime_state, step_state, market, fills);
+    ASSERT_EQ(fills.size(), 2u);
+
+    const QTrading::Infra::Exchanges::BinanceSim::Domain::MatchFill* deep = nullptr;
+    const QTrading::Infra::Exchanges::BinanceSim::Domain::MatchFill* shallow = nullptr;
+    for (const auto& fill : fills) {
+        if (std::abs(fill.price - 99.0) < 1e-12) {
+            deep = &fill;
+        }
+        if (std::abs(fill.price - 91.0) < 1e-12) {
+            shallow = &fill;
+        }
+    }
+    ASSERT_NE(deep, nullptr);
+    ASSERT_NE(shallow, nullptr);
+    EXPECT_GT(deep->fill_probability, shallow->fill_probability);
+    EXPECT_GT(deep->quantity, shallow->quantity);
+    const double deep_prob = deep->fill_probability;
+
+    BinanceExchangeRuntimeState runtime_state_large{};
+    runtime_state_large.simulation_config.limit_fill_probability_enabled = true;
+    runtime_state_large.simulation_config.limit_fill_probability_bias = 1.0;
+    runtime_state_large.simulation_config.limit_fill_probability_penetration_weight = 2.0;
+    runtime_state_large.simulation_config.limit_fill_probability_size_weight = 2.0;
+    StepKernelState step_state_large = make_step_state_with_perp_symbol();
+    ASSERT_TRUE(OrderEntryService::Execute(
+        runtime_state_large,
+        account,
+        step_state_large,
+        make_perp_limit_request(80.0, 99.0),
+        reject));
+    fills.clear();
+    QTrading::Infra::Exchanges::BinanceSim::Domain::MatchingEngine::RunStep(
+        runtime_state_large,
+        step_state_large,
+        market,
+        fills);
+    ASSERT_EQ(fills.size(), 1u);
+    EXPECT_LT(fills[0].fill_probability, deep_prob);
+}
+
+TEST(OrderEntryServiceTest, MarketOrderFill_UsesExecutionSlippageBoundedByOHLC)
+{
+    BinanceExchangeRuntimeState runtime_state{};
+    runtime_state.simulation_config.market_execution_slippage = 0.10;
+    StepKernelState step_state = make_step_state_with_perp_symbol();
+    Account account(10000.0, 0);
+    std::optional<OrderRejectInfo> reject{};
+
+    ASSERT_TRUE(OrderEntryService::Execute(runtime_state, account, step_state, make_perp_market_request(1.0), reject));
+    auto market = make_single_symbol_market("BTCUSDT", 100.0, 105.0, 95.0, 100.0, 1000.0, 0);
+    std::vector<QTrading::Infra::Exchanges::BinanceSim::Domain::MatchFill> fills{};
+    QTrading::Infra::Exchanges::BinanceSim::Domain::MatchingEngine::RunStep(runtime_state, step_state, market, fills);
+    ASSERT_EQ(fills.size(), 1u);
+    EXPECT_NEAR(fills[0].price, 105.0, 1e-12);
+}
+
+TEST(OrderEntryServiceTest, LimitOrderFill_UsesExecutionSlippageButRespectsLimit)
+{
+    BinanceExchangeRuntimeState runtime_state{};
+    runtime_state.simulation_config.limit_execution_slippage = 0.10;
+    StepKernelState step_state = make_step_state_with_perp_symbol();
+    Account account(50000.0, 0);
+    std::optional<OrderRejectInfo> reject{};
+
+    ASSERT_TRUE(OrderEntryService::Execute(runtime_state, account, step_state, make_perp_limit_request(1.0, 100.0), reject));
+    auto market = make_single_symbol_market("BTCUSDT", 95.0, 110.0, 90.0, 95.0, 1000.0, 0);
+    std::vector<QTrading::Infra::Exchanges::BinanceSim::Domain::MatchFill> fills{};
+    QTrading::Infra::Exchanges::BinanceSim::Domain::MatchingEngine::RunStep(runtime_state, step_state, market, fills);
+    ASSERT_EQ(fills.size(), 1u);
+    EXPECT_NEAR(fills[0].price, 100.0, 1e-12);
+}
+
+TEST(OrderEntryServiceTest, LimitOrderFill_ExecutionSlippageCanWorsenPriceWithinLimit)
+{
+    BinanceExchangeRuntimeState runtime_state{};
+    runtime_state.simulation_config.limit_execution_slippage = 0.10;
+    StepKernelState step_state = make_step_state_with_perp_symbol();
+    Account account(50000.0, 0);
+    std::optional<OrderRejectInfo> reject{};
+
+    ASSERT_TRUE(OrderEntryService::Execute(runtime_state, account, step_state, make_perp_limit_request(1.0, 110.0), reject));
+    auto market = make_single_symbol_market("BTCUSDT", 95.0, 110.0, 90.0, 95.0, 1000.0, 0);
+    std::vector<QTrading::Infra::Exchanges::BinanceSim::Domain::MatchFill> fills{};
+    QTrading::Infra::Exchanges::BinanceSim::Domain::MatchingEngine::RunStep(runtime_state, step_state, market, fills);
+    ASSERT_EQ(fills.size(), 1u);
+    EXPECT_NEAR(fills[0].price, 104.5, 1e-12);
+}
+
+TEST(OrderEntryServiceTest, MarketImpactSlippageCurveWorsensLargeOrderMoreThanSmallOrder)
+{
+    BinanceExchangeRuntimeState runtime_state{};
+    runtime_state.simulation_config.market_impact_slippage_enabled = true;
+    runtime_state.simulation_config.market_impact_base_bps = 0.0;
+    runtime_state.simulation_config.market_impact_max_bps = 500.0;
+    runtime_state.simulation_config.market_impact_size_exponent = 1.0;
+    StepKernelState step_state = make_step_state_with_perp_symbol();
+    Account account(100000.0, 0);
+    std::optional<OrderRejectInfo> reject{};
+
+    ASSERT_TRUE(OrderEntryService::Execute(runtime_state, account, step_state, make_perp_market_request(1.0), reject));
+    ASSERT_TRUE(OrderEntryService::Execute(runtime_state, account, step_state, make_perp_market_request(8.0), reject));
+    auto market = make_single_symbol_market("BTCUSDT", 100.0, 120.0, 80.0, 100.0, 100.0, 0);
+    std::vector<QTrading::Infra::Exchanges::BinanceSim::Domain::MatchFill> fills{};
+    QTrading::Infra::Exchanges::BinanceSim::Domain::MatchingEngine::RunStep(runtime_state, step_state, market, fills);
+    ASSERT_EQ(fills.size(), 2u);
+
+    const QTrading::Infra::Exchanges::BinanceSim::Domain::MatchFill* small = nullptr;
+    const QTrading::Infra::Exchanges::BinanceSim::Domain::MatchFill* large = nullptr;
+    for (const auto& fill : fills) {
+        if (std::abs(fill.order_quantity - 1.0) < 1e-12) {
+            small = &fill;
+        }
+        if (std::abs(fill.order_quantity - 8.0) < 1e-12) {
+            large = &fill;
+        }
+    }
+    ASSERT_NE(small, nullptr);
+    ASSERT_NE(large, nullptr);
+    EXPECT_GT(large->impact_slippage_bps, small->impact_slippage_bps);
+    EXPECT_GT(large->price, small->price);
+}
+
+TEST(OrderEntryServiceTest, MarketImpactSlippageRespectsLimitProtection)
+{
+    BinanceExchangeRuntimeState runtime_state{};
+    runtime_state.simulation_config.market_impact_slippage_enabled = true;
+    runtime_state.simulation_config.market_impact_base_bps = 0.0;
+    runtime_state.simulation_config.market_impact_max_bps = 5000.0;
+    runtime_state.simulation_config.market_impact_size_exponent = 1.0;
+    StepKernelState step_state = make_step_state_with_perp_symbol();
+    Account account(100000.0, 0);
+    std::optional<OrderRejectInfo> reject{};
+
+    ASSERT_TRUE(OrderEntryService::Execute(runtime_state, account, step_state, make_perp_limit_request(8.0, 100.0), reject));
+    auto market = make_single_symbol_market("BTCUSDT", 105.0, 110.0, 95.0, 100.0, 100.0, 0);
+    std::vector<QTrading::Infra::Exchanges::BinanceSim::Domain::MatchFill> fills{};
+    QTrading::Infra::Exchanges::BinanceSim::Domain::MatchingEngine::RunStep(runtime_state, step_state, market, fills);
+    ASSERT_EQ(fills.size(), 1u);
+    EXPECT_LE(fills[0].price, 100.0 + 1e-12);
+}
+
+TEST(OrderEntryServiceTest, TakerProbabilityModelUsesDiscreteFeeRate)
+{
+    BinanceExchangeRuntimeState runtime_state{};
+    runtime_state.simulation_config.taker_probability_model_enabled = true;
+    runtime_state.simulation_config.taker_probability_bias = -1.0;
+    runtime_state.simulation_config.taker_probability_penetration_weight = 2.0;
+    runtime_state.simulation_config.taker_probability_size_weight = 0.5;
+    runtime_state.simulation_config.taker_probability_taker_weight = 0.5;
+    StepKernelState step_state = make_step_state_with_perp_symbol();
+    Account account(100000.0, 0);
+    std::optional<OrderRejectInfo> reject{};
+
+    ASSERT_TRUE(OrderEntryService::Execute(runtime_state, account, step_state, make_perp_limit_request(1.0, 99.0), reject));
+    auto market = make_single_symbol_market("BTCUSDT", 100.0, 110.0, 90.0, 100.0, 100.0, 0);
+    ASSERT_TRUE(market.trade_klines_by_id[0].has_value());
+    market.trade_klines_by_id[0]->TakerBuyBaseVolume = 90.0;
+    std::vector<QTrading::Infra::Exchanges::BinanceSim::Domain::MatchFill> fills{};
+    QTrading::Infra::Exchanges::BinanceSim::Domain::MatchingEngine::RunStep(runtime_state, step_state, market, fills);
+    ASSERT_EQ(fills.size(), 1u);
+    EXPECT_GT(fills[0].taker_probability, 0.0);
+    EXPECT_LT(fills[0].taker_probability, 1.0);
+    QTrading::Infra::Exchanges::BinanceSim::Domain::FillSettlementEngine::Apply(runtime_state, account, fills);
+    ASSERT_EQ(runtime_state.positions.size(), 1u);
+    const double expected_rate = fills[0].is_taker ? 0.0005 : 0.0002;
+    EXPECT_NEAR(runtime_state.positions[0].fee_rate, expected_rate, 1e-12);
+}
+
 TEST(OrderEntryServiceTest, CancelOrderByIdRemovesRemainingOpenOrderAndKeepsFilledPosition)
 {
     BinanceExchangeRuntimeState runtime_state{};

@@ -1,5 +1,6 @@
 #include "Exchanges/BinanceSimulator/Account/Account.hpp"
 
+#include <algorithm>
 #include <stdexcept>
 
 namespace QTrading::Infra::Exchanges::BinanceSim {
@@ -60,7 +61,7 @@ uint64_t Account::get_state_version() const
 
 double Account::total_unrealized_pnl() const
 {
-    return 0.0;
+    return perp_balance_.UnrealizedPnl;
 }
 
 void Account::apply_spot_cash_delta(double delta)
@@ -76,10 +77,57 @@ void Account::apply_spot_cash_delta(double delta)
 void Account::apply_perp_wallet_delta(double delta)
 {
     perp_balance_.WalletBalance += delta;
-    perp_balance_.MarginBalance = perp_balance_.WalletBalance;
-    perp_balance_.AvailableBalance = perp_balance_.WalletBalance - perp_balance_.PositionInitialMargin;
-    perp_balance_.Equity = perp_balance_.WalletBalance;
+    perp_balance_.MarginBalance = perp_balance_.WalletBalance + perp_balance_.UnrealizedPnl;
+    perp_balance_.AvailableBalance = perp_balance_.MarginBalance -
+        perp_balance_.PositionInitialMargin -
+        perp_balance_.OpenOrderInitialMargin;
+    perp_balance_.Equity = perp_balance_.MarginBalance;
+    if (perp_balance_.AvailableBalance < 0.0) {
+        perp_balance_.AvailableBalance = 0.0;
+    }
+    perp_balance_.MaintenanceMargin = std::max(0.0, perp_balance_.MaintenanceMargin);
     sync_total_cash_();
+    ++state_version_;
+}
+
+void Account::sync_open_order_initial_margins(double spot_open_order_initial_margin, double perp_open_order_initial_margin)
+{
+    spot_balance_.OpenOrderInitialMargin = std::max(0.0, spot_open_order_initial_margin);
+    perp_balance_.OpenOrderInitialMargin = std::max(0.0, perp_open_order_initial_margin);
+
+    spot_balance_.AvailableBalance =
+        spot_balance_.WalletBalance -
+        spot_balance_.PositionInitialMargin -
+        spot_balance_.OpenOrderInitialMargin;
+    if (spot_balance_.AvailableBalance < 0.0) {
+        spot_balance_.AvailableBalance = 0.0;
+    }
+
+    perp_balance_.MarginBalance = perp_balance_.WalletBalance + perp_balance_.UnrealizedPnl;
+    perp_balance_.Equity = perp_balance_.MarginBalance;
+    perp_balance_.AvailableBalance =
+        perp_balance_.MarginBalance -
+        perp_balance_.PositionInitialMargin -
+        perp_balance_.OpenOrderInitialMargin;
+    if (perp_balance_.AvailableBalance < 0.0) {
+        perp_balance_.AvailableBalance = 0.0;
+    }
+    ++state_version_;
+}
+
+void Account::update_perp_mark_state(double unrealized_pnl, double position_initial_margin, double maintenance_margin)
+{
+    perp_balance_.UnrealizedPnl = unrealized_pnl;
+    perp_balance_.PositionInitialMargin = std::max(0.0, position_initial_margin);
+    perp_balance_.MaintenanceMargin = std::max(0.0, maintenance_margin);
+    perp_balance_.MarginBalance = perp_balance_.WalletBalance + perp_balance_.UnrealizedPnl;
+    perp_balance_.Equity = perp_balance_.MarginBalance;
+    perp_balance_.AvailableBalance = perp_balance_.MarginBalance -
+        perp_balance_.PositionInitialMargin -
+        perp_balance_.OpenOrderInitialMargin;
+    if (perp_balance_.AvailableBalance < 0.0) {
+        perp_balance_.AvailableBalance = 0.0;
+    }
     ++state_version_;
 }
 

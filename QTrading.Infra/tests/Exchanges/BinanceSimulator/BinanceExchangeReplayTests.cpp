@@ -1824,6 +1824,42 @@ TEST_F(BinanceExchangeFixture, PerpMarketBuyCreatesPositionAndDebitsFee)
     EXPECT_NEAR(perp_balance.WalletBalance, 999.9, 1e-9);
 }
 
+TEST_F(BinanceExchangeFixture, UnrealizedPnlUsesMarkOverrideNotTradeClose)
+{
+    WriteCsv("btc.csv", {
+        {      0,100.0,100.0,100.0,100.0,1000.0, 30000,1000.0,1,0,0 },
+        {  60000,150.0,150.0,150.0,150.0,1000.0, 90000,1000.0,1,0,0 }
+    });
+    WriteCsv("btc_mark.csv", {
+        {      0,100.0,100.0,100.0,100.0,1000.0, 30000,1000.0,1,0,0 },
+        {  60000, 80.0, 80.0, 80.0, 80.0,1000.0, 90000,1000.0,1,0,0 }
+    });
+
+    Account::AccountInitConfig init{};
+    init.spot_initial_cash = 0.0;
+    init.perp_initial_wallet = 50000.0;
+    BinanceExchange exchange(
+        { { "BTCUSDT",
+            (tmp_dir / "btc.csv").string(),
+            std::nullopt,
+            std::optional<std::string>((tmp_dir / "btc_mark.csv").string()) } },
+        nullptr,
+        init);
+    exchange.set_symbol_leverage("BTCUSDT", 10.0);
+
+    ASSERT_TRUE(exchange.perp.place_order("BTCUSDT", 1.0, 100.0, QTrading::Dto::Trading::OrderSide::Buy));
+    ASSERT_TRUE(exchange.step());
+    (void)exchange.get_market_channel()->Receive();
+
+    ASSERT_TRUE(exchange.step());
+    (void)exchange.get_market_channel()->Receive();
+
+    BinanceExchange::StatusSnapshot snapshot{};
+    exchange.FillStatusSnapshot(snapshot);
+    EXPECT_NEAR(snapshot.unrealized_pnl, -20.0, 1e-12);
+    EXPECT_NEAR(exchange.account_state().total_unrealized_pnl(), -20.0, 1e-12);
+}
+
 TEST_F(BinanceExchangeFixture, OrderChannelPublishesWhenOrderBookChangesInCurrentKernel)
 {
     WriteCsv("btc.csv", {

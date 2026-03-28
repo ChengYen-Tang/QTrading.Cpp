@@ -26,6 +26,10 @@ struct MatchFill {
     bool reduce_only{ false };
     bool close_position{ false };
     bool is_taker{ false };
+    double fill_probability{ 1.0 };
+    double taker_probability{ 0.0 };
+    double impact_slippage_bps{ 0.0 };
+    double order_quantity{ 0.0 };
     double quantity{ 0.0 };
     double price{ 0.0 };
 };

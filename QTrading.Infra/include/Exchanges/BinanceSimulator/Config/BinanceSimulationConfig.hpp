@@ -29,6 +29,26 @@ struct SimulationConfig {
     KlineVolumeSplitMode kline_volume_split_mode{ KlineVolumeSplitMode::TotalOnly };
     uint64_t intra_bar_random_seed{ 42ull };
     uint32_t intra_bar_monte_carlo_samples{ 1u };
+    bool limit_fill_probability_enabled{ false };
+    double limit_fill_probability_bias{ 0.0 };
+    double limit_fill_probability_penetration_weight{ 0.0 };
+    double limit_fill_probability_size_weight{ 0.0 };
+    double limit_fill_probability_taker_weight{ 0.0 };
+    double limit_fill_probability_interaction_weight{ 0.0 };
+    bool taker_probability_model_enabled{ false };
+    double taker_probability_bias{ 0.0 };
+    double taker_probability_penetration_weight{ 0.0 };
+    double taker_probability_size_weight{ 0.0 };
+    double taker_probability_taker_weight{ 0.0 };
+    double taker_probability_interaction_weight{ 0.0 };
+    double market_execution_slippage{ 0.0 };
+    double limit_execution_slippage{ 0.0 };
+    bool market_impact_slippage_enabled{ false };
+    double market_impact_base_bps{ 0.0 };
+    double market_impact_max_bps{ 0.0 };
+    double market_impact_size_exponent{ 1.0 };
+    double market_impact_liquidity_bias{ 0.0 };
+    double market_impact_offset_bps{ 0.0 };
     double uncertainty_band_bps{ 0.0 };
     double basis_warning_bps{ 0.0 };
     // Reserved risk-overlay controls kept for facade/config compatibility.

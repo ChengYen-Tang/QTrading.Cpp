@@ -366,6 +366,65 @@ void emit_status_log_if_needed(
     mutable_step_state.last_logged_status_version = account_state_version;
 }
 
+void refresh_perp_mark_state(
+    State::StepKernelState& step_state,
+    const State::SnapshotState& snapshot_state,
+    State::BinanceExchangeRuntimeState& runtime_state,
+    Account& account,
+    const QTrading::Dto::Market::Binance::MultiKlineDto& market_payload)
+{
+    constexpr double kEpsilon = 1e-12;
+    double total_unrealized = 0.0;
+    double total_position_initial_margin = 0.0;
+    double total_maintenance_margin = 0.0;
+
+    for (auto& position : runtime_state.positions) {
+        if (position.instrument_type != QTrading::Dto::Trading::InstrumentType::Perp ||
+            position.quantity <= kEpsilon) {
+            continue;
+        }
+        const auto it = step_state.symbol_to_id.find(position.symbol);
+        if (it == step_state.symbol_to_id.end()) {
+            continue;
+        }
+        const size_t symbol_id = it->second;
+        double reference_price = 0.0;
+        if (symbol_id < market_payload.mark_klines_by_id.size() &&
+            market_payload.mark_klines_by_id[symbol_id].has_value()) {
+            reference_price = market_payload.mark_klines_by_id[symbol_id]->ClosePrice;
+        }
+        else if (symbol_id < market_payload.trade_klines_by_id.size() &&
+            market_payload.trade_klines_by_id[symbol_id].has_value()) {
+            reference_price = market_payload.trade_klines_by_id[symbol_id]->ClosePrice;
+        }
+        else if (symbol_id < snapshot_state.has_last_mark_price_by_symbol.size() &&
+            symbol_id < snapshot_state.last_mark_price_by_symbol.size() &&
+            snapshot_state.has_last_mark_price_by_symbol[symbol_id] != 0) {
+            reference_price = snapshot_state.last_mark_price_by_symbol[symbol_id];
+        }
+        else if (symbol_id < snapshot_state.has_last_trade_price_by_symbol.size() &&
+            symbol_id < snapshot_state.last_trade_price_by_symbol.size() &&
+            snapshot_state.has_last_trade_price_by_symbol[symbol_id] != 0) {
+            reference_price = snapshot_state.last_trade_price_by_symbol[symbol_id];
+        }
+        if (!(reference_price > 0.0)) {
+            continue;
+        }
+
+        const double direction = position.is_long ? 1.0 : -1.0;
+        position.unrealized_pnl = (reference_price - position.entry_price) * position.quantity * direction;
+        position.notional = std::abs(position.quantity * reference_price);
+        total_unrealized += position.unrealized_pnl;
+        total_position_initial_margin += position.initial_margin;
+        total_maintenance_margin += position.maintenance_margin;
+    }
+
+    account.update_perp_mark_state(
+        total_unrealized,
+        total_position_initial_margin,
+        total_maintenance_margin);
+}
+
 void emit_market_funding_events(
     const State::StepKernelState& step_state,
     const State::BinanceExchangeRuntimeState& runtime_state,
@@ -607,6 +666,10 @@ bool StepKernel::run_step() const
             positions_maybe_changed = true;
         }
         Domain::OrderEntryService::SyncOpenOrderMargins(runtime_state);
+        exchange_.account_state().sync_open_order_initial_margins(
+            runtime_state.spot_open_order_initial_margin,
+            runtime_state.perp_open_order_initial_margin);
+        refresh_perp_mark_state(step_state, snapshot_state, runtime_state, exchange_.account_state(), *frame.market_payload);
     }
 
     Output::StepObservableContext observable_ctx{};

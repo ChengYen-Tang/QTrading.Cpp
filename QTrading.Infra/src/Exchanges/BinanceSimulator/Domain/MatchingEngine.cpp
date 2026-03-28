@@ -27,6 +27,16 @@ double clamp01(double value) noexcept
     return value;
 }
 
+double sigmoid(double x) noexcept
+{
+    if (x >= 0.0) {
+        const double z = std::exp(-x);
+        return 1.0 / (1.0 + z);
+    }
+    const double z = std::exp(x);
+    return z / (1.0 + z);
+}
+
 void seed_perp_reducible_quantities(
     const State::BinanceExchangeRuntimeState& runtime_state,
     const State::StepKernelState& step_state,
@@ -84,6 +94,79 @@ double compute_fill_price(const QTrading::dto::Order& order, const QTrading::Dto
     return order.price;
 }
 
+double apply_execution_slippage(
+    const QTrading::dto::Order& order,
+    const QTrading::Dto::Market::Binance::TradeKlineDto& kline,
+    const Config::SimulationConfig& config,
+    double raw_price) noexcept
+{
+    if (!(raw_price > 0.0)) {
+        return raw_price;
+    }
+    if (order.price <= 0.0) {
+        const double slip = std::max(0.0, config.market_execution_slippage);
+        if (slip <= 0.0) {
+            return raw_price;
+        }
+        if (order.side == QTrading::Dto::Trading::OrderSide::Buy) {
+            return std::min(kline.HighPrice, raw_price * (1.0 + slip));
+        }
+        return std::max(kline.LowPrice, raw_price * (1.0 - slip));
+    }
+
+    const double slip = std::max(0.0, config.limit_execution_slippage);
+    if (slip <= 0.0) {
+        return raw_price;
+    }
+    if (order.side == QTrading::Dto::Trading::OrderSide::Buy) {
+        const double worsened = std::min(kline.HighPrice, kline.ClosePrice * (1.0 + slip));
+        return std::min(order.price, worsened);
+    }
+    const double worsened = std::max(kline.LowPrice, kline.ClosePrice * (1.0 - slip));
+    return std::max(order.price, worsened);
+}
+
+double apply_market_impact_slippage(
+    const QTrading::dto::Order& order,
+    const QTrading::Dto::Market::Binance::TradeKlineDto& kline,
+    const Config::SimulationConfig& config,
+    double quantity,
+    double available_liquidity,
+    double raw_price,
+    double& out_impact_bps) noexcept
+{
+    out_impact_bps = 0.0;
+    if (!(raw_price > 0.0) || quantity <= kEpsilon || !config.market_impact_slippage_enabled) {
+        return raw_price;
+    }
+    const double denom = std::max(available_liquidity + std::max(0.0, config.market_impact_liquidity_bias), kEpsilon);
+    const double size_ratio = std::max(0.0, quantity / denom);
+    const double exponent = std::max(0.1, config.market_impact_size_exponent);
+    double impact_bps = std::max(0.0, config.market_impact_base_bps) +
+        std::max(0.0, config.market_impact_max_bps) * std::pow(size_ratio, exponent) +
+        std::max(0.0, config.market_impact_offset_bps);
+    const double max_bps = std::max(0.0, config.market_impact_max_bps);
+    if (max_bps > 0.0) {
+        impact_bps = std::min(impact_bps, max_bps);
+    }
+    out_impact_bps = impact_bps;
+    const double ratio = impact_bps / 10000.0;
+    if (order.side == QTrading::Dto::Trading::OrderSide::Buy) {
+        double impacted = raw_price * (1.0 + ratio);
+        impacted = std::min(impacted, kline.HighPrice);
+        if (order.price > 0.0) {
+            impacted = std::min(impacted, order.price);
+        }
+        return impacted;
+    }
+    double impacted = raw_price * (1.0 - ratio);
+    impacted = std::max(impacted, kline.LowPrice);
+    if (order.price > 0.0) {
+        impacted = std::max(impacted, order.price);
+    }
+    return impacted;
+}
+
 double infer_taker_buy_ratio(const QTrading::Dto::Market::Binance::TradeKlineDto& kline) noexcept
 {
     if (kline.Volume > kEpsilon &&
@@ -96,6 +179,62 @@ double infer_taker_buy_ratio(const QTrading::Dto::Market::Binance::TradeKlineDto
         return 0.5;
     }
     return clamp01((kline.ClosePrice - kline.LowPrice) / range);
+}
+
+double compute_penetration_ratio(const QTrading::dto::Order& order, const QTrading::Dto::Market::Binance::TradeKlineDto& kline) noexcept
+{
+    const double range = kline.HighPrice - kline.LowPrice;
+    if (range <= kEpsilon || order.price <= 0.0) {
+        return 1.0;
+    }
+    if (order.side == QTrading::Dto::Trading::OrderSide::Buy) {
+        return clamp01((order.price - kline.LowPrice) / range);
+    }
+    return clamp01((kline.HighPrice - order.price) / range);
+}
+
+double compute_limit_fill_probability(
+    const QTrading::dto::Order& order,
+    const QTrading::Dto::Market::Binance::TradeKlineDto& kline,
+    const Config::SimulationConfig& config,
+    double available_liquidity,
+    double taker_buy_ratio) noexcept
+{
+    if (!config.limit_fill_probability_enabled || order.price <= 0.0) {
+        return 1.0;
+    }
+    const double penetration = compute_penetration_ratio(order, kline);
+    const double size_ratio = clamp01(order.quantity / std::max(available_liquidity, 1.0));
+    const double interaction = penetration * size_ratio;
+    const double z =
+        config.limit_fill_probability_bias +
+        config.limit_fill_probability_penetration_weight * penetration -
+        config.limit_fill_probability_size_weight * size_ratio +
+        config.limit_fill_probability_taker_weight * taker_buy_ratio +
+        config.limit_fill_probability_interaction_weight * interaction;
+    return clamp01(sigmoid(z));
+}
+
+double compute_taker_probability(
+    const QTrading::dto::Order& order,
+    const QTrading::Dto::Market::Binance::TradeKlineDto& kline,
+    const Config::SimulationConfig& config,
+    double available_liquidity,
+    double taker_buy_ratio) noexcept
+{
+    if (!config.taker_probability_model_enabled) {
+        return order.price <= 0.0 ? 1.0 : 0.0;
+    }
+    const double penetration = compute_penetration_ratio(order, kline);
+    const double size_ratio = clamp01(order.quantity / std::max(available_liquidity, 1.0));
+    const double interaction = penetration * taker_buy_ratio;
+    const double z =
+        config.taker_probability_bias +
+        config.taker_probability_penetration_weight * penetration +
+        config.taker_probability_size_weight * size_ratio +
+        config.taker_probability_taker_weight * taker_buy_ratio +
+        config.taker_probability_interaction_weight * interaction;
+    return clamp01(sigmoid(z));
 }
 
 double deterministic_unit_random(uint64_t seed, uint64_t ts, size_t symbol_index, uint32_t sample_index) noexcept
@@ -280,11 +419,49 @@ void MatchingEngine::RunStep(
             }
             max_fill_qty = std::min(max_fill_qty, reducible_qty);
         }
-        const double fill_qty = max_fill_qty;
+        const double taker_buy_ratio = resolve_taker_buy_ratio(
+            kline,
+            runtime_state.simulation_config,
+            market.Timestamp,
+            symbol_index);
+        const double fill_probability = compute_limit_fill_probability(
+            order,
+            kline,
+            runtime_state.simulation_config,
+            std::max(available_liquidity, kEpsilon),
+            taker_buy_ratio);
+        const double probabilistic_qty = max_fill_qty * fill_probability;
+        const double fill_qty = probabilistic_qty;
         if (fill_qty <= kEpsilon) {
             next_orders.emplace_back(std::move(order));
             continue;
         }
+        double fill_taker_probability = compute_taker_probability(
+            order,
+            kline,
+            runtime_state.simulation_config,
+            std::max(available_liquidity, kEpsilon),
+            taker_buy_ratio);
+        if (!runtime_state.simulation_config.taker_probability_model_enabled) {
+            fill_taker_probability = is_taker ? 1.0 : 0.0;
+        }
+        const bool resolved_taker = runtime_state.simulation_config.taker_probability_model_enabled
+            ? (fill_taker_probability >= 0.5)
+            : is_taker;
+        double impact_bps = 0.0;
+        double adjusted_fill_price = apply_execution_slippage(
+            order,
+            kline,
+            runtime_state.simulation_config,
+            fill_price);
+        adjusted_fill_price = apply_market_impact_slippage(
+            order,
+            kline,
+            runtime_state.simulation_config,
+            fill_qty,
+            std::max(available_liquidity, kEpsilon),
+            adjusted_fill_price,
+            impact_bps);
 
         MatchFill fill{};
         fill.order_id = order.id;
@@ -294,9 +471,13 @@ void MatchingEngine::RunStep(
         fill.position_side = order.position_side;
         fill.reduce_only = order.reduce_only;
         fill.close_position = order.close_position;
-        fill.is_taker = is_taker;
+        fill.is_taker = resolved_taker;
+        fill.fill_probability = fill_probability;
+        fill.taker_probability = fill_taker_probability;
+        fill.impact_slippage_bps = impact_bps;
+        fill.order_quantity = request_qty;
         fill.quantity = fill_qty;
-        fill.price = fill_price;
+        fill.price = adjusted_fill_price;
         out_fills.emplace_back(std::move(fill));
 
         liquidity_left[symbol_index] -= fill_qty;

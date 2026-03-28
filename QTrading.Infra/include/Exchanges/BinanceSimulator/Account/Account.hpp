@@ -49,6 +49,10 @@ public:
     void apply_spot_cash_delta(double delta);
     /// Applies perp wallet delta and keeps snapshot fields aligned.
     void apply_perp_wallet_delta(double delta);
+    /// Synchronizes open-order margin reservations from runtime calculators.
+    void sync_open_order_initial_margins(double spot_open_order_initial_margin, double perp_open_order_initial_margin);
+    /// Updates perp ledger mark-to-market fields from runtime state.
+    void update_perp_mark_state(double unrealized_pnl, double position_initial_margin, double maintenance_margin);
     /// Available-balance check for spot-side cash operations.
     bool can_debit_spot(double amount) const
     {

@@ -127,7 +127,7 @@
 - [x] AccountTest.IntraBarExpectedPath_SplitsOppositePassiveLimitVolume
 - [x] AccountTest.IntraBarPathModeUsesOpenMarketabilityForTakerClassification
 - [x] AccountTest.IntraBarMonteCarloPathWithFixedSeedIsDeterministic
-- [ ] AccountTest.LimitFillProbabilityModelUsesPenetrationAndSizeRatio
+- [x] AccountTest.LimitFillProbabilityModelUsesPenetrationAndSizeRatio
 - [x] `AccountTest.HedgeMode_OrderRequiresExplicitPositionSide_IsRejectedWithoutException`
 - [x] `AccountTest.ReduceOnlyWithoutReduciblePosition_IsRejectedWithoutException`
 - [x] `AccountTest.HedgeModeReduceOnly_WrongSideOrNoMatchingPosition_IsRejectedWithoutException`
@@ -136,15 +136,15 @@
 - [x] `AccountTest.ReduceOnly_HedgeMode_RequiresExplicitPositionSide`
 - [x] `AccountTest.ReduceOnly_HedgeMode_DirectionMustCloseCorrectSide`
 - [x] AccountTest.OpenOrderInitialMargin_MarketOrderUsesLastMarkWithBuffer
-- [ ] AccountTest.UnrealizedPnlUsesMarkOverrideNotTradeClose
+- [x] AccountTest.UnrealizedPnlUsesMarkOverrideNotTradeClose
 - [x] AccountTest.OpenOrderInitialMargin_OneWayClosingDirectionDoesNotReserveMargin
 - [x] AccountTest.OpenOrderInitialMargin_OneWayFlipReservesOnlyForOpeningOvershoot
-- [ ] AccountTest.MarketOrderFill_UsesExecutionSlippageBoundedByOHLC
-- [ ] AccountTest.LimitOrderFill_UsesExecutionSlippageButRespectsLimit
-- [ ] AccountTest.LimitOrderFill_ExecutionSlippageCanWorsenPriceWithinLimit
-- [ ] AccountTest.MarketImpactSlippageCurveWorsensLargeOrderMoreThanSmallOrder
-- [ ] AccountTest.MarketImpactSlippageRespectsLimitProtection
-- [ ] AccountTest.TakerProbabilityModelUsesDiscreteFeeRate
+- [x] AccountTest.MarketOrderFill_UsesExecutionSlippageBoundedByOHLC
+- [x] AccountTest.LimitOrderFill_UsesExecutionSlippageButRespectsLimit
+- [x] AccountTest.LimitOrderFill_ExecutionSlippageCanWorsenPriceWithinLimit
+- [x] AccountTest.MarketImpactSlippageCurveWorsensLargeOrderMoreThanSmallOrder
+- [x] AccountTest.MarketImpactSlippageRespectsLimitProtection
+- [x] AccountTest.TakerProbabilityModelUsesDiscreteFeeRate
 - [x] AccountTest.TickVolumeSplit_UsesTakerBuyBaseVolumePools
 - [x] AccountTest.TickVolumeSplit_Heuristic_CloseNearHighBiasesSellOrders
 - [x] AccountTest.TickVolumeSplit_Heuristic_CloseNearLowBiasesBuyOrders
@@ -200,7 +200,6 @@
     - reserve-aware available balance
     - strict/compatibility instrument policy
     - hedge mode lifecycle
-    - advanced fill / probability / slippage / impact
     - full margin tier / mode switching / merge rules
 
 說明：
