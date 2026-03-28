@@ -9,6 +9,7 @@ struct AccountInitConfig {
     int vip_level{ 0 };
     bool hedge_mode{ false };
     bool strict_binance_mode{ true };
+    bool merge_positions_enabled{ true };
 };
 
 } // namespace QTrading::Infra::Exchanges::BinanceSim::Contracts

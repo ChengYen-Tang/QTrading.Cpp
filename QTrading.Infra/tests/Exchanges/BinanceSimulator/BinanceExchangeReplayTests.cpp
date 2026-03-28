@@ -11,6 +11,9 @@
 #include "InfraLogTestFixture.hpp"
 #include "Exchanges/BinanceSimulator/BinanceExchange.hpp"
 #include "Exchanges/BinanceSimulator/Application/OrderCommandKernel.hpp"
+#include "Exchanges/BinanceSimulator/Domain/LiquidationEligibilityDecision.hpp"
+#include "Exchanges/BinanceSimulator/State/BinanceExchangeRuntimeState.hpp"
+#include "Exchanges/BinanceSimulator/State/StepKernelState.hpp"
 #include "Exchanges/BinanceSimulator/Support/BinanceExchangeSkeletonSupport.hpp"
 
 namespace {
@@ -937,6 +940,126 @@ TEST_F(BinanceExchangeFixture, CompatibilityModeAllowsHedgeReduceOnlyWhenStrictD
 
     ASSERT_EQ(exchange.get_all_positions().size(), 1u);
     EXPECT_NEAR(exchange.get_all_positions()[0].quantity, 1.0, 1e-12);
+}
+
+TEST_F(BinanceExchangeFixture, MergePositionsSameDirection)
+{
+    WriteCsv("btc.csv", {
+        {      0,1000,1000,1000,1000,1000, 30000,100,1,0,0 },
+        {  60000,1000,1000,1000,1000,1000, 90000,100,1,0,0 }
+    });
+
+    Account::AccountInitConfig init{};
+    init.spot_initial_cash = 0.0;
+    init.perp_initial_wallet = 10000.0;
+    init.hedge_mode = true;
+    BinanceExchange exchange(
+        { { "BTCUSDT", (tmp_dir / "btc.csv").string() } },
+        nullptr,
+        init);
+
+    ASSERT_TRUE(exchange.perp.place_order(
+        "BTCUSDT", 1.0, 1000.0, QTrading::Dto::Trading::OrderSide::Buy,
+        QTrading::Dto::Trading::PositionSide::Long));
+    ASSERT_TRUE(exchange.perp.place_order(
+        "BTCUSDT", 2.0, 1000.0, QTrading::Dto::Trading::OrderSide::Buy,
+        QTrading::Dto::Trading::PositionSide::Long));
+    ASSERT_TRUE(exchange.step());
+    (void)exchange.get_market_channel()->Receive();
+
+    const auto positions = exchange.get_all_positions();
+    ASSERT_EQ(positions.size(), 1u);
+    EXPECT_TRUE(positions[0].is_long);
+    EXPECT_NEAR(positions[0].quantity, 3.0, 1e-12);
+}
+
+TEST_F(BinanceExchangeFixture, MergePositionsCanBeDisabledToPreserveFillLineage)
+{
+    WriteCsv("btc.csv", {
+        {      0,1000,1000,1000,1000,1000, 30000,100,1,0,0 },
+        {  60000,1000,1000,1000,1000,1000, 90000,100,1,0,0 }
+    });
+
+    Account::AccountInitConfig init{};
+    init.spot_initial_cash = 0.0;
+    init.perp_initial_wallet = 10000.0;
+    init.hedge_mode = true;
+    init.merge_positions_enabled = false;
+    BinanceExchange exchange(
+        { { "BTCUSDT", (tmp_dir / "btc.csv").string() } },
+        nullptr,
+        init);
+
+    ASSERT_TRUE(exchange.perp.place_order(
+        "BTCUSDT", 1.0, 1000.0, QTrading::Dto::Trading::OrderSide::Buy,
+        QTrading::Dto::Trading::PositionSide::Long));
+    ASSERT_TRUE(exchange.perp.place_order(
+        "BTCUSDT", 2.0, 1000.0, QTrading::Dto::Trading::OrderSide::Buy,
+        QTrading::Dto::Trading::PositionSide::Long));
+    ASSERT_TRUE(exchange.step());
+    (void)exchange.get_market_channel()->Receive();
+
+    const auto positions = exchange.get_all_positions();
+    ASSERT_EQ(positions.size(), 2u);
+    EXPECT_NE(positions[0].id, positions[1].id);
+    EXPECT_NEAR(positions[0].quantity + positions[1].quantity, 3.0, 1e-12);
+}
+
+TEST_F(BinanceExchangeFixture, MergePositionsDifferentDirectionNotMerged)
+{
+    WriteCsv("btc.csv", {
+        {      0,1000,1000,1000,1000,1000, 30000,100,1,0,0 },
+        {  60000,1000,1000,1000,1000,1000, 90000,100,1,0,0 }
+    });
+
+    Account::AccountInitConfig init{};
+    init.spot_initial_cash = 0.0;
+    init.perp_initial_wallet = 10000.0;
+    init.hedge_mode = true;
+    BinanceExchange exchange(
+        { { "BTCUSDT", (tmp_dir / "btc.csv").string() } },
+        nullptr,
+        init);
+
+    ASSERT_TRUE(exchange.perp.place_order(
+        "BTCUSDT", 1.0, 1000.0, QTrading::Dto::Trading::OrderSide::Buy,
+        QTrading::Dto::Trading::PositionSide::Long));
+    ASSERT_TRUE(exchange.perp.place_order(
+        "BTCUSDT", 1.0, 1000.0, QTrading::Dto::Trading::OrderSide::Sell,
+        QTrading::Dto::Trading::PositionSide::Short));
+    ASSERT_TRUE(exchange.step());
+    (void)exchange.get_market_channel()->Receive();
+
+    const auto positions = exchange.get_all_positions();
+    ASSERT_EQ(positions.size(), 2u);
+    EXPECT_NE(positions[0].is_long, positions[1].is_long);
+}
+
+TEST_F(BinanceExchangeFixture, AdjustLeverageWithExistingPositions)
+{
+    WriteCsv("btc.csv", {
+        {      0,4000,4000,4000,4000,1000, 30000,100,1,0,0 },
+        {  60000,4000,4000,4000,4000,1000, 90000,100,1,0,0 }
+    });
+
+    Account::AccountInitConfig init{};
+    init.spot_initial_cash = 0.0;
+    init.perp_initial_wallet = 50000.0;
+    BinanceExchange exchange(
+        { { "BTCUSDT", (tmp_dir / "btc.csv").string() } },
+        nullptr,
+        init);
+
+    exchange.set_symbol_leverage("BTCUSDT", 20.0);
+    ASSERT_TRUE(exchange.perp.place_order("BTCUSDT", 1.0, 4000.0, QTrading::Dto::Trading::OrderSide::Buy));
+    ASSERT_TRUE(exchange.step());
+    (void)exchange.get_market_channel()->Receive();
+    ASSERT_FALSE(exchange.get_all_positions().empty());
+
+    exchange.set_symbol_leverage("BTCUSDT", 10.0);
+    EXPECT_DOUBLE_EQ(exchange.get_symbol_leverage("BTCUSDT"), 10.0);
+    exchange.set_symbol_leverage("BTCUSDT", 40.0);
+    EXPECT_DOUBLE_EQ(exchange.get_symbol_leverage("BTCUSDT"), 40.0);
 }
 
 TEST_F(BinanceExchangeFixture, HedgeMode_MultipleSymbols_ReduceOnly)
@@ -2398,6 +2521,97 @@ TEST_F(BinanceExchangeFixture, PerpLiquidationDoesNotConsumeSpotPosition)
 
     EXPECT_TRUE(has_spot_position);
     EXPECT_FALSE(has_perp_position);
+}
+
+TEST_F(BinanceExchangeFixture, LiquidationWarningZoneTriggersStagedReduction)
+{
+    WriteCsv("btc.csv", {
+        {      0, 500.0,500.0,500.0,500.0,10000.0, 30000,10000.0,1,0,0 },
+        {  60000, 433.2,433.2,433.2,433.2,10000.0, 90000,10000.0,1,0,0 }
+    });
+    WriteCsv("btc_mark.csv", {
+        {      0, 500.0,500.0,500.0,500.0,10000.0, 30000,10000.0,1,0,0 },
+        {  60000, 433.2,433.2,433.2,433.2,10000.0, 90000,10000.0,1,0,0 }
+    });
+
+    Account::AccountInitConfig init{};
+    init.spot_initial_cash = 0.0;
+    init.perp_initial_wallet = 350000.0;
+    BinanceExchange exchange(
+        { { "BTCUSDT",
+            (tmp_dir / "btc.csv").string(),
+            std::nullopt,
+            std::optional<std::string>((tmp_dir / "btc_mark.csv").string()) } },
+        nullptr,
+        init);
+    exchange.set_symbol_leverage("BTCUSDT", 75.0);
+
+    ASSERT_TRUE(exchange.perp.place_order("BTCUSDT", 5000.0, 500.0, QTrading::Dto::Trading::OrderSide::Buy));
+    ASSERT_TRUE(exchange.step());
+    (void)exchange.get_market_channel()->Receive();
+    ASSERT_EQ(exchange.get_all_positions().size(), 1u);
+    const double qty_before = exchange.get_all_positions().front().quantity;
+    exchange.perp.close_position("BTCUSDT", 700.0);
+    ASSERT_FALSE(exchange.get_all_open_orders().empty());
+
+    ASSERT_TRUE(exchange.step());
+    (void)exchange.get_market_channel()->Receive();
+    ASSERT_EQ(exchange.get_all_positions().size(), 1u);
+    const double qty_after = exchange.get_all_positions().front().quantity;
+    EXPECT_LT(qty_after, qty_before);
+    EXPECT_GT(qty_after, 0.0);
+    EXPECT_TRUE(exchange.get_all_open_orders().empty());
+}
+
+TEST_F(BinanceExchangeFixture, MaintenanceMarginUsesBracketDeductionAboveFirstTier)
+{
+    QTrading::Infra::Exchanges::BinanceSim::State::BinanceExchangeRuntimeState runtime_state{};
+    QTrading::Infra::Exchanges::BinanceSim::State::StepKernelState step_state{};
+    step_state.symbols.push_back("BTCUSDT");
+    step_state.symbol_to_id.emplace("BTCUSDT", 0);
+
+    QTrading::dto::Position position{};
+    position.id = 1;
+    position.order_id = 1;
+    position.symbol = "BTCUSDT";
+    position.quantity = 1.0;
+    position.entry_price = 100000.0;
+    position.is_long = true;
+    position.instrument_type = QTrading::Dto::Trading::InstrumentType::Perp;
+    runtime_state.positions.push_back(position);
+
+    Account::AccountInitConfig init{};
+    init.spot_initial_cash = 0.0;
+    init.perp_initial_wallet = 1'000'000.0;
+    Account account(init);
+
+    QTrading::Dto::Market::Binance::MultiKlineDto market{};
+    market.symbols = std::make_shared<std::vector<std::string>>(std::initializer_list<std::string>{ "BTCUSDT" });
+    market.trade_klines_by_id.resize(1);
+    market.mark_klines_by_id.resize(1);
+    market.mark_klines_by_id[0] = QTrading::Dto::Market::Binance::ReferenceKlineDto::Point(0, 100000.0);
+
+    std::vector<double> mark_scratch{};
+    std::vector<uint8_t> has_mark_scratch{};
+    const auto health = QTrading::Infra::Exchanges::BinanceSim::Domain::LiquidationEligibilityDecision::Evaluate(
+        runtime_state,
+        account,
+        step_state,
+        market,
+        mark_scratch,
+        has_mark_scratch);
+
+    EXPECT_NEAR(health.maintenance_margin, 450.0, 1e-9);
+
+    runtime_state.positions[0].quantity = 0.4;
+    const auto tier1_health = QTrading::Infra::Exchanges::BinanceSim::Domain::LiquidationEligibilityDecision::Evaluate(
+        runtime_state,
+        account,
+        step_state,
+        market,
+        mark_scratch,
+        has_mark_scratch);
+    EXPECT_NEAR(tier1_health.maintenance_margin, 160.0, 1e-9);
 }
 
 TEST_F(BinanceExchangeFixture, LiquidationRemainsNoOpWithoutDistressInCurrentKernel)

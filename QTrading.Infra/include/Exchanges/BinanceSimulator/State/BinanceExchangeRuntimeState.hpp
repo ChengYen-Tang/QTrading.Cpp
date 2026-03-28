@@ -24,6 +24,7 @@ struct BinanceExchangeRuntimeState {
     std::shared_ptr<QTrading::Log::Logger> logger{};
     bool hedge_mode{ false };
     bool strict_binance_mode{ true };
+    bool merge_positions_enabled{ true };
     std::vector<QTrading::dto::Position> positions;
     std::vector<QTrading::dto::Order> orders;
     std::vector<Contracts::AsyncOrderAck> async_order_acks;

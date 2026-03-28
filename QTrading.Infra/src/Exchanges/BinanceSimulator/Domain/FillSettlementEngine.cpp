@@ -71,6 +71,31 @@ QTrading::dto::Position* find_perp_position(
     return nullptr;
 }
 
+void append_perp_position(
+    State::BinanceExchangeRuntimeState& runtime_state,
+    const MatchFill& fill,
+    double quantity,
+    bool is_long,
+    double fee,
+    double fee_rate)
+{
+    QTrading::dto::Position created{};
+    created.id = next_position_id(runtime_state);
+    created.order_id = fill.order_id;
+    created.symbol = fill.symbol;
+    created.quantity = quantity;
+    created.entry_price = fill.price;
+    created.is_long = is_long;
+    created.notional = created.quantity * created.entry_price;
+    created.initial_margin = 0.0;
+    created.maintenance_margin = 0.0;
+    created.fee = fee;
+    created.leverage = 1.0;
+    created.fee_rate = fee_rate;
+    created.instrument_type = QTrading::Dto::Trading::InstrumentType::Perp;
+    runtime_state.positions.emplace_back(std::move(created));
+}
+
 void apply_spot_fill(
     State::BinanceExchangeRuntimeState& runtime_state,
     Account& account,
@@ -173,22 +198,14 @@ void apply_perp_fill(
         }
 
         account.apply_perp_wallet_delta(-fee);
-        if (!position) {
-            QTrading::dto::Position created{};
-            created.id = next_position_id(runtime_state);
-            created.order_id = fill.order_id;
-            created.symbol = fill.symbol;
-            created.quantity = fill.quantity;
-            created.entry_price = fill.price;
-            created.is_long = fill.side == QTrading::Dto::Trading::OrderSide::Buy;
-            created.notional = created.quantity * created.entry_price;
-            created.initial_margin = 0.0;
-            created.maintenance_margin = 0.0;
-            created.fee = fee;
-            created.leverage = 1.0;
-            created.fee_rate = fee_rate;
-            created.instrument_type = QTrading::Dto::Trading::InstrumentType::Perp;
-            runtime_state.positions.emplace_back(std::move(created));
+        if (!position || !runtime_state.merge_positions_enabled) {
+            append_perp_position(
+                runtime_state,
+                fill,
+                fill.quantity,
+                fill.side == QTrading::Dto::Trading::OrderSide::Buy,
+                fee,
+                fee_rate);
             return;
         }
 
@@ -225,22 +242,15 @@ void apply_perp_fill(
     }
     account.apply_perp_wallet_delta(-fee);
 
-    if (!position) {
-        QTrading::dto::Position created{};
-        created.id = next_position_id(runtime_state);
-        created.order_id = fill.order_id;
-        created.symbol = fill.symbol;
-        created.quantity = std::abs(signed_fill);
-        created.entry_price = fill.price;
-        created.is_long = signed_fill > 0.0;
-        created.notional = created.quantity * created.entry_price;
-        created.initial_margin = 0.0;
-        created.maintenance_margin = 0.0;
-        created.fee = fee;
-        created.leverage = 1.0;
-        created.fee_rate = fee_rate;
-        created.instrument_type = QTrading::Dto::Trading::InstrumentType::Perp;
-        runtime_state.positions.emplace_back(std::move(created));
+    if (!position || (runtime_state.merge_positions_enabled == false &&
+            ((position->is_long && signed_fill > 0.0) || (!position->is_long && signed_fill < 0.0)))) {
+        append_perp_position(
+            runtime_state,
+            fill,
+            std::abs(signed_fill),
+            signed_fill > 0.0,
+            fee,
+            fee_rate);
         return;
     }
 

@@ -81,7 +81,10 @@ struct StepKernelState {
     bool has_published_orders{ false };
     std::vector<Domain::MatchFill> match_fills_scratch;
     std::vector<QTrading::dto::Order> matching_orders_next_scratch;
+    std::vector<size_t> matching_order_index_scratch;
     std::vector<double> matching_liquidity_scratch;
+    std::vector<double> matching_buy_liquidity_scratch;
+    std::vector<double> matching_sell_liquidity_scratch;
     std::vector<uint8_t> matching_has_liquidity_scratch;
     std::vector<double> matching_reducible_long_scratch;
     std::vector<double> matching_reducible_short_scratch;

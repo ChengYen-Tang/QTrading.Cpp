@@ -9,9 +9,21 @@ enum class SpotCommissionMode {
     BaseOnBuyQuoteOnSell = 1,
 };
 
+enum class IntraBarPathMode {
+    CloseMarketability = 0,
+    OpenMarketability = 1,
+};
+
+enum class KlineVolumeSplitMode {
+    TotalOnly = 0,
+    OppositePassiveSplit = 1,
+};
+
 struct SimulationConfig {
     SpotCommissionMode spot_commission_mode{ SpotCommissionMode::QuoteOnBuyQuoteOnSell };
     Contracts::FundingApplyTiming funding_apply_timing{ Contracts::FundingApplyTiming::BeforeMatching };
+    IntraBarPathMode intra_bar_path_mode{ IntraBarPathMode::CloseMarketability };
+    KlineVolumeSplitMode kline_volume_split_mode{ KlineVolumeSplitMode::TotalOnly };
     double uncertainty_band_bps{ 0.0 };
     double basis_warning_bps{ 0.0 };
     // Reserved risk-overlay controls kept for facade/config compatibility.

@@ -13,7 +13,22 @@ namespace QTrading::Infra::Exchanges::BinanceSim::Domain {
 namespace {
 
 constexpr double kEpsilon = 1e-12;
-constexpr double kMaintenanceMarginRate = 0.004;
+constexpr double kTier1Cap = 50'000.0;
+constexpr double kTier1Rate = 0.004;
+constexpr double kTier2Rate = 0.005;
+
+double compute_maintenance_margin(double notional) noexcept
+{
+    if (!(notional > 0.0)) {
+        return 0.0;
+    }
+    if (notional <= kTier1Cap) {
+        return notional * kTier1Rate;
+    }
+    const double tier1_maint = kTier1Cap * kTier1Rate;
+    const double tier2_notional = notional - kTier1Cap;
+    return tier1_maint + (tier2_notional * kTier2Rate);
+}
 
 } // namespace
 
@@ -63,7 +78,7 @@ LiquidationHealthSnapshot LiquidationEligibilityDecision::Evaluate(
         const double direction = position.is_long ? 1.0 : -1.0;
         const double unrealized = (mark - position.entry_price) * position.quantity * direction;
         const double notional = std::abs(position.quantity * mark);
-        const double maintenance = notional * kMaintenanceMarginRate;
+        const double maintenance = compute_maintenance_margin(notional);
         total_unrealized += unrealized;
         total_maintenance += maintenance;
     }
