@@ -6,15 +6,12 @@
 #include <string>
 
 #include "Exchanges/BinanceSimulator/Account/Account.hpp"
+#include "Exchanges/BinanceSimulator/Account/Config.hpp"
 #include "Exchanges/BinanceSimulator/State/BinanceExchangeRuntimeState.hpp"
 
 namespace QTrading::Infra::Exchanges::BinanceSim::Domain {
 namespace {
 
-constexpr double kSpotMakerFeeRate = 0.001;
-constexpr double kSpotTakerFeeRate = 0.001;
-constexpr double kPerpMakerFeeRate = 0.0002;
-constexpr double kPerpTakerFeeRate = 0.0005;
 constexpr double kEpsilon = 1e-12;
 
 bool spot_buy_fee_paid_in_base(const State::BinanceExchangeRuntimeState& runtime_state)
@@ -23,12 +20,22 @@ bool spot_buy_fee_paid_in_base(const State::BinanceExchangeRuntimeState& runtime
         Config::SpotCommissionMode::BaseOnBuyQuoteOnSell;
 }
 
-double fee_rate_for_fill(const MatchFill& fill)
+double fee_rate_for_fill(
+    const State::BinanceExchangeRuntimeState& runtime_state,
+    const MatchFill& fill)
 {
     if (fill.instrument_type == QTrading::Dto::Trading::InstrumentType::Spot) {
-        return fill.is_taker ? kSpotTakerFeeRate : kSpotMakerFeeRate;
+        auto spot_it = ::spot_vip_fee_rates.find(runtime_state.vip_level);
+        if (spot_it == ::spot_vip_fee_rates.end()) {
+            spot_it = ::spot_vip_fee_rates.find(0);
+        }
+        return fill.is_taker ? spot_it->second.taker_fee_rate : spot_it->second.maker_fee_rate;
     }
-    return fill.is_taker ? kPerpTakerFeeRate : kPerpMakerFeeRate;
+    auto perp_it = ::vip_fee_rates.find(runtime_state.vip_level);
+    if (perp_it == ::vip_fee_rates.end()) {
+        perp_it = ::vip_fee_rates.find(0);
+    }
+    return fill.is_taker ? perp_it->second.taker_fee_rate : perp_it->second.maker_fee_rate;
 }
 
 int next_position_id(State::BinanceExchangeRuntimeState& runtime_state)
@@ -102,7 +109,7 @@ void apply_spot_fill(
     const MatchFill& fill)
 {
     const double notional = fill.quantity * fill.price;
-    const double fee_rate = fee_rate_for_fill(fill);
+    const double fee_rate = fee_rate_for_fill(runtime_state, fill);
     const double fee = notional * fee_rate;
     const bool base_fee_on_buy = spot_buy_fee_paid_in_base(runtime_state) &&
         fill.side == QTrading::Dto::Trading::OrderSide::Buy;
@@ -162,7 +169,7 @@ void apply_perp_fill(
     const MatchFill& fill)
 {
     const double notional = fill.quantity * fill.price;
-    const double fee_rate = fee_rate_for_fill(fill);
+    const double fee_rate = fee_rate_for_fill(runtime_state, fill);
     const double fee = notional * fee_rate;
     double signed_fill = fill.side == QTrading::Dto::Trading::OrderSide::Buy ? fill.quantity : -fill.quantity;
     if (runtime_state.hedge_mode) {

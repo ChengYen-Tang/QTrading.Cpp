@@ -29,6 +29,7 @@ BinanceExchange::BinanceExchange(const std::vector<SymbolDataset>& datasets,
     runtime_state_->hedge_mode = account_init.hedge_mode;
     runtime_state_->strict_binance_mode = account_init.strict_binance_mode;
     runtime_state_->merge_positions_enabled = account_init.merge_positions_enabled;
+    runtime_state_->vip_level = account_init.vip_level;
     initialize_step_kernel_state_(datasets, run_id);
     initialize_channels_();
     runtime_state_->last_status_snapshot =

@@ -7,6 +7,7 @@
 #include <unordered_map>
 
 #include "Exchanges/BinanceSimulator/Account/Account.hpp"
+#include "Exchanges/BinanceSimulator/Account/Config.hpp"
 #include "Exchanges/BinanceSimulator/State/BinanceExchangeRuntimeState.hpp"
 #include "Exchanges/BinanceSimulator/State/StepKernelState.hpp"
 
@@ -14,7 +15,6 @@ namespace QTrading::Infra::Exchanges::BinanceSim::Domain {
 
 namespace {
 
-constexpr double kFeeRate = 0.001;
 constexpr double kPerpMarketReservationBuffer = 1.001;
 constexpr double kEpsilon = 1e-12;
 
@@ -24,7 +24,11 @@ double spot_buy_reservation_multiplier(const State::BinanceExchangeRuntimeState&
         Config::SpotCommissionMode::BaseOnBuyQuoteOnSell) {
         return 1.0;
     }
-    return 1.0 + kFeeRate;
+    auto it = ::spot_vip_fee_rates.find(runtime_state.vip_level);
+    if (it == ::spot_vip_fee_rates.end()) {
+        it = ::spot_vip_fee_rates.find(0);
+    }
+    return 1.0 + it->second.taker_fee_rate;
 }
 
 bool symbol_exists(

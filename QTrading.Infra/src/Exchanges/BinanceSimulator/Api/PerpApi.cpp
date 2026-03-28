@@ -1,6 +1,8 @@
 #include <cmath>
+#include <limits>
 
 #include "Exchanges/BinanceSimulator/BinanceExchange.hpp"
+#include "Exchanges/BinanceSimulator/Account/Config.hpp"
 #include "Exchanges/BinanceSimulator/Application/OrderCommandKernel.hpp"
 #include "Exchanges/BinanceSimulator/State/BinanceExchangeRuntimeState.hpp"
 #include "Exchanges/BinanceSimulator/Support/BinanceExchangeSkeletonSupport.hpp"
@@ -89,6 +91,46 @@ bool is_spot_symbol(
         QTrading::Dto::Trading::InstrumentType::Spot;
 }
 
+double symbol_max_leverage(
+    const State::StepKernelState& step_state,
+    const State::BinanceExchangeRuntimeState& runtime_state,
+    const std::string& symbol)
+{
+    double max_allowed = std::numeric_limits<double>::max();
+
+    const auto it = step_state.symbol_to_id.find(symbol);
+    if (it != step_state.symbol_to_id.end()) {
+        const size_t symbol_id = it->second;
+        if (symbol_id < step_state.symbol_spec_by_id.size()) {
+            const double spec_max = step_state.symbol_spec_by_id[symbol_id].max_leverage;
+            if (spec_max > 0.0 && std::isfinite(spec_max)) {
+                max_allowed = std::min(max_allowed, spec_max);
+            }
+        }
+    }
+
+    double symbol_notional = 0.0;
+    for (const auto& position : runtime_state.positions) {
+        if (position.symbol != symbol ||
+            position.instrument_type != QTrading::Dto::Trading::InstrumentType::Perp) {
+            continue;
+        }
+        symbol_notional += std::abs(position.notional);
+    }
+
+    for (const auto& tier : ::margin_tiers) {
+        if (symbol_notional <= tier.notional_upper) {
+            max_allowed = std::min(max_allowed, tier.max_leverage);
+            break;
+        }
+    }
+
+    if (!(max_allowed > 0.0) || !std::isfinite(max_allowed)) {
+        return 1.0;
+    }
+    return max_allowed;
+}
+
 } // namespace
 
 void BinanceExchange::set_symbol_leverage(const std::string& symbol, double new_leverage)
@@ -97,6 +139,10 @@ void BinanceExchange::set_symbol_leverage(const std::string& symbol, double new_
         return;
     }
     if (is_spot_symbol(*step_kernel_state_, symbol)) {
+        return;
+    }
+    const double max_allowed = symbol_max_leverage(*step_kernel_state_, *runtime_state_, symbol);
+    if (new_leverage > max_allowed) {
         return;
     }
     runtime_state_->symbol_leverage[symbol] = new_leverage;

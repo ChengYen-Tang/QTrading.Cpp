@@ -25,6 +25,7 @@ struct BinanceExchangeRuntimeState {
     bool hedge_mode{ false };
     bool strict_binance_mode{ true };
     bool merge_positions_enabled{ true };
+    int vip_level{ 0 };
     std::vector<QTrading::dto::Position> positions;
     std::vector<QTrading::dto::Order> orders;
     std::vector<Contracts::AsyncOrderAck> async_order_acks;

@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "Dto/AccountLog.hpp"
+#include "Exchanges/BinanceSimulator/Account/Config.hpp"
 #include "Exchanges/BinanceSimulator/Application/MarketReplayKernel.hpp"
 #include "Exchanges/BinanceSimulator/Application/OrderCommandKernel.hpp"
 #include "Exchanges/BinanceSimulator/Application/TerminationPolicy.hpp"
@@ -802,10 +803,6 @@ void emit_account_position_order_events(
     }
 
     constexpr double kEpsilon = 1e-12;
-    constexpr double kSpotMakerFeeRate = 0.001;
-    constexpr double kSpotTakerFeeRate = 0.001;
-    constexpr double kPerpMakerFeeRate = 0.0002;
-    constexpr double kPerpTakerFeeRate = 0.0005;
     constexpr int32_t kCommissionAssetNone = -1;
     constexpr int32_t kCommissionAssetBase = 0;
     constexpr int32_t kCommissionAssetQuote = 1;
@@ -841,11 +838,19 @@ void emit_account_position_order_events(
         return nullptr;
     };
 
-    auto fee_rate_for_fill = [](const Domain::MatchFill& fill) {
+    auto fee_rate_for_fill = [&](const Domain::MatchFill& fill) {
         if (fill.instrument_type == QTrading::Dto::Trading::InstrumentType::Spot) {
-            return fill.is_taker ? kSpotTakerFeeRate : kSpotMakerFeeRate;
+            auto spot_it = ::spot_vip_fee_rates.find(runtime_state.vip_level);
+            if (spot_it == ::spot_vip_fee_rates.end()) {
+                spot_it = ::spot_vip_fee_rates.find(0);
+            }
+            return fill.is_taker ? spot_it->second.taker_fee_rate : spot_it->second.maker_fee_rate;
         }
-        return fill.is_taker ? kPerpTakerFeeRate : kPerpMakerFeeRate;
+        auto perp_it = ::vip_fee_rates.find(runtime_state.vip_level);
+        if (perp_it == ::vip_fee_rates.end()) {
+            perp_it = ::vip_fee_rates.find(0);
+        }
+        return fill.is_taker ? perp_it->second.taker_fee_rate : perp_it->second.maker_fee_rate;
     };
     const bool spot_buy_base_fee =
         runtime_state.simulation_config.spot_commission_mode ==
