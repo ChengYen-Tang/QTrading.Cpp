@@ -35,6 +35,10 @@ double current_reference_price(
     const State::StepKernelState& step_state,
     const std::string& symbol);
 
+double current_mark_price(
+    const State::StepKernelState& step_state,
+    const std::string& symbol);
+
 bool is_multiple_of_step(double value, double step_size)
 {
     if (step_size <= 0.0) {
@@ -104,9 +108,19 @@ bool validate_filters(
     }
 
     if (spec.min_notional > 0.0 || spec.max_notional > 0.0) {
-        const double ref_price = request.price > 0.0
-            ? request.price
-            : current_reference_price(step_state, request.symbol);
+        double ref_price = 0.0;
+        if (request.price > 0.0) {
+            ref_price = request.price;
+        }
+        else if (request.instrument_type == QTrading::Dto::Trading::InstrumentType::Perp) {
+            ref_price = current_mark_price(step_state, request.symbol);
+            if (ref_price <= 0.0) {
+                ref_price = current_reference_price(step_state, request.symbol);
+            }
+        }
+        else {
+            ref_price = current_reference_price(step_state, request.symbol);
+        }
         if (ref_price <= 0.0) {
             reject = Contracts::OrderRejectInfo{
                 Contracts::OrderRejectInfo::Code::NotionalNoReferencePrice,
@@ -151,6 +165,34 @@ double current_reference_price(
         : 0;
     const size_t idx = cursor == 0 ? 0 : std::min(cursor - 1, count - 1);
     return market_data.get_kline(idx).ClosePrice;
+}
+
+double current_mark_price(
+    const State::StepKernelState& step_state,
+    const std::string& symbol)
+{
+    const size_t symbol_index = find_symbol_index(step_state, symbol);
+    if (symbol_index == std::numeric_limits<size_t>::max() ||
+        symbol_index >= step_state.mark_data_id_by_symbol.size() ||
+        symbol_index >= step_state.mark_cursor_by_symbol.size()) {
+        return 0.0;
+    }
+
+    const int32_t mark_data_id = step_state.mark_data_id_by_symbol[symbol_index];
+    if (mark_data_id < 0 ||
+        static_cast<size_t>(mark_data_id) >= step_state.mark_data_pool.size()) {
+        return 0.0;
+    }
+
+    const auto& mark_data = step_state.mark_data_pool[static_cast<size_t>(mark_data_id)];
+    const size_t count = mark_data.get_klines_count();
+    if (count == 0) {
+        return 0.0;
+    }
+
+    const size_t cursor = step_state.mark_cursor_by_symbol[symbol_index];
+    const size_t idx = cursor == 0 ? 0 : std::min(cursor - 1, count - 1);
+    return mark_data.get_kline(idx).ClosePrice;
 }
 
 double sum_spot_inventory(const State::BinanceExchangeRuntimeState& runtime_state, const std::string& symbol)

@@ -1,7 +1,11 @@
 #include <gtest/gtest.h>
 
+#include <chrono>
+#include <filesystem>
+#include <fstream>
 #include <optional>
 
+#include "Data/Binance/MarketData.hpp"
 #include "Dto/Trading/InstrumentSpec.hpp"
 #include "Exchanges/BinanceSimulator/Account/Account.hpp"
 #include "Exchanges/BinanceSimulator/Contracts/OrderCommandRequest.hpp"
@@ -40,6 +44,25 @@ OrderCommandRequest make_perp_limit_request(double quantity, double price)
     request.side = QTrading::Dto::Trading::OrderSide::Buy;
     request.position_side = QTrading::Dto::Trading::PositionSide::Both;
     return request;
+}
+
+OrderCommandRequest make_perp_market_request(double quantity)
+{
+    OrderCommandRequest request = make_perp_limit_request(quantity, 0.0);
+    request.kind = OrderCommandKind::PerpMarket;
+    return request;
+}
+
+std::filesystem::path write_single_kline_csv(const std::string& file_name, double close_price)
+{
+    const auto unique = std::to_string(
+        std::chrono::steady_clock::now().time_since_epoch().count());
+    const auto path = std::filesystem::temp_directory_path() / (file_name + "_" + unique + ".csv");
+    std::ofstream file(path, std::ios::trunc);
+    file << "openTime,open,high,low,close,volume,closeTime,quoteVol,tradeCnt,takerBB,takerBQ\n";
+    file << "0," << close_price << ',' << close_price << ',' << close_price << ',' << close_price
+         << ",1000,60000,100,1,0,0\n";
+    return path;
 }
 
 } // namespace
@@ -145,4 +168,33 @@ TEST(OrderEntryServiceTest, InstrumentFiltersRejectOrderByMinNotional)
         make_perp_limit_request(0.5, 100.0),
         reject));
     EXPECT_FALSE(reject.has_value());
+}
+
+TEST(OrderEntryServiceTest, InstrumentFiltersPerpMarketNotionalUsesMarkPrice)
+{
+    BinanceExchangeRuntimeState runtime_state{};
+    StepKernelState step_state = make_step_state_with_perp_symbol();
+    auto& spec = step_state.symbol_spec_by_id[0];
+    spec.min_notional = 150.0;
+    Account account(10000.0, 0);
+    std::optional<OrderRejectInfo> reject{};
+
+    const auto trade_csv = write_single_kline_csv("order_entry_trade", 100.0);
+    const auto mark_csv = write_single_kline_csv("order_entry_mark", 200.0);
+    step_state.market_data.emplace_back("BTCUSDT", trade_csv.string());
+    step_state.mark_data_pool.emplace_back("BTCUSDT", mark_csv.string());
+    step_state.mark_data_id_by_symbol.push_back(0);
+    step_state.mark_cursor_by_symbol.push_back(0);
+    step_state.replay_cursor.push_back(0);
+
+    EXPECT_TRUE(OrderEntryService::Execute(
+        runtime_state,
+        account,
+        step_state,
+        make_perp_market_request(1.0),
+        reject));
+    EXPECT_FALSE(reject.has_value());
+
+    std::filesystem::remove(trade_csv);
+    std::filesystem::remove(mark_csv);
 }

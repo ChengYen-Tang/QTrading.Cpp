@@ -898,6 +898,31 @@ TEST_F(BinanceExchangeFixture, SpotQuoteOrderQtyRequiresTradeReferencePrice)
     EXPECT_TRUE(exchange.get_all_open_orders().empty());
 }
 
+TEST_F(BinanceExchangeFixture, SpotMarketBudgetUsesTradePriceNotMarkPrice)
+{
+    WriteCsv("btc_trade.csv", {
+        { 0,100,100,100,100,1000, 30000,100,1,0,0 }
+    });
+    WriteCsv("btc_mark.csv", {
+        { 0,1,1,1,1,1000, 30000,100,1,0,0 }
+    });
+
+    Account::AccountInitConfig init{};
+    init.spot_initial_cash = 100.0;
+    init.perp_initial_wallet = 0.0;
+    BinanceExchange exchange = MakeExchangeWithInit({
+        { "BTCUSDT",
+            (tmp_dir / "btc_trade.csv").string(),
+            std::nullopt,
+            std::optional<std::string>((tmp_dir / "btc_mark.csv").string()),
+            std::nullopt,
+            QTrading::Dto::Trading::InstrumentType::Spot }
+    }, init);
+
+    EXPECT_FALSE(exchange.spot.place_order("BTCUSDT", 2.0, QTrading::Dto::Trading::OrderSide::Buy));
+    EXPECT_TRUE(exchange.get_all_open_orders().empty());
+}
+
 TEST_F(BinanceExchangeFixture, SpotPositionHasNoMaintenanceMarginAndNoLiquidationPath)
 {
     WriteCsv("btc_trade.csv", {
@@ -932,6 +957,68 @@ TEST_F(BinanceExchangeFixture, SpotPositionHasNoMaintenanceMarginAndNoLiquidatio
     ASSERT_EQ(exchange.get_all_positions().size(), 1u);
     EXPECT_NEAR(exchange.get_all_positions()[0].quantity, 1.0, 1e-12);
     EXPECT_EQ(exchange.get_all_positions()[0].instrument_type, QTrading::Dto::Trading::InstrumentType::Spot);
+}
+
+TEST_F(BinanceExchangeFixture, MixedBookSpotAndPerpRulesApplyByInstrumentType)
+{
+    WriteCsv("spot.csv", {
+        { 0,100,100,100,100,1000, 30000,100,1,0,0 }
+    });
+    WriteCsv("perp.csv", {
+        { 0,100,100,100,100,1000, 30000,100,1,0,0 }
+    });
+
+    Account::AccountInitConfig init{};
+    init.spot_initial_cash = 50000.0;
+    init.perp_initial_wallet = 50000.0;
+    BinanceExchange exchange = MakeExchangeWithInit({
+        { "BTCUSDT_CASH",
+            (tmp_dir / "spot.csv").string(),
+            std::nullopt,
+            std::nullopt,
+            std::nullopt,
+            QTrading::Dto::Trading::InstrumentType::Spot },
+        { "BTCUSDT_SWAP",
+            (tmp_dir / "perp.csv").string(),
+            std::nullopt,
+            std::nullopt,
+            std::nullopt,
+            QTrading::Dto::Trading::InstrumentType::Perp }
+    }, init);
+
+    EXPECT_FALSE(exchange.spot.place_order("BTCUSDT_CASH", 0.1, 100.0, QTrading::Dto::Trading::OrderSide::Sell));
+    EXPECT_TRUE(exchange.perp.place_order("BTCUSDT_SWAP", 1.0, 100.0, QTrading::Dto::Trading::OrderSide::Sell));
+    EXPECT_TRUE(exchange.spot.place_order("BTCUSDT_CASH", 1.0, 100.0, QTrading::Dto::Trading::OrderSide::Buy));
+
+    ASSERT_EQ(exchange.get_all_open_orders().size(), 2u);
+    for (const auto& order : exchange.get_all_open_orders()) {
+        if (order.symbol == "BTCUSDT_CASH") {
+            EXPECT_EQ(order.instrument_type, QTrading::Dto::Trading::InstrumentType::Spot);
+        }
+        if (order.symbol == "BTCUSDT_SWAP") {
+            EXPECT_EQ(order.instrument_type, QTrading::Dto::Trading::InstrumentType::Perp);
+        }
+    }
+
+    ASSERT_TRUE(exchange.step());
+    (void)exchange.get_market_channel()->Receive();
+
+    const auto positions = exchange.get_all_positions();
+    ASSERT_EQ(positions.size(), 2u);
+    bool found_spot = false;
+    bool found_perp = false;
+    for (const auto& position : positions) {
+        if (position.symbol == "BTCUSDT_CASH" &&
+            position.instrument_type == QTrading::Dto::Trading::InstrumentType::Spot) {
+            found_spot = true;
+        }
+        if (position.symbol == "BTCUSDT_SWAP" &&
+            position.instrument_type == QTrading::Dto::Trading::InstrumentType::Perp) {
+            found_perp = true;
+        }
+    }
+    EXPECT_TRUE(found_spot);
+    EXPECT_TRUE(found_perp);
 }
 
 TEST_F(BinanceExchangeFixture, TransferBetweenLedgersRespectsAvailableBalance)
