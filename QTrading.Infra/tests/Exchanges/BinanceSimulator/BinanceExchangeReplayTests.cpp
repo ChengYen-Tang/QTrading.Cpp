@@ -413,6 +413,34 @@ TEST_F(BinanceExchangeFixture, PerpCancelOpenOrdersRemovesPerpOrdersOnly)
     EXPECT_EQ(orders[1].symbol, "ETHUSDT");
 }
 
+TEST_F(BinanceExchangeFixture, DomainCancelOnlyAffectsOwnInstrumentBook)
+{
+    WriteCsv("btc.csv", {
+        { 1000, 100,100,100,100,1000, 61000,100,1,0,0 }
+    });
+
+    Account::AccountInitConfig init{};
+    init.spot_initial_cash = 10000.0;
+    init.perp_initial_wallet = 10000.0;
+    BinanceExchange exchange = MakeExchangeWithInit({
+        { "BTCUSDT", (tmp_dir / "btc.csv").string() },
+    }, init);
+
+    ASSERT_TRUE(exchange.spot.place_order("BTCUSDT", 1.0, 100.0, QTrading::Dto::Trading::OrderSide::Buy));
+    ASSERT_TRUE(exchange.perp.place_order("BTCUSDT", 1.0, 100.0, QTrading::Dto::Trading::OrderSide::Sell));
+    ASSERT_EQ(exchange.get_all_open_orders().size(), 2u);
+
+    exchange.spot.cancel_open_orders("BTCUSDT");
+    {
+        const auto& orders = exchange.get_all_open_orders();
+        ASSERT_EQ(orders.size(), 1u);
+        EXPECT_EQ(orders[0].instrument_type, QTrading::Dto::Trading::InstrumentType::Perp);
+    }
+
+    exchange.perp.cancel_open_orders("BTCUSDT");
+    EXPECT_TRUE(exchange.get_all_open_orders().empty());
+}
+
 TEST_F(BinanceExchangeFixture, ExplicitInstrumentTypeAppliesWithoutSuffixNaming)
 {
     WriteCsv("btc.csv", {
@@ -1239,6 +1267,53 @@ TEST_F(BinanceExchangeFixture, ReduceOnlyWithoutReduciblePositionIsRejected)
         QTrading::Dto::Trading::PositionSide::Both,
         true));
     EXPECT_TRUE(exchange.get_all_open_orders().empty());
+}
+
+TEST_F(BinanceExchangeFixture, ReduceOnly_OneWayRejectsIfWouldIncreaseExposure)
+{
+    WriteCsv("btc.csv", {
+        {      0,100,100,100,100,1000, 30000,100,1,0,0 },
+        {  60000,100,100,100,100,1000, 90000,100,1,0,0 }
+    });
+
+    Account::AccountInitConfig init{};
+    init.spot_initial_cash = 0.0;
+    init.perp_initial_wallet = 50000.0;
+    BinanceExchange exchange(
+        { { "BTCUSDT", (tmp_dir / "btc.csv").string() } },
+        nullptr,
+        init);
+    exchange.set_symbol_leverage("BTCUSDT", 10.0);
+
+    EXPECT_FALSE(exchange.perp.place_order(
+        "BTCUSDT",
+        1.0,
+        100.0,
+        QTrading::Dto::Trading::OrderSide::Buy,
+        QTrading::Dto::Trading::PositionSide::Both,
+        true));
+    EXPECT_TRUE(exchange.get_all_open_orders().empty());
+
+    ASSERT_TRUE(exchange.perp.place_order("BTCUSDT", 1.0, 100.0, QTrading::Dto::Trading::OrderSide::Buy));
+    ASSERT_TRUE(exchange.step());
+    (void)exchange.get_market_channel()->Receive();
+
+    EXPECT_FALSE(exchange.perp.place_order(
+        "BTCUSDT",
+        1.0,
+        100.0,
+        QTrading::Dto::Trading::OrderSide::Buy,
+        QTrading::Dto::Trading::PositionSide::Both,
+        true));
+    EXPECT_TRUE(exchange.get_all_open_orders().empty());
+
+    EXPECT_TRUE(exchange.perp.place_order(
+        "BTCUSDT",
+        0.5,
+        100.0,
+        QTrading::Dto::Trading::OrderSide::Sell,
+        QTrading::Dto::Trading::PositionSide::Both,
+        true));
 }
 
 // Source case: BinanceExchangeTests.PushOnlyOnChange (trimmed to minimal no-fill contract).
@@ -2481,6 +2556,40 @@ TEST_F(BinanceExchangeFixture, StatusSnapshotKeepsStressTierAndOpeningBlockDiagn
     EXPECT_FALSE(exchange.perp.place_order("BTCUSDT", 1.0, QTrading::Dto::Trading::OrderSide::Buy));
     exchange.FillStatusSnapshot(snapshot);
     EXPECT_EQ(snapshot.basis_stress_blocked_orders, 1u);
+}
+
+TEST_F(BinanceExchangeFixture, Liquidation)
+{
+    WriteCsv("btc.csv", {
+        {      0, 500.0,500.0,500.0,500.0,10000.0, 30000,10000.0,1,0,0 },
+        {  60000,   1.0,  1.0,  1.0,  1.0,10000.0, 90000,10000.0,1,0,0 }
+    });
+    WriteCsv("btc_mark.csv", {
+        {      0, 500.0,500.0,500.0,500.0,10000.0, 30000,10000.0,1,0,0 },
+        {  60000,   1.0,  1.0,  1.0,  1.0,10000.0, 90000,10000.0,1,0,0 }
+    });
+
+    Account::AccountInitConfig init{};
+    init.spot_initial_cash = 0.0;
+    init.perp_initial_wallet = 350000.0;
+    BinanceExchange exchange(
+        { { "BTCUSDT",
+            (tmp_dir / "btc.csv").string(),
+            std::nullopt,
+            std::optional<std::string>((tmp_dir / "btc_mark.csv").string()) } },
+        nullptr,
+        init);
+    exchange.set_symbol_leverage("BTCUSDT", 75.0);
+
+    ASSERT_TRUE(exchange.perp.place_order("BTCUSDT", 5000.0, 500.0, QTrading::Dto::Trading::OrderSide::Buy));
+    ASSERT_TRUE(exchange.step());
+    (void)exchange.get_market_channel()->Receive();
+    ASSERT_EQ(exchange.get_all_positions().size(), 1u);
+
+    ASSERT_TRUE(exchange.step());
+    (void)exchange.get_market_channel()->Receive();
+
+    EXPECT_TRUE(exchange.get_all_positions().empty());
 }
 
 TEST_F(BinanceExchangeFixture, LiquidationDistressCancelsPerpOrdersAndReducesExposureWithoutBankruptcyResetInCurrentKernel)
