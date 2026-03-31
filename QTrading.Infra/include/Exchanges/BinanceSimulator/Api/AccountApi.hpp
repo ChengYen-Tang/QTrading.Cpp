@@ -9,7 +9,7 @@ class BinanceExchange;
 namespace QTrading::Infra::Exchanges::BinanceSim::Api {
 
 /// Account read/transfer facade exposed by BinanceExchange.
-/// Delegates to adapter layer to isolate facade from account engine details.
+/// Reads and transfers route directly into the rebuilt account state.
 class AccountApi {
 public:
     explicit AccountApi(BinanceExchange& owner) noexcept : owner_(owner) {}
