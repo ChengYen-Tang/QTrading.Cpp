@@ -36,7 +36,6 @@ class AccountApi;
 
 namespace QTrading::Infra::Exchanges::BinanceSim::Output {
 class SnapshotBuilder;
-class PositionOrderSnapshotGate;
 }
 
 namespace QTrading::Infra::Exchanges::BinanceSim {
@@ -91,7 +90,6 @@ private:
     friend class Application::StepKernel;
     friend class Api::AccountApi;
     friend class Output::SnapshotBuilder;
-    friend class Output::PositionOrderSnapshotGate;
 
     /// Initializes bounded/unbounded public channels according to contract.
     void initialize_channels_();
