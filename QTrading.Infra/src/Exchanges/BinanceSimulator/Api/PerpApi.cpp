@@ -5,7 +5,6 @@
 #include "Exchanges/BinanceSimulator/Account/Config.hpp"
 #include "Exchanges/BinanceSimulator/Application/OrderCommandKernel.hpp"
 #include "Exchanges/BinanceSimulator/State/BinanceExchangeRuntimeState.hpp"
-#include "Exchanges/BinanceSimulator/Support/BinanceExchangeSkeletonSupport.hpp"
 #include "Exchanges/BinanceSimulator/State/StepKernelState.hpp"
 
 namespace QTrading::Infra::Exchanges::BinanceSim::Api {

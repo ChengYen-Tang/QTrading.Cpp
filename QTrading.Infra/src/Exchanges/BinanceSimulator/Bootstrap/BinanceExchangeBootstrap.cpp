@@ -2,24 +2,6 @@
 
 namespace QTrading::Infra::Exchanges::BinanceSim::Bootstrap {
 
-std::vector<Contracts::SymbolDataset> ToDatasets(
-    const std::vector<std::pair<std::string, std::string>>& symbol_csv)
-{
-    // Compatibility helper for constructors still using pair-based input.
-    std::vector<Contracts::SymbolDataset> datasets;
-    datasets.reserve(symbol_csv.size());
-    for (const auto& [symbol, csv] : symbol_csv) {
-        datasets.push_back(Contracts::SymbolDataset{
-            symbol,
-            csv,
-            std::nullopt,
-            std::nullopt,
-            std::nullopt,
-            std::nullopt });
-    }
-    return datasets;
-}
-
 Contracts::StatusSnapshot BuildInitialStatusSnapshot(
     const Account::AccountInitConfig& init,
     const Config::SimulationConfig& simulation_config)

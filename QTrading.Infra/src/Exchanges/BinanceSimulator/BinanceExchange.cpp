@@ -9,7 +9,6 @@
 #include "Exchanges/BinanceSimulator/State/BinanceExchangeRuntimeState.hpp"
 #include "Exchanges/BinanceSimulator/State/SnapshotState.hpp"
 #include "Exchanges/BinanceSimulator/State/StepKernelState.hpp"
-#include "Exchanges/BinanceSimulator/Support/BinanceExchangeSkeletonSupport.hpp"
 #include "Queue/ChannelFactory.hpp"
 
 namespace QTrading::Infra::Exchanges::BinanceSim {
