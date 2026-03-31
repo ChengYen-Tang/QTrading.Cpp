@@ -9,7 +9,7 @@ using QTrading::Infra::Exchanges::BinanceSim::Account;
 TEST(AccountTest, ConstructorAndGetters)
 {
     Account account(1000.0, 0);
-    const auto bal = account.get_balance();
+    const auto bal = account.get_perp_balance();
     EXPECT_DOUBLE_EQ(bal.WalletBalance, 1000.0);
     EXPECT_DOUBLE_EQ(account.total_unrealized_pnl(), 0.0);
     EXPECT_DOUBLE_EQ(account.get_equity(), 1000.0);

@@ -1147,17 +1147,11 @@ TEST_F(BinanceExchangeFixture, FacadeContractLegacyAndV2PrimaryKeepInputReturnAn
         std::optional<BinanceExchange::AccountFacadeBridgeDiagnostic> bridge_diag{};
     };
 
-    auto run_case = [&](bool with_v2, BinanceExchange::CoreMode mode) -> RunResult {
+    auto run_case = [&](BinanceExchange::CoreMode mode) -> RunResult {
         Account::AccountInitConfig cfg{};
         cfg.spot_initial_cash = 500.0;
         cfg.perp_initial_wallet = 1000.0;
         cfg.vip_level = 0;
-
-        auto account = std::make_shared<Account>(cfg);
-        std::shared_ptr<AccountCoreV2> v2{};
-        if (with_v2) {
-            v2 = std::make_shared<AccountCoreV2>(cfg);
-        }
 
         BinanceExchange ex(
             { BinanceExchange::SymbolDataset{
@@ -1168,8 +1162,7 @@ TEST_F(BinanceExchangeFixture, FacadeContractLegacyAndV2PrimaryKeepInputReturnAn
                 std::nullopt,
                 QTrading::Dto::Trading::InstrumentType::Perp} },
             logger,
-            account,
-            v2,
+            cfg,
             112233ull);
         ex.set_core_mode(mode);
 
@@ -1201,8 +1194,8 @@ TEST_F(BinanceExchangeFixture, FacadeContractLegacyAndV2PrimaryKeepInputReturnAn
         return out;
     };
 
-    const auto legacy = run_case(false, BinanceExchange::CoreMode::LegacyOnly);
-    const auto v2_primary = run_case(true, BinanceExchange::CoreMode::NewCorePrimary);
+    const auto legacy = run_case(BinanceExchange::CoreMode::LegacyOnly);
+    const auto v2_primary = run_case(BinanceExchange::CoreMode::NewCorePrimary);
 
     EXPECT_TRUE(legacy.place_ok);
     EXPECT_TRUE(v2_primary.place_ok);

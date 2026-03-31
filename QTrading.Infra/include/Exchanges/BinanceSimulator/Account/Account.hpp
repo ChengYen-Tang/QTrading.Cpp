@@ -31,8 +31,6 @@ public:
     QTrading::Dto::Account::BalanceSnapshot get_spot_balance() const { return spot_balance_; }
     /// Returns immutable perp balance snapshot.
     QTrading::Dto::Account::BalanceSnapshot get_perp_balance() const { return perp_balance_; }
-    /// Legacy compatibility accessor for perp balance snapshot.
-    QTrading::Dto::Account::BalanceSnapshot get_balance() const;
     /// Returns aggregate cash across ledgers.
     double get_total_cash_balance() const { return total_cash_balance_; }
     /// Returns mutation version for account state snapshots.

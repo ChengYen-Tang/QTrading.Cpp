@@ -34,11 +34,6 @@ void Account::sync_total_cash_()
     total_cash_balance_ = spot_balance_.WalletBalance + perp_balance_.WalletBalance;
 }
 
-QTrading::Dto::Account::BalanceSnapshot Account::get_balance() const
-{
-    return get_perp_balance();
-}
-
 double Account::get_wallet_balance() const
 {
     return perp_balance_.WalletBalance;
