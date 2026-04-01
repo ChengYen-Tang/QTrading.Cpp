@@ -1,7 +1,9 @@
 #pragma once
 
 #include <deque>
+#include <cstdint>
 #include <memory>
+#include <functional>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -17,6 +19,29 @@
 #include "Logger.hpp"
 
 namespace QTrading::Infra::Exchanges::BinanceSim::State {
+
+struct PositionIndexKey {
+    size_t symbol_id{ 0 };
+    QTrading::Dto::Trading::InstrumentType instrument_type{ QTrading::Dto::Trading::InstrumentType::Spot };
+    bool is_long{ true };
+
+    bool operator==(const PositionIndexKey& rhs) const noexcept
+    {
+        return symbol_id == rhs.symbol_id &&
+            instrument_type == rhs.instrument_type &&
+            is_long == rhs.is_long;
+    }
+};
+
+struct PositionIndexKeyHash {
+    size_t operator()(const PositionIndexKey& key) const noexcept
+    {
+        const size_t h1 = std::hash<size_t>{}(key.symbol_id);
+        const size_t h2 = std::hash<int>{}(static_cast<int>(key.instrument_type));
+        const size_t h3 = std::hash<bool>{}(key.is_long);
+        return h1 ^ (h2 << 1U) ^ (h3 << 2U);
+    }
+};
 
 /// Non-step-core runtime state retained by the facade.
 /// Holds account/order/channel-adjacent data that is not part of replay cursors.
@@ -43,6 +68,16 @@ struct BinanceExchangeRuntimeState {
     double spot_open_order_initial_margin{ 0.0 };
     /// Perp open-order margin reservation cached from the current order book.
     double perp_open_order_initial_margin{ 0.0 };
+    /// Dense cache of spot buy-order reservation by symbol id.
+    std::vector<double> spot_open_order_initial_margin_by_symbol{};
+    /// Dense cache of perp open-order reservation by symbol id.
+    std::vector<double> perp_open_order_initial_margin_by_symbol{};
+    /// Dense cache of latest perp reference price by symbol id.
+    std::vector<double> perp_reference_price_by_symbol{};
+    /// Dense cache of one-way perp net position quantity by symbol id.
+    std::vector<double> perp_net_position_qty_by_symbol{};
+    /// True when order reservation caches are initialized for current symbol layout.
+    bool order_reservation_cache_ready{ false };
     /// Last published/readable status snapshot.
     Contracts::StatusSnapshot last_status_snapshot{};
     /// Event side-effect publication mode for the current runtime.
@@ -59,6 +94,20 @@ struct BinanceExchangeRuntimeState {
     size_t order_latency_bars{ 0 };
     /// Next synchronous order id assigned by the runtime.
     uint64_t next_order_id{ 1 };
+    /// Monotonic version bumped whenever open-order book mutates.
+    uint64_t orders_version{ 0 };
+    /// Next position id assigned by fill settlement; 0 means unseeded.
+    uint64_t next_position_id{ 0 };
+    /// Monotonic version bumped whenever position book mutates.
+    uint64_t positions_version{ 0 };
+    /// Internal dense symbol-id cache for fill-settlement position indexing.
+    std::unordered_map<std::string, size_t> position_symbol_to_id{};
+    /// Internal position-id to slot index map for fill-settlement fast lookup.
+    std::unordered_map<int, size_t> position_slot_by_id{};
+    /// Internal `(symbol_id, instrument_type, side)` to position-id queue index.
+    std::unordered_map<PositionIndexKey, std::deque<int>, PositionIndexKeyHash> position_ids_by_key{};
+    /// True when internal fill-settlement position index mirrors `positions`.
+    bool position_index_ready{ false };
     /// Next async request id assigned by the runtime.
     uint64_t next_async_order_request_id{ 1 };
     /// Pending deferred commands scheduled by the async latency path.

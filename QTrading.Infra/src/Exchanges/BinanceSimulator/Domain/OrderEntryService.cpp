@@ -1,10 +1,14 @@
 #include "Exchanges/BinanceSimulator/Domain/OrderEntryService.hpp"
 
 #include <algorithm>
+#include <cstdint>
 #include <cmath>
+#include <iterator>
 #include <limits>
+#include <numeric>
 #include <optional>
 #include <unordered_map>
+#include <vector>
 
 #include "Exchanges/BinanceSimulator/Account/Account.hpp"
 #include "Exchanges/BinanceSimulator/Account/Config.hpp"
@@ -237,78 +241,147 @@ double sum_spot_sell_reservations(const State::BinanceExchangeRuntimeState& runt
     return reserved;
 }
 
-double sum_spot_buy_reservations(const State::BinanceExchangeRuntimeState& runtime_state)
+std::optional<size_t> try_resolve_order_symbol_id(
+    const State::StepKernelState& step_state,
+    const std::string& symbol)
+{
+    const auto it = step_state.symbol_to_id.find(symbol);
+    if (it == step_state.symbol_to_id.end()) {
+        return std::nullopt;
+    }
+    return it->second;
+}
+
+double compute_spot_buy_order_reservation(
+    const State::BinanceExchangeRuntimeState& runtime_state,
+    const QTrading::dto::Order& order)
+{
+    if (order.instrument_type != QTrading::Dto::Trading::InstrumentType::Spot ||
+        order.side != QTrading::Dto::Trading::OrderSide::Buy) {
+        return 0.0;
+    }
+    const double price = order.price > 0.0 ? order.price : order.quote_order_qty > 0.0 ? 1.0 : 0.0;
+    const double quote = order.quote_order_qty > 0.0 ? order.quote_order_qty : order.quantity * price;
+    return quote * spot_buy_reservation_multiplier(runtime_state);
+}
+
+void ensure_order_reservation_cache_shape(
+    State::BinanceExchangeRuntimeState& runtime_state,
+    const State::StepKernelState& step_state)
+{
+    const size_t symbol_count = step_state.symbols.size();
+    if (runtime_state.spot_open_order_initial_margin_by_symbol.size() == symbol_count &&
+        runtime_state.perp_open_order_initial_margin_by_symbol.size() == symbol_count &&
+        runtime_state.perp_reference_price_by_symbol.size() == symbol_count &&
+        runtime_state.perp_net_position_qty_by_symbol.size() == symbol_count) {
+        return;
+    }
+    runtime_state.spot_open_order_initial_margin_by_symbol.assign(symbol_count, 0.0);
+    runtime_state.perp_open_order_initial_margin_by_symbol.assign(symbol_count, 0.0);
+    runtime_state.perp_reference_price_by_symbol.assign(symbol_count, 0.0);
+    runtime_state.perp_net_position_qty_by_symbol.assign(symbol_count, 0.0);
+    runtime_state.order_reservation_cache_ready = false;
+}
+
+void rebuild_perp_reference_price_cache(
+    State::BinanceExchangeRuntimeState& runtime_state,
+    const State::StepKernelState& step_state)
+{
+    std::fill(
+        runtime_state.perp_reference_price_by_symbol.begin(),
+        runtime_state.perp_reference_price_by_symbol.end(),
+        0.0);
+    for (const auto& snapshot : runtime_state.last_status_snapshot.prices) {
+        const auto symbol_id = try_resolve_order_symbol_id(step_state, snapshot.symbol);
+        if (!symbol_id.has_value() || *symbol_id >= runtime_state.perp_reference_price_by_symbol.size()) {
+            continue;
+        }
+        if (snapshot.has_mark_price && snapshot.mark_price > 0.0) {
+            runtime_state.perp_reference_price_by_symbol[*symbol_id] =
+                snapshot.mark_price * kPerpMarketReservationBuffer;
+            continue;
+        }
+        if (snapshot.has_trade_price && snapshot.trade_price > 0.0) {
+            runtime_state.perp_reference_price_by_symbol[*symbol_id] =
+                snapshot.trade_price * kPerpMarketReservationBuffer;
+            continue;
+        }
+        if (snapshot.has_price && snapshot.price > 0.0) {
+            runtime_state.perp_reference_price_by_symbol[*symbol_id] =
+                snapshot.price * kPerpMarketReservationBuffer;
+        }
+    }
+}
+
+void rebuild_perp_net_position_qty_cache(
+    State::BinanceExchangeRuntimeState& runtime_state,
+    const State::StepKernelState& step_state)
+{
+    std::fill(
+        runtime_state.perp_net_position_qty_by_symbol.begin(),
+        runtime_state.perp_net_position_qty_by_symbol.end(),
+        0.0);
+    for (const auto& position : runtime_state.positions) {
+        if (position.instrument_type != QTrading::Dto::Trading::InstrumentType::Perp) {
+            continue;
+        }
+        const auto symbol_id = try_resolve_order_symbol_id(step_state, position.symbol);
+        if (!symbol_id.has_value() || *symbol_id >= runtime_state.perp_net_position_qty_by_symbol.size()) {
+            continue;
+        }
+        runtime_state.perp_net_position_qty_by_symbol[*symbol_id] += position.is_long ? position.quantity : -position.quantity;
+    }
+}
+
+double recompute_spot_symbol_buy_reservation(
+    const State::BinanceExchangeRuntimeState& runtime_state,
+    const State::StepKernelState& step_state,
+    size_t symbol_id)
 {
     double reserved = 0.0;
     for (const auto& order : runtime_state.orders) {
-        if (order.instrument_type != QTrading::Dto::Trading::InstrumentType::Spot ||
-            order.side != QTrading::Dto::Trading::OrderSide::Buy) {
+        const auto order_symbol_id = try_resolve_order_symbol_id(step_state, order.symbol);
+        if (!order_symbol_id.has_value() || *order_symbol_id != symbol_id) {
             continue;
         }
-        const double price = order.price > 0.0 ? order.price : order.quote_order_qty > 0.0 ? 1.0 : 0.0;
-        const double quote = order.quote_order_qty > 0.0 ? order.quote_order_qty : order.quantity * price;
-        reserved += quote * spot_buy_reservation_multiplier(runtime_state);
+        reserved += compute_spot_buy_order_reservation(runtime_state, order);
     }
     return reserved;
 }
 
-double sum_perp_open_order_reservations(const State::BinanceExchangeRuntimeState& runtime_state)
+double recompute_perp_symbol_reservation(
+    const State::BinanceExchangeRuntimeState& runtime_state,
+    const State::StepKernelState& step_state,
+    size_t symbol_id)
 {
-    auto resolve_perp_reference_price = [&](const QTrading::dto::Order& order) -> double {
-        if (order.price > 0.0) {
-            return order.price;
-        }
-        for (const auto& snapshot : runtime_state.last_status_snapshot.prices) {
-            if (snapshot.symbol != order.symbol) {
-                continue;
-            }
-            if (snapshot.has_mark_price && snapshot.mark_price > 0.0) {
-                return snapshot.mark_price * kPerpMarketReservationBuffer;
-            }
-            if (snapshot.has_trade_price && snapshot.trade_price > 0.0) {
-                return snapshot.trade_price * kPerpMarketReservationBuffer;
-            }
-            if (snapshot.has_price && snapshot.price > 0.0) {
-                return snapshot.price * kPerpMarketReservationBuffer;
-            }
-        }
+    if (symbol_id >= runtime_state.perp_reference_price_by_symbol.size() ||
+        symbol_id >= runtime_state.perp_net_position_qty_by_symbol.size()) {
         return 0.0;
-    };
-
-    auto one_way_net_position_qty = [&](const std::string& symbol) -> double {
-        double net = 0.0;
-        for (const auto& position : runtime_state.positions) {
-            if (position.instrument_type != QTrading::Dto::Trading::InstrumentType::Perp ||
-                position.symbol != symbol) {
-                continue;
-            }
-            net += position.is_long ? position.quantity : -position.quantity;
-        }
-        return net;
-    };
+    }
 
     double reserved = 0.0;
-    std::unordered_map<std::string, double> effective_net_by_symbol{};
+    double effective_net = runtime_state.hedge_mode ? 0.0 : runtime_state.perp_net_position_qty_by_symbol[symbol_id];
     for (const auto& order : runtime_state.orders) {
         if (order.instrument_type != QTrading::Dto::Trading::InstrumentType::Perp ||
             order.reduce_only ||
             order.close_position) {
             continue;
         }
-        const double price = resolve_perp_reference_price(order);
+        const auto order_symbol_id = try_resolve_order_symbol_id(step_state, order.symbol);
+        if (!order_symbol_id.has_value() || *order_symbol_id != symbol_id) {
+            continue;
+        }
+
+        const double price = order.price > 0.0
+            ? order.price
+            : runtime_state.perp_reference_price_by_symbol[symbol_id];
         if (price <= 0.0) {
             continue;
         }
 
         double opening_qty = std::max(0.0, order.quantity);
         if (!runtime_state.hedge_mode && opening_qty > kEpsilon) {
-            auto net_it = effective_net_by_symbol.find(order.symbol);
-            if (net_it == effective_net_by_symbol.end()) {
-                net_it = effective_net_by_symbol.emplace(
-                    order.symbol,
-                    one_way_net_position_qty(order.symbol)).first;
-            }
-            const double net_position = net_it->second;
+            const double net_position = effective_net;
             const double signed_order = order.side == QTrading::Dto::Trading::OrderSide::Buy
                 ? opening_qty
                 : -opening_qty;
@@ -316,7 +389,7 @@ double sum_perp_open_order_reservations(const State::BinanceExchangeRuntimeState
                 const double closing_qty = std::min(std::abs(net_position), std::abs(signed_order));
                 opening_qty = std::max(0.0, opening_qty - closing_qty);
             }
-            net_it->second = net_position + signed_order;
+            effective_net = net_position + signed_order;
         }
         if (opening_qty <= kEpsilon) {
             continue;
@@ -328,6 +401,69 @@ double sum_perp_open_order_reservations(const State::BinanceExchangeRuntimeState
         reserved += leverage > 0.0 ? (notional / leverage) : notional;
     }
     return reserved;
+}
+
+void refresh_order_margin_totals_from_symbol_cache(State::BinanceExchangeRuntimeState& runtime_state)
+{
+    runtime_state.spot_open_order_initial_margin = std::accumulate(
+        runtime_state.spot_open_order_initial_margin_by_symbol.begin(),
+        runtime_state.spot_open_order_initial_margin_by_symbol.end(),
+        0.0);
+    runtime_state.perp_open_order_initial_margin = std::accumulate(
+        runtime_state.perp_open_order_initial_margin_by_symbol.begin(),
+        runtime_state.perp_open_order_initial_margin_by_symbol.end(),
+        0.0);
+}
+
+void initialize_order_reservation_cache(
+    State::BinanceExchangeRuntimeState& runtime_state,
+    const State::StepKernelState& step_state);
+
+void refresh_symbol_reservations(
+    State::BinanceExchangeRuntimeState& runtime_state,
+    const State::StepKernelState& step_state,
+    const std::vector<size_t>& touched_symbol_ids)
+{
+    if (!runtime_state.order_reservation_cache_ready) {
+        initialize_order_reservation_cache(runtime_state, step_state);
+        return;
+    }
+    ensure_order_reservation_cache_shape(runtime_state, step_state);
+    rebuild_perp_reference_price_cache(runtime_state, step_state);
+    rebuild_perp_net_position_qty_cache(runtime_state, step_state);
+
+    std::vector<uint8_t> touched(
+        runtime_state.spot_open_order_initial_margin_by_symbol.size(),
+        0);
+    for (const auto symbol_id : touched_symbol_ids) {
+        if (symbol_id >= touched.size() || touched[symbol_id] != 0) {
+            continue;
+        }
+        touched[symbol_id] = 1;
+        runtime_state.spot_open_order_initial_margin_by_symbol[symbol_id] =
+            recompute_spot_symbol_buy_reservation(runtime_state, step_state, symbol_id);
+        runtime_state.perp_open_order_initial_margin_by_symbol[symbol_id] =
+            recompute_perp_symbol_reservation(runtime_state, step_state, symbol_id);
+    }
+    refresh_order_margin_totals_from_symbol_cache(runtime_state);
+    runtime_state.order_reservation_cache_ready = true;
+}
+
+void initialize_order_reservation_cache(
+    State::BinanceExchangeRuntimeState& runtime_state,
+    const State::StepKernelState& step_state)
+{
+    ensure_order_reservation_cache_shape(runtime_state, step_state);
+    rebuild_perp_reference_price_cache(runtime_state, step_state);
+    rebuild_perp_net_position_qty_cache(runtime_state, step_state);
+    for (size_t symbol_id = 0; symbol_id < step_state.symbols.size(); ++symbol_id) {
+        runtime_state.spot_open_order_initial_margin_by_symbol[symbol_id] =
+            recompute_spot_symbol_buy_reservation(runtime_state, step_state, symbol_id);
+        runtime_state.perp_open_order_initial_margin_by_symbol[symbol_id] =
+            recompute_perp_symbol_reservation(runtime_state, step_state, symbol_id);
+    }
+    refresh_order_margin_totals_from_symbol_cache(runtime_state);
+    runtime_state.order_reservation_cache_ready = true;
 }
 
 bool has_duplicate_client_order_id(
@@ -350,7 +486,20 @@ bool has_open_positions_or_orders(const State::BinanceExchangeRuntimeState& runt
     return !runtime_state.positions.empty() || !runtime_state.orders.empty();
 }
 
-void sync_open_order_margins(State::BinanceExchangeRuntimeState& runtime_state);
+void sync_open_order_margins(
+    State::BinanceExchangeRuntimeState& runtime_state,
+    const State::StepKernelState& step_state);
+
+void add_touched_symbol_id_for_order(
+    const State::StepKernelState& step_state,
+    const QTrading::dto::Order& order,
+    std::vector<size_t>& out_symbol_ids)
+{
+    const auto symbol_id = try_resolve_order_symbol_id(step_state, order.symbol);
+    if (symbol_id.has_value()) {
+        out_symbol_ids.push_back(*symbol_id);
+    }
+}
 
 bool is_self_trade_conflict(
     const QTrading::dto::Order& resting_order,
@@ -374,25 +523,63 @@ bool is_self_trade_conflict(
 
 bool remove_order_by_id(
     State::BinanceExchangeRuntimeState& runtime_state,
+    const State::StepKernelState& step_state,
     int order_id)
 {
     auto& orders = runtime_state.orders;
-    const size_t before = orders.size();
-    orders.erase(
-        std::remove_if(orders.begin(), orders.end(), [&](const QTrading::dto::Order& order) {
-            return order.id == order_id;
-        }),
-        orders.end());
-    if (orders.size() != before) {
-        sync_open_order_margins(runtime_state);
+    std::vector<size_t> touched_symbol_ids;
+    touched_symbol_ids.reserve(1);
+    for (const auto& order : orders) {
+        if (order.id != order_id) {
+            continue;
+        }
+        add_touched_symbol_id_for_order(step_state, order, touched_symbol_ids);
+        break;
+    }
+    const auto new_end = std::remove_if(orders.begin(), orders.end(), [&](const QTrading::dto::Order& order) {
+        return order.id == order_id;
+    });
+    const bool removed = new_end != orders.end();
+    orders.erase(new_end, orders.end());
+    if (removed) {
+        ++runtime_state.orders_version;
+        refresh_symbol_reservations(runtime_state, step_state, touched_symbol_ids);
         return true;
     }
     return false;
 }
-void sync_open_order_margins(State::BinanceExchangeRuntimeState& runtime_state)
+
+template <typename TPredicate>
+size_t remove_orders_if(
+    State::BinanceExchangeRuntimeState& runtime_state,
+    const State::StepKernelState& step_state,
+    TPredicate&& predicate)
 {
-    runtime_state.spot_open_order_initial_margin = sum_spot_buy_reservations(runtime_state);
-    runtime_state.perp_open_order_initial_margin = sum_perp_open_order_reservations(runtime_state);
+    auto& orders = runtime_state.orders;
+    std::vector<size_t> touched_symbol_ids;
+    touched_symbol_ids.reserve(4);
+    const auto new_end = std::remove_if(orders.begin(), orders.end(), [&](const QTrading::dto::Order& order) {
+        if (!predicate(order)) {
+            return false;
+        }
+        add_touched_symbol_id_for_order(step_state, order, touched_symbol_ids);
+        return true;
+    });
+    const size_t removed =
+        static_cast<size_t>(std::distance(new_end, orders.end()));
+    orders.erase(new_end, orders.end());
+    if (removed > 0) {
+        ++runtime_state.orders_version;
+        refresh_symbol_reservations(runtime_state, step_state, touched_symbol_ids);
+    }
+    return removed;
+}
+
+void sync_open_order_margins(
+    State::BinanceExchangeRuntimeState& runtime_state,
+    const State::StepKernelState& step_state)
+{
+    initialize_order_reservation_cache(runtime_state, step_state);
 }
 
 const QTrading::dto::Position* find_perp_position(
@@ -649,15 +836,13 @@ bool OrderEntryService::Execute(
                 return false;
             }
 
-            const size_t before = runtime_state.orders.size();
-            runtime_state.orders.erase(
-                std::remove_if(runtime_state.orders.begin(), runtime_state.orders.end(),
-                    [&](const QTrading::dto::Order& order) {
-                        return is_self_trade_conflict(order, request);
-                    }),
-                runtime_state.orders.end());
-            if (runtime_state.orders.size() != before) {
-                sync_open_order_margins(runtime_state);
+            const size_t removed = remove_orders_if(
+                runtime_state,
+                step_state,
+                [&](const QTrading::dto::Order& order) {
+                    return is_self_trade_conflict(order, request);
+                });
+            if (removed > 0) {
                 ++step_state.account_state_version;
             }
             if (stp_mode == Account::SelfTradePreventionMode::ExpireBoth) {
@@ -704,15 +889,24 @@ bool OrderEntryService::Execute(
     order.stp_mode = request.stp_mode;
     order.close_position = request.close_position;
     order.quote_order_qty = request.quote_order_qty;
+    const auto added_symbol_id = try_resolve_order_symbol_id(step_state, order.symbol);
     runtime_state.orders.emplace_back(std::move(order));
-    sync_open_order_margins(runtime_state);
+    ++runtime_state.orders_version;
+    if (added_symbol_id.has_value()) {
+        refresh_symbol_reservations(runtime_state, step_state, std::vector<size_t>{ *added_symbol_id });
+    }
+    else {
+        sync_open_order_margins(runtime_state, step_state);
+    }
     ++step_state.account_state_version;
     return true;
 }
 
-void OrderEntryService::SyncOpenOrderMargins(State::BinanceExchangeRuntimeState& runtime_state)
+void OrderEntryService::SyncOpenOrderMargins(
+    State::BinanceExchangeRuntimeState& runtime_state,
+    const State::StepKernelState& step_state)
 {
-    sync_open_order_margins(runtime_state);
+    sync_open_order_margins(runtime_state, step_state);
 }
 
 bool OrderEntryService::CancelOrderById(
@@ -720,7 +914,7 @@ bool OrderEntryService::CancelOrderById(
     State::StepKernelState& step_state,
     int order_id)
 {
-    if (!remove_order_by_id(runtime_state, order_id)) {
+    if (!remove_order_by_id(runtime_state, step_state, order_id)) {
         return false;
     }
     ++step_state.account_state_version;
@@ -733,15 +927,13 @@ void OrderEntryService::CancelOpenOrders(
     QTrading::Dto::Trading::InstrumentType instrument_type,
     const std::string& symbol)
 {
-    auto& orders = runtime_state.orders;
-    const size_t before = orders.size();
-    orders.erase(
-        std::remove_if(orders.begin(), orders.end(), [&](const QTrading::dto::Order& order) {
+    const size_t removed = remove_orders_if(
+        runtime_state,
+        step_state,
+        [&](const QTrading::dto::Order& order) {
             return order.symbol == symbol && order.instrument_type == instrument_type;
-        }),
-        orders.end());
-    if (orders.size() != before) {
-        SyncOpenOrderMargins(runtime_state);
+        });
+    if (removed > 0) {
         ++step_state.account_state_version;
     }
 }

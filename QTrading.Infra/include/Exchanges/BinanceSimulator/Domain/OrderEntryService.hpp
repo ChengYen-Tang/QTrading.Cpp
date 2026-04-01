@@ -36,7 +36,9 @@ public:
         std::optional<Contracts::OrderRejectInfo>& reject);
 
     /// Recomputes spot/perp open-order margin reservations from the live order book.
-    static void SyncOpenOrderMargins(State::BinanceExchangeRuntimeState& runtime_state);
+    static void SyncOpenOrderMargins(
+        State::BinanceExchangeRuntimeState& runtime_state,
+        const State::StepKernelState& step_state);
 
     /// Cancels one open order by internal order id.
     static bool CancelOrderById(

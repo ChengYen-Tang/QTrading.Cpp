@@ -271,6 +271,49 @@ double resolve_taker_buy_ratio(
     return static_cast<double>(buy_hits) / static_cast<double>(samples);
 }
 
+size_t lane_index(size_t symbol_index, QTrading::Dto::Trading::OrderSide side) noexcept
+{
+    return symbol_index * 2 + (side == QTrading::Dto::Trading::OrderSide::Sell ? 1U : 0U);
+}
+
+bool order_priority_less(
+    const std::vector<QTrading::dto::Order>& orders,
+    size_t lhs_idx,
+    size_t rhs_idx) noexcept
+{
+    const auto& lhs = orders[lhs_idx];
+    const auto& rhs = orders[rhs_idx];
+    if (lhs.price <= 0.0 || rhs.price <= 0.0) {
+        return lhs_idx < rhs_idx;
+    }
+    if (lhs.side == QTrading::Dto::Trading::OrderSide::Buy) {
+        if (std::abs(lhs.price - rhs.price) > kEpsilon) {
+            return lhs.price > rhs.price;
+        }
+    }
+    else {
+        if (std::abs(lhs.price - rhs.price) > kEpsilon) {
+            return lhs.price < rhs.price;
+        }
+    }
+    return lhs.id < rhs.id;
+}
+
+void insert_order_into_lane(
+    std::vector<size_t>& lane,
+    const std::vector<QTrading::dto::Order>& orders,
+    size_t order_idx)
+{
+    const auto insert_it = std::lower_bound(
+        lane.begin(),
+        lane.end(),
+        order_idx,
+        [&](size_t lhs_idx, size_t rhs_idx) {
+            return order_priority_less(orders, lhs_idx, rhs_idx);
+        });
+    lane.insert(insert_it, order_idx);
+}
+
 } // namespace
 
 void MatchingEngine::RunStep(
@@ -291,6 +334,7 @@ void MatchingEngine::RunStep(
     auto& liquidity_left = step_state.matching_liquidity_scratch;
     auto& buy_liquidity_left = step_state.matching_buy_liquidity_scratch;
     auto& sell_liquidity_left = step_state.matching_sell_liquidity_scratch;
+    auto& taker_buy_ratio_by_symbol = step_state.matching_taker_buy_ratio_scratch;
     auto& has_liquidity = step_state.matching_has_liquidity_scratch;
     auto& reducible_long_qty = step_state.matching_reducible_long_scratch;
     auto& reducible_short_qty = step_state.matching_reducible_short_scratch;
@@ -304,6 +348,7 @@ void MatchingEngine::RunStep(
     liquidity_left.assign(market.symbols->size(), 0.0);
     buy_liquidity_left.assign(market.symbols->size(), 0.0);
     sell_liquidity_left.assign(market.symbols->size(), 0.0);
+    taker_buy_ratio_by_symbol.assign(market.symbols->size(), 0.0);
     has_liquidity.assign(market.symbols->size(), 0);
     reducible_long_qty.assign(market.symbols->size(), 0.0);
     reducible_short_qty.assign(market.symbols->size(), 0.0);
@@ -314,13 +359,14 @@ void MatchingEngine::RunStep(
         }
         const double raw = market.trade_klines_by_id[i]->Volume;
         const double base_liquidity = raw > 0.0 ? raw : std::numeric_limits<double>::infinity();
+        const double taker_buy_ratio = resolve_taker_buy_ratio(
+            *market.trade_klines_by_id[i],
+            runtime_state.simulation_config,
+            market.Timestamp,
+            i);
+        taker_buy_ratio_by_symbol[i] = taker_buy_ratio;
         liquidity_left[i] = base_liquidity;
         if (opposite_passive_split && std::isfinite(base_liquidity)) {
-            const double taker_buy_ratio = resolve_taker_buy_ratio(
-                *market.trade_klines_by_id[i],
-                runtime_state.simulation_config,
-                market.Timestamp,
-                i);
             buy_liquidity_left[i] = base_liquidity * taker_buy_ratio;
             sell_liquidity_left[i] = base_liquidity - buy_liquidity_left[i];
         }
@@ -335,177 +381,197 @@ void MatchingEngine::RunStep(
     auto& next_orders = step_state.matching_orders_next_scratch;
     next_orders.clear();
     next_orders.reserve(orders.size());
-    auto& order_index = step_state.matching_order_index_scratch;
-    order_index.resize(orders.size());
-    std::iota(order_index.begin(), order_index.end(), size_t{ 0 });
-    std::stable_sort(order_index.begin(), order_index.end(),
-        [&](size_t lhs, size_t rhs) {
-            const auto& a = orders[lhs];
-            const auto& b = orders[rhs];
-            if (a.symbol != b.symbol || a.side != b.side) {
-                return lhs < rhs;
-            }
-            if (a.price <= 0.0 || b.price <= 0.0) {
-                return lhs < rhs;
-            }
-            if (a.side == QTrading::Dto::Trading::OrderSide::Buy) {
-                if (std::abs(a.price - b.price) > kEpsilon) {
-                    return a.price > b.price;
-                }
-            }
-            else {
-                if (std::abs(a.price - b.price) > kEpsilon) {
-                    return a.price < b.price;
-                }
-            }
-            return a.id < b.id;
-        });
-    for (const size_t idx : order_index) {
-        auto& order_slot = orders[idx];
-        QTrading::dto::Order order = std::move(order_slot);
-        const auto symbol_it = step_state.symbol_to_id.find(order.symbol);
+    auto& remaining_qty = step_state.matching_order_remaining_qty_scratch;
+    auto& order_symbol_ids = step_state.matching_order_symbol_id_scratch;
+    auto& has_order_symbol_id = step_state.matching_order_has_symbol_id_scratch;
+    const size_t lane_count = market.symbols->size() * 2;
+    auto& order_lanes = step_state.matching_order_lanes_scratch;
+    if (order_lanes.size() != lane_count) {
+        order_lanes.assign(lane_count, {});
+    }
+    for (auto& lane : order_lanes) {
+        lane.clear();
+    }
+    remaining_qty.resize(orders.size(), 0.0);
+    order_symbol_ids.resize(orders.size(), std::numeric_limits<size_t>::max());
+    has_order_symbol_id.resize(orders.size(), 0);
+    for (size_t i = 0; i < orders.size(); ++i) {
+        remaining_qty[i] = std::max(0.0, orders[i].quantity);
+        const auto symbol_it = step_state.symbol_to_id.find(orders[i].symbol);
         if (symbol_it == step_state.symbol_to_id.end()) {
-            next_orders.emplace_back(std::move(order));
             continue;
         }
         const size_t symbol_index = symbol_it->second;
         if (symbol_index == std::numeric_limits<size_t>::max() ||
             symbol_index >= market.trade_klines_by_id.size() ||
+            !market.trade_klines_by_id[symbol_index].has_value() ||
+            !has_liquidity[symbol_index]) {
+            continue;
+        }
+        has_order_symbol_id[i] = 1;
+        order_symbol_ids[i] = symbol_index;
+        const size_t idx = lane_index(symbol_index, orders[i].side);
+        if (idx >= order_lanes.size()) {
+            continue;
+        }
+        insert_order_into_lane(order_lanes[idx], orders, i);
+    }
+
+    for (size_t symbol_index = 0; symbol_index < market.symbols->size(); ++symbol_index) {
+        if (symbol_index >= market.trade_klines_by_id.size() ||
             !market.trade_klines_by_id[symbol_index].has_value()) {
-            next_orders.emplace_back(std::move(order));
             continue;
         }
-
-        if (!has_liquidity[symbol_index] || liquidity_left[symbol_index] <= kEpsilon) {
-            next_orders.emplace_back(std::move(order));
-            continue;
-        }
-
         const auto& kline = *market.trade_klines_by_id[symbol_index];
-        if (!is_marketable(order, kline)) {
-            next_orders.emplace_back(std::move(order));
-            continue;
-        }
-
-        const double fill_price = compute_fill_price(order, kline);
-        const bool is_taker = order.price <= 0.0 ||
-            (open_marketability_path
-                ? is_marketable_at_open(order, kline)
-                : (order.side == QTrading::Dto::Trading::OrderSide::Buy
-                    ? kline.ClosePrice <= order.price + kEpsilon
-                    : kline.ClosePrice + kEpsilon >= order.price));
-        const double request_qty = std::max(0.0, order.quantity);
-        double available_liquidity = liquidity_left[symbol_index];
-        if (opposite_passive_split) {
-            if (order.side == QTrading::Dto::Trading::OrderSide::Buy) {
-                available_liquidity = sell_liquidity_left[symbol_index];
-            }
-            else {
-                available_liquidity = buy_liquidity_left[symbol_index];
-            }
-        }
-        double max_fill_qty = std::min(request_qty, available_liquidity);
-        if (order.instrument_type == QTrading::Dto::Trading::InstrumentType::Perp && order.reduce_only) {
-            double reducible_qty = 0.0;
-            if (order.side == QTrading::Dto::Trading::OrderSide::Sell) {
-                reducible_qty = reducible_long_qty[symbol_index];
-            }
-            else {
-                reducible_qty = reducible_short_qty[symbol_index];
-            }
-            if (reducible_qty <= kEpsilon) {
-                next_orders.emplace_back(std::move(order));
+        const double taker_buy_ratio = taker_buy_ratio_by_symbol[symbol_index];
+        for (size_t side_lane = 0; side_lane < 2; ++side_lane) {
+            const size_t idx = symbol_index * 2 + side_lane;
+            if (idx >= order_lanes.size()) {
                 continue;
             }
-            max_fill_qty = std::min(max_fill_qty, reducible_qty);
-        }
-        const double taker_buy_ratio = resolve_taker_buy_ratio(
-            kline,
-            runtime_state.simulation_config,
-            market.Timestamp,
-            symbol_index);
-        const double fill_probability = compute_limit_fill_probability(
-            order,
-            kline,
-            runtime_state.simulation_config,
-            std::max(available_liquidity, kEpsilon),
-            taker_buy_ratio);
-        const double probabilistic_qty = max_fill_qty * fill_probability;
-        const double fill_qty = probabilistic_qty;
-        if (fill_qty <= kEpsilon) {
-            next_orders.emplace_back(std::move(order));
-            continue;
-        }
-        double fill_taker_probability = compute_taker_probability(
-            order,
-            kline,
-            runtime_state.simulation_config,
-            std::max(available_liquidity, kEpsilon),
-            taker_buy_ratio);
-        if (!runtime_state.simulation_config.taker_probability_model_enabled) {
-            fill_taker_probability = is_taker ? 1.0 : 0.0;
-        }
-        const bool resolved_taker = runtime_state.simulation_config.taker_probability_model_enabled
-            ? (fill_taker_probability > 0.0)
-            : is_taker;
-        double impact_bps = 0.0;
-        double adjusted_fill_price = apply_execution_slippage(
-            order,
-            kline,
-            runtime_state.simulation_config,
-            fill_price);
-        adjusted_fill_price = apply_market_impact_slippage(
-            order,
-            kline,
-            runtime_state.simulation_config,
-            fill_qty,
-            std::max(available_liquidity, kEpsilon),
-            adjusted_fill_price,
-            impact_bps);
+            auto& lane = order_lanes[idx];
+            for (const size_t order_idx : lane) {
+                if (order_idx >= orders.size() ||
+                    order_idx >= remaining_qty.size() ||
+                    order_idx >= has_order_symbol_id.size() ||
+                    order_idx >= order_symbol_ids.size() ||
+                    has_order_symbol_id[order_idx] == 0 ||
+                    order_symbol_ids[order_idx] != symbol_index ||
+                    remaining_qty[order_idx] <= kEpsilon) {
+                    continue;
+                }
+                const auto& order = orders[order_idx];
+                if (!is_marketable(order, kline)) {
+                    continue;
+                }
+                if (liquidity_left[symbol_index] <= kEpsilon) {
+                    continue;
+                }
 
-        MatchFill fill{};
-        fill.order_id = order.id;
-        fill.symbol = order.symbol;
-        fill.instrument_type = order.instrument_type;
-        fill.side = order.side;
-        fill.position_side = order.position_side;
-        fill.reduce_only = order.reduce_only;
-        fill.close_position = order.close_position;
-        fill.is_taker = resolved_taker;
-        fill.fill_probability = fill_probability;
-        fill.taker_probability = fill_taker_probability;
-        fill.impact_slippage_bps = impact_bps;
-        fill.quote_order_qty = order.quote_order_qty;
-        fill.order_price = order.price;
-        fill.closing_position_id = order.closing_position_id;
-        fill.order_quantity = request_qty;
-        fill.quantity = fill_qty;
-        fill.price = adjusted_fill_price;
-        out_fills.emplace_back(std::move(fill));
+                const double fill_price = compute_fill_price(order, kline);
+                const bool is_taker = order.price <= 0.0 ||
+                    (open_marketability_path
+                        ? is_marketable_at_open(order, kline)
+                        : (order.side == QTrading::Dto::Trading::OrderSide::Buy
+                            ? kline.ClosePrice <= order.price + kEpsilon
+                            : kline.ClosePrice + kEpsilon >= order.price));
+                const double request_qty = remaining_qty[order_idx];
+                double available_liquidity = liquidity_left[symbol_index];
+                if (opposite_passive_split) {
+                    if (order.side == QTrading::Dto::Trading::OrderSide::Buy) {
+                        available_liquidity = sell_liquidity_left[symbol_index];
+                    }
+                    else {
+                        available_liquidity = buy_liquidity_left[symbol_index];
+                    }
+                }
+                double max_fill_qty = std::min(request_qty, available_liquidity);
+                if (order.instrument_type == QTrading::Dto::Trading::InstrumentType::Perp && order.reduce_only) {
+                    double reducible_qty = 0.0;
+                    if (order.side == QTrading::Dto::Trading::OrderSide::Sell) {
+                        reducible_qty = reducible_long_qty[symbol_index];
+                    }
+                    else {
+                        reducible_qty = reducible_short_qty[symbol_index];
+                    }
+                    if (reducible_qty <= kEpsilon) {
+                        continue;
+                    }
+                    max_fill_qty = std::min(max_fill_qty, reducible_qty);
+                }
+                const double fill_probability = compute_limit_fill_probability(
+                    order,
+                    kline,
+                    runtime_state.simulation_config,
+                    std::max(available_liquidity, kEpsilon),
+                    taker_buy_ratio);
+                const double fill_qty = max_fill_qty * fill_probability;
+                if (fill_qty <= kEpsilon) {
+                    continue;
+                }
 
-        liquidity_left[symbol_index] -= fill_qty;
-        if (opposite_passive_split) {
-            if (order.side == QTrading::Dto::Trading::OrderSide::Buy) {
-                sell_liquidity_left[symbol_index] = std::max(0.0, sell_liquidity_left[symbol_index] - fill_qty);
+                double fill_taker_probability = compute_taker_probability(
+                    order,
+                    kline,
+                    runtime_state.simulation_config,
+                    std::max(available_liquidity, kEpsilon),
+                    taker_buy_ratio);
+                if (!runtime_state.simulation_config.taker_probability_model_enabled) {
+                    fill_taker_probability = is_taker ? 1.0 : 0.0;
+                }
+                const bool resolved_taker = runtime_state.simulation_config.taker_probability_model_enabled
+                    ? (fill_taker_probability > 0.0)
+                    : is_taker;
+                double impact_bps = 0.0;
+                double adjusted_fill_price = apply_execution_slippage(
+                    order,
+                    kline,
+                    runtime_state.simulation_config,
+                    fill_price);
+                adjusted_fill_price = apply_market_impact_slippage(
+                    order,
+                    kline,
+                    runtime_state.simulation_config,
+                    fill_qty,
+                    std::max(available_liquidity, kEpsilon),
+                    adjusted_fill_price,
+                    impact_bps);
+
+                MatchFill fill{};
+                fill.order_id = order.id;
+                fill.symbol = order.symbol;
+                fill.instrument_type = order.instrument_type;
+                fill.side = order.side;
+                fill.position_side = order.position_side;
+                fill.reduce_only = order.reduce_only;
+                fill.close_position = order.close_position;
+                fill.is_taker = resolved_taker;
+                fill.fill_probability = fill_probability;
+                fill.taker_probability = fill_taker_probability;
+                fill.impact_slippage_bps = impact_bps;
+                fill.quote_order_qty = order.quote_order_qty;
+                fill.order_price = order.price;
+                fill.closing_position_id = order.closing_position_id;
+                fill.order_quantity = request_qty;
+                fill.quantity = fill_qty;
+                fill.price = adjusted_fill_price;
+                out_fills.emplace_back(std::move(fill));
+
+                liquidity_left[symbol_index] -= fill_qty;
+                if (opposite_passive_split) {
+                    if (order.side == QTrading::Dto::Trading::OrderSide::Buy) {
+                        sell_liquidity_left[symbol_index] = std::max(0.0, sell_liquidity_left[symbol_index] - fill_qty);
+                    }
+                    else {
+                        buy_liquidity_left[symbol_index] = std::max(0.0, buy_liquidity_left[symbol_index] - fill_qty);
+                    }
+                }
+                if (order.instrument_type == QTrading::Dto::Trading::InstrumentType::Perp && order.reduce_only) {
+                    if (order.side == QTrading::Dto::Trading::OrderSide::Sell) {
+                        reducible_long_qty[symbol_index] = std::max(0.0, reducible_long_qty[symbol_index] - fill_qty);
+                    }
+                    else {
+                        reducible_short_qty[symbol_index] = std::max(0.0, reducible_short_qty[symbol_index] - fill_qty);
+                    }
+                }
+                remaining_qty[order_idx] = request_qty - fill_qty;
             }
-            else {
-                buy_liquidity_left[symbol_index] = std::max(0.0, buy_liquidity_left[symbol_index] - fill_qty);
-            }
-        }
-        if (order.instrument_type == QTrading::Dto::Trading::InstrumentType::Perp && order.reduce_only) {
-            if (order.side == QTrading::Dto::Trading::OrderSide::Sell) {
-                reducible_long_qty[symbol_index] = std::max(0.0, reducible_long_qty[symbol_index] - fill_qty);
-            }
-            else {
-                reducible_short_qty[symbol_index] = std::max(0.0, reducible_short_qty[symbol_index] - fill_qty);
-            }
-        }
-        order.quantity = request_qty - fill_qty;
-        if (order.quantity > kEpsilon) {
-            next_orders.emplace_back(std::move(order));
         }
     }
+
+    for (size_t i = 0; i < orders.size(); ++i) {
+        if (remaining_qty[i] <= kEpsilon) {
+            continue;
+        }
+        auto order = std::move(orders[i]);
+        order.quantity = remaining_qty[i];
+        next_orders.emplace_back(std::move(order));
+    }
+    const bool order_book_mutated = !out_fills.empty();
     orders.swap(next_orders);
+    if (order_book_mutated) {
+        ++runtime_state.orders_version;
+    }
 }
 
 } // namespace QTrading::Infra::Exchanges::BinanceSim::Domain

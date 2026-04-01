@@ -105,6 +105,10 @@ struct StepKernelState {
     std::vector<QTrading::dto::Position> last_published_positions;
     /// Last published order snapshot used by channel gating.
     std::vector<QTrading::dto::Order> last_published_orders;
+    /// Last observed order-book version that has been channel-published.
+    uint64_t last_published_orders_version{ 0 };
+    /// Last observed position-book version that has been channel-published.
+    uint64_t last_published_positions_version{ 0 };
     bool has_published_positions{ false };
     bool has_published_orders{ false };
     /// Last event-emitted position snapshot used for reduced event diffs.
@@ -129,12 +133,22 @@ struct StepKernelState {
     std::vector<QTrading::dto::Order> matching_orders_next_scratch;
     /// Scratch indices into the active open-order book.
     std::vector<size_t> matching_order_index_scratch;
+    /// Scratch remaining quantities aligned with active open-order slots.
+    std::vector<double> matching_order_remaining_qty_scratch;
+    /// Scratch dense symbol ids aligned with active open-order slots.
+    std::vector<size_t> matching_order_symbol_id_scratch;
+    /// Scratch flags indicating whether an aligned order slot has a valid symbol id.
+    std::vector<uint8_t> matching_order_has_symbol_id_scratch;
+    /// Scratch per-lane order indices keyed by `symbol_id * 2 + side_lane`.
+    std::vector<std::vector<size_t>> matching_order_lanes_scratch;
     /// Scratch liquidity pools for generic matching logic.
     std::vector<double> matching_liquidity_scratch;
     /// Scratch buy-side liquidity pools split for heuristic matching.
     std::vector<double> matching_buy_liquidity_scratch;
     /// Scratch sell-side liquidity pools split for heuristic matching.
     std::vector<double> matching_sell_liquidity_scratch;
+    /// Scratch per-symbol taker-buy ratios reused across all order matches in a step.
+    std::vector<double> matching_taker_buy_ratio_scratch;
     /// Scratch availability flags paired with liquidity vectors.
     std::vector<uint8_t> matching_has_liquidity_scratch;
     /// Scratch reducible-long quantities used by reduce-only checks.

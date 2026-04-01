@@ -57,7 +57,9 @@ LiquidationHealthSnapshot LiquidationEligibilityDecision::Evaluate(
 
     double total_unrealized = 0.0;
     double total_maintenance = 0.0;
-    for (const auto& position : runtime_state.positions) {
+    double worst_unrealized = std::numeric_limits<double>::max();
+    for (size_t i = 0; i < runtime_state.positions.size(); ++i) {
+        const auto& position = runtime_state.positions[i];
         if (position.instrument_type != QTrading::Dto::Trading::InstrumentType::Perp ||
             position.quantity <= kEpsilon) {
             continue;
@@ -81,6 +83,10 @@ LiquidationHealthSnapshot LiquidationEligibilityDecision::Evaluate(
         const double maintenance = compute_maintenance_margin(notional);
         total_unrealized += unrealized;
         total_maintenance += maintenance;
+        if (out.worst_loss_perp_position_index < 0 || unrealized < worst_unrealized) {
+            out.worst_loss_perp_position_index = static_cast<int>(i);
+            worst_unrealized = unrealized;
+        }
     }
 
     const double wallet_balance = account.get_perp_balance().WalletBalance;

@@ -12,10 +12,12 @@
 namespace QTrading::Infra::Exchanges::BinanceSim::Output {
 namespace {
 constexpr uint64_t kUnsetSnapshotTimestamp = std::numeric_limits<uint64_t>::max();
+constexpr int32_t kReferencePriceSourceNone = static_cast<int32_t>(Contracts::ReferencePriceSource::None);
 
 double compute_spot_inventory_value(
     const State::BinanceExchangeRuntimeState& runtime_state,
-    const State::SnapshotState& snapshot_state)
+    const State::SnapshotState& snapshot_state,
+    const State::StepKernelState& step_state)
 {
     if (!snapshot_state.symbols_shared) {
         return 0.0;
@@ -27,16 +29,14 @@ double compute_spot_inventory_value(
             continue;
         }
         double price = position.entry_price;
-        for (size_t i = 0; i < snapshot_state.symbols_shared->size(); ++i) {
-            if ((*snapshot_state.symbols_shared)[i] != position.symbol) {
-                continue;
-            }
+        const auto symbol_it = step_state.symbol_to_id.find(position.symbol);
+        if (symbol_it != step_state.symbol_to_id.end()) {
+            const size_t i = symbol_it->second;
             if (i < snapshot_state.has_last_trade_price_by_symbol.size() &&
                 i < snapshot_state.last_trade_price_by_symbol.size() &&
                 snapshot_state.has_last_trade_price_by_symbol[i] != 0) {
                 price = snapshot_state.last_trade_price_by_symbol[i];
             }
-            break;
         }
         total += position.quantity * price;
     }
@@ -52,6 +52,7 @@ void SnapshotBuilder::Fill(const BinanceExchange& exchange, Contracts::StatusSna
     // - replay/price context from SnapshotState written by StepKernel
     const auto& runtime_state = *exchange.runtime_state_;
     const auto& snapshot_state = *exchange.snapshot_state_;
+    const auto& step_state = *exchange.step_kernel_state_;
     const auto perp_balance = exchange.account_state().get_perp_balance();
     const auto spot_balance = exchange.account_state().get_spot_balance();
     const double total_cash_balance = exchange.account_state().get_total_cash_balance();
@@ -63,7 +64,7 @@ void SnapshotBuilder::Fill(const BinanceExchange& exchange, Contracts::StatusSna
         spot_balance.WalletBalance - spot_balance.PositionInitialMargin - runtime_state.spot_open_order_initial_margin);
 
     const double base_uncertainty_bps = std::max(0.0, runtime_state.simulation_config.uncertainty_band_bps);
-    const double spot_inventory_value = compute_spot_inventory_value(runtime_state, snapshot_state);
+    const double spot_inventory_value = compute_spot_inventory_value(runtime_state, snapshot_state, step_state);
     const double spot_ledger_value = spot_balance.WalletBalance + spot_inventory_value;
     const double total_ledger_value = perp_balance.Equity + spot_ledger_value;
     double mark_index_diag_bps = 0.0;
@@ -94,17 +95,31 @@ void SnapshotBuilder::Fill(const BinanceExchange& exchange, Contracts::StatusSna
     out.funding_skipped_no_mark = exchange.step_kernel_state_->funding_skipped_no_mark_total;
     out.progress_pct = snapshot_state.progress_pct;
 
-    out.prices.clear();
     if (!snapshot_state.symbols_shared) {
+        out.prices.clear();
         return;
     }
-    out.prices.reserve(snapshot_state.symbols_shared->size());
+    const size_t symbol_count = snapshot_state.symbols_shared->size();
+    out.prices.resize(symbol_count);
     const double basis_warning_bps = std::max(0.0, runtime_state.simulation_config.basis_warning_bps);
     const double basis_stress_bps = std::max(0.0, runtime_state.simulation_config.basis_stress_bps);
     const bool overlay_enabled = runtime_state.simulation_config.simulator_risk_overlay_enabled;
-    for (size_t i = 0; i < snapshot_state.symbols_shared->size(); ++i) {
-        Contracts::StatusPriceSnapshot price{};
-        price.symbol = (*snapshot_state.symbols_shared)[i];
+    const auto& symbols = *snapshot_state.symbols_shared;
+    for (size_t i = 0; i < symbol_count; ++i) {
+        auto& price = out.prices[i];
+        if (price.symbol != symbols[i]) {
+            price.symbol = symbols[i];
+        }
+        price.price = 0.0;
+        price.has_price = false;
+        price.trade_price = 0.0;
+        price.has_trade_price = false;
+        price.mark_price = 0.0;
+        price.has_mark_price = false;
+        price.mark_price_source = kReferencePriceSourceNone;
+        price.index_price = 0.0;
+        price.has_index_price = false;
+        price.index_price_source = kReferencePriceSourceNone;
         if (i < snapshot_state.has_last_trade_price_by_symbol.size() &&
             snapshot_state.has_last_trade_price_by_symbol[i] != 0 &&
             i < snapshot_state.last_trade_price_by_symbol.size()) {
@@ -156,7 +171,6 @@ void SnapshotBuilder::Fill(const BinanceExchange& exchange, Contracts::StatusSna
                 }
             }
         }
-        out.prices.emplace_back(std::move(price));
     }
     if (out.basis_stress_symbols > 0) {
         out.basis_warning_symbols = out.basis_stress_symbols;

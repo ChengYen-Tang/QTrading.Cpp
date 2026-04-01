@@ -31,6 +31,8 @@ struct LiquidationHealthSnapshot {
     double equity{ 0.0 };
     /// Current maintenance margin requirement used by the decision.
     double maintenance_margin{ 0.0 };
+    /// Index of the current worst-loss perp position eligible for liquidation.
+    int worst_loss_perp_position_index{ -1 };
 };
 
 /// Evaluates whether the reduced liquidation path should run for the current step.

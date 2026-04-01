@@ -199,56 +199,6 @@ void update_snapshot_state(
     }
 }
 
-bool order_equal(const QTrading::dto::Order& lhs, const QTrading::dto::Order& rhs)
-{
-    return lhs.id == rhs.id &&
-        lhs.symbol == rhs.symbol &&
-        lhs.quantity == rhs.quantity &&
-        lhs.price == rhs.price &&
-        lhs.side == rhs.side &&
-        lhs.position_side == rhs.position_side &&
-        lhs.reduce_only == rhs.reduce_only &&
-        lhs.closing_position_id == rhs.closing_position_id &&
-        lhs.instrument_type == rhs.instrument_type &&
-        lhs.client_order_id == rhs.client_order_id &&
-        lhs.stp_mode == rhs.stp_mode &&
-        lhs.close_position == rhs.close_position &&
-        lhs.quote_order_qty == rhs.quote_order_qty &&
-        lhs.one_way_reverse == rhs.one_way_reverse;
-}
-
-bool position_equal(const QTrading::dto::Position& lhs, const QTrading::dto::Position& rhs)
-{
-    return lhs.id == rhs.id &&
-        lhs.order_id == rhs.order_id &&
-        lhs.symbol == rhs.symbol &&
-        lhs.quantity == rhs.quantity &&
-        lhs.entry_price == rhs.entry_price &&
-        lhs.is_long == rhs.is_long &&
-        lhs.unrealized_pnl == rhs.unrealized_pnl &&
-        lhs.notional == rhs.notional &&
-        lhs.initial_margin == rhs.initial_margin &&
-        lhs.maintenance_margin == rhs.maintenance_margin &&
-        lhs.fee == rhs.fee &&
-        lhs.leverage == rhs.leverage &&
-        lhs.fee_rate == rhs.fee_rate &&
-        lhs.instrument_type == rhs.instrument_type;
-}
-
-template <typename T, typename TEqual>
-bool vector_equal(const std::vector<T>& lhs, const std::vector<T>& rhs, TEqual equal)
-{
-    if (lhs.size() != rhs.size()) {
-        return false;
-    }
-    for (size_t i = 0; i < lhs.size(); ++i) {
-        if (!equal(lhs[i], rhs[i])) {
-            return false;
-        }
-    }
-    return true;
-}
-
 bool apply_funding_for_step(
     State::StepKernelState& step_state,
     const State::BinanceExchangeRuntimeState& runtime_state,
@@ -404,11 +354,11 @@ void publish_position_order_channels(
                         (void)runtime_state.logger->Log(step_state.log_module_order_id, order);
                     }
                 }
-                step_state.last_published_orders = orders;
                 step_state.has_published_orders = true;
             }
+            step_state.last_published_orders_version = runtime_state.orders_version;
         }
-        else if (!vector_equal(orders, step_state.last_published_orders, order_equal)) {
+        else if (runtime_state.orders_version != step_state.last_published_orders_version) {
             if (exchange.get_order_channel()) {
                 exchange.get_order_channel()->Send(orders);
             }
@@ -418,7 +368,7 @@ void publish_position_order_channels(
                     (void)runtime_state.logger->Log(step_state.log_module_order_id, order);
                 }
             }
-            step_state.last_published_orders = orders;
+            step_state.last_published_orders_version = runtime_state.orders_version;
         }
     }
 
@@ -435,11 +385,11 @@ void publish_position_order_channels(
                         (void)runtime_state.logger->Log(step_state.log_module_position_id, position);
                     }
                 }
-                step_state.last_published_positions = positions;
                 step_state.has_published_positions = true;
             }
+            step_state.last_published_positions_version = runtime_state.positions_version;
         }
-        else if (!vector_equal(positions, step_state.last_published_positions, position_equal)) {
+        else if (runtime_state.positions_version != step_state.last_published_positions_version) {
             if (exchange.get_position_channel()) {
                 exchange.get_position_channel()->Send(positions);
             }
@@ -449,7 +399,7 @@ void publish_position_order_channels(
                     (void)runtime_state.logger->Log(step_state.log_module_position_id, position);
                 }
             }
-            step_state.last_published_positions = positions;
+            step_state.last_published_positions_version = runtime_state.positions_version;
         }
     }
 
@@ -1287,30 +1237,28 @@ bool StepKernel::run_step() const
     }
 
     ++step_state.step_seq;
+    resolve_log_module_ids_if_needed(step_state, runtime_state.logger);
+    const bool need_step_entry_snapshots =
+        runtime_state.logger &&
+        (step_state.log_module_position_event_id != QTrading::Log::Logger::kInvalidModuleId ||
+            step_state.log_module_order_event_id != QTrading::Log::Logger::kInvalidModuleId);
+    const bool need_funding_apply_snapshot =
+        runtime_state.logger &&
+        step_state.log_module_funding_event_id != QTrading::Log::Logger::kInvalidModuleId;
+
     step_state.has_funding_apply_positions = false;
     step_state.funding_apply_positions.clear();
-    step_state.step_entry_positions = runtime_state.positions;
-    step_state.step_entry_orders = runtime_state.orders;
+    if (need_step_entry_snapshots) {
+        step_state.step_entry_positions = runtime_state.positions;
+        step_state.step_entry_orders = runtime_state.orders;
+    }
+    else {
+        step_state.step_entry_positions.clear();
+        step_state.step_entry_orders.clear();
+    }
     bool orders_maybe_changed = false;
     bool positions_maybe_changed = false;
-    if (!step_state.has_published_orders) {
-        orders_maybe_changed = !runtime_state.orders.empty();
-    }
-    else if (runtime_state.orders.size() != step_state.last_published_orders.size()) {
-        orders_maybe_changed = true;
-    }
-    if (!step_state.has_published_positions) {
-        positions_maybe_changed = !runtime_state.positions.empty();
-    }
-    else if (runtime_state.positions.size() != step_state.last_published_positions.size()) {
-        positions_maybe_changed = true;
-    }
-    const bool has_deferred_before_flush = !runtime_state.deferred_order_commands.empty();
-    const size_t orders_before_flush = runtime_state.orders.size();
     OrderCommandKernel(exchange_).FlushDeferredForStep(step_state.step_seq);
-    orders_maybe_changed = orders_maybe_changed ||
-        has_deferred_before_flush ||
-        runtime_state.orders.size() != orders_before_flush;
     QTrading::Utils::GlobalTimestamp.store(frame.ts_exchange, std::memory_order_release);
     runtime_state.last_status_snapshot.ts_exchange = frame.ts_exchange;
     if (frame.market_payload) {
@@ -1318,8 +1266,10 @@ bool StepKernel::run_step() const
             runtime_state.simulation_config.funding_apply_timing ==
                 Contracts::FundingApplyTiming::BeforeMatching,
             [&]() {
-                step_state.funding_apply_positions = runtime_state.positions;
-                step_state.has_funding_apply_positions = true;
+                if (need_funding_apply_snapshot) {
+                    step_state.funding_apply_positions = runtime_state.positions;
+                    step_state.has_funding_apply_positions = true;
+                }
                 if (apply_funding_for_step(step_state, runtime_state, exchange_.account_state(), *frame.market_payload)) {
                     ++step_state.account_state_version;
                 }
@@ -1336,35 +1286,28 @@ bool StepKernel::run_step() const
                 Domain::FillSettlementEngine::Apply(runtime_state, exchange_.account_state(), fills);
                 if (runtime_state.simulation_config.funding_apply_timing ==
                     Contracts::FundingApplyTiming::AfterMatching) {
-                    step_state.funding_apply_positions = runtime_state.positions;
-                    step_state.has_funding_apply_positions = true;
+                    if (need_funding_apply_snapshot) {
+                        step_state.funding_apply_positions = runtime_state.positions;
+                        step_state.has_funding_apply_positions = true;
+                    }
                 }
             });
-        const auto pre_liquidation_positions = runtime_state.positions;
+        std::vector<Domain::LiquidationPositionDelta> liquidation_position_deltas;
+        liquidation_position_deltas.reserve(8);
         if (Domain::LiquidationExecution::Run(
                 runtime_state,
                 exchange_.account_state(),
                 step_state,
-                *frame.market_payload)) {
-            if (!pre_liquidation_positions.empty()) {
-                for (const auto& prev_position : pre_liquidation_positions) {
-                    if (prev_position.instrument_type != QTrading::Dto::Trading::InstrumentType::Perp ||
-                        prev_position.quantity <= 1e-12) {
+                *frame.market_payload,
+                &liquidation_position_deltas)) {
+            if (!liquidation_position_deltas.empty()) {
+                for (const auto& delta : liquidation_position_deltas) {
+                    if (delta.instrument_type != QTrading::Dto::Trading::InstrumentType::Perp ||
+                        delta.quantity_closed <= 1e-12) {
                         continue;
                     }
-                    const auto cur_it = std::find_if(
-                        runtime_state.positions.begin(),
-                        runtime_state.positions.end(),
-                        [&](const QTrading::dto::Position& p) {
-                            return p.id == prev_position.id;
-                        });
-                    const double cur_qty = (cur_it != runtime_state.positions.end()) ? cur_it->quantity : 0.0;
-                    const double closed_qty = prev_position.quantity - cur_qty;
-                    if (closed_qty <= 1e-12) {
-                        continue;
-                    }
-                    double liq_price = prev_position.entry_price;
-                    const auto symbol_it = step_state.symbol_to_id.find(prev_position.symbol);
+                    double liq_price = delta.entry_price;
+                    const auto symbol_it = step_state.symbol_to_id.find(delta.symbol);
                     if (symbol_it != step_state.symbol_to_id.end()) {
                         const size_t symbol_id = symbol_it->second;
                         if (symbol_id < snapshot_state.has_last_mark_price_by_symbol.size() &&
@@ -1375,24 +1318,24 @@ bool StepKernel::run_step() const
                     }
                     Domain::MatchFill synthetic{};
                     synthetic.order_id = -999999;
-                    synthetic.symbol = prev_position.symbol;
-                    synthetic.instrument_type = prev_position.instrument_type;
-                    synthetic.side = prev_position.is_long
+                    synthetic.symbol = delta.symbol;
+                    synthetic.instrument_type = delta.instrument_type;
+                    synthetic.side = delta.is_long
                         ? QTrading::Dto::Trading::OrderSide::Sell
                         : QTrading::Dto::Trading::OrderSide::Buy;
-                    synthetic.position_side = prev_position.is_long
+                    synthetic.position_side = delta.is_long
                         ? QTrading::Dto::Trading::PositionSide::Long
                         : QTrading::Dto::Trading::PositionSide::Short;
                     synthetic.reduce_only = true;
-                    synthetic.close_position = cur_it == runtime_state.positions.end() || cur_qty <= 1e-12;
+                    synthetic.close_position = delta.position_closed;
                     synthetic.is_taker = true;
                     synthetic.fill_probability = 1.0;
                     synthetic.taker_probability = 1.0;
                     synthetic.quote_order_qty = 0.0;
-                    synthetic.order_price = prev_position.entry_price;
-                    synthetic.closing_position_id = prev_position.id;
-                    synthetic.order_quantity = prev_position.quantity;
-                    synthetic.quantity = closed_qty;
+                    synthetic.order_price = delta.entry_price;
+                    synthetic.closing_position_id = delta.position_id;
+                    synthetic.order_quantity = delta.quantity_before;
+                    synthetic.quantity = delta.quantity_closed;
                     synthetic.price = liq_price;
                     step_state.match_fills_scratch.emplace_back(std::move(synthetic));
                 }
@@ -1401,7 +1344,7 @@ bool StepKernel::run_step() const
             orders_maybe_changed = true;
             positions_maybe_changed = true;
         }
-        Domain::OrderEntryService::SyncOpenOrderMargins(runtime_state);
+        Domain::OrderEntryService::SyncOpenOrderMargins(runtime_state, step_state);
         exchange_.account_state().sync_open_order_initial_margins(
             runtime_state.spot_open_order_initial_margin,
             runtime_state.perp_open_order_initial_margin);
@@ -1444,25 +1387,12 @@ bool StepKernel::run_step() const
         runtime_state.logger,
         step_state.account_state_version,
         step_state);
-    if (!step_state.has_published_orders) {
-        orders_maybe_changed = !runtime_state.orders.empty();
-    }
-    else {
-        orders_maybe_changed = !vector_equal(
-            runtime_state.orders,
-            step_state.last_published_orders,
-            order_equal);
-    }
-    if (!step_state.has_published_positions) {
-        positions_maybe_changed = !runtime_state.positions.empty();
-    }
-    else {
-        positions_maybe_changed = !vector_equal(
-            runtime_state.positions,
-            step_state.last_published_positions,
-            position_equal);
-    }
-
+    orders_maybe_changed = orders_maybe_changed ||
+        (!step_state.has_published_orders && !runtime_state.orders.empty()) ||
+        runtime_state.orders_version != step_state.last_published_orders_version;
+    positions_maybe_changed = positions_maybe_changed ||
+        (!step_state.has_published_positions && !runtime_state.positions.empty()) ||
+        runtime_state.positions_version != step_state.last_published_positions_version;
     publish_position_order_channels(
         exchange_,
         runtime_state,

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <utility>
 
 #include "Dto/Market/Binance/MultiKline.hpp"
 #include "Exchanges/BinanceSimulator/Account/Account.hpp"
@@ -42,7 +43,33 @@ bool cancel_all_perp_orders(State::BinanceExchangeRuntimeState& runtime_state) n
                 return order.instrument_type == QTrading::Dto::Trading::InstrumentType::Perp;
             }),
         runtime_state.orders.end());
-    return runtime_state.orders.size() != before;
+    const bool removed = runtime_state.orders.size() != before;
+    if (removed) {
+        ++runtime_state.orders_version;
+    }
+    return removed;
+}
+
+void append_position_delta(
+    const QTrading::dto::Position& position,
+    double quantity_before,
+    double quantity_closed,
+    bool position_closed,
+    std::vector<LiquidationPositionDelta>* out_position_deltas) noexcept
+{
+    if (out_position_deltas == nullptr || !(quantity_closed > kEpsilon)) {
+        return;
+    }
+    LiquidationPositionDelta delta{};
+    delta.position_id = position.id;
+    delta.symbol = position.symbol;
+    delta.instrument_type = position.instrument_type;
+    delta.is_long = position.is_long;
+    delta.entry_price = position.entry_price;
+    delta.quantity_before = quantity_before;
+    delta.quantity_closed = quantity_closed;
+    delta.position_closed = position_closed;
+    out_position_deltas->emplace_back(std::move(delta));
 }
 
 bool apply_full_liquidation_close_on_position(
@@ -50,7 +77,8 @@ bool apply_full_liquidation_close_on_position(
     Account& account,
     const State::StepKernelState& step_state,
     const std::vector<double>& mark_price_scratch,
-    int position_index) noexcept
+    int position_index,
+    std::vector<LiquidationPositionDelta>* out_position_deltas) noexcept
 {
     if (position_index < 0 || static_cast<size_t>(position_index) >= runtime_state.positions.size()) {
         return false;
@@ -79,9 +107,16 @@ bool apply_full_liquidation_close_on_position(
     const double realized_pnl = (mark - position.entry_price) * close_qty * direction;
     const double fee = close_qty * mark * kLiquidationFeeRate;
     account.apply_perp_wallet_delta(realized_pnl - fee);
+    append_position_delta(
+        position,
+        close_qty,
+        close_qty,
+        true,
+        out_position_deltas);
 
     runtime_state.positions.erase(
         runtime_state.positions.begin() + static_cast<std::vector<QTrading::dto::Position>::difference_type>(position_index));
+    ++runtime_state.positions_version;
     return true;
 }
 
@@ -90,7 +125,8 @@ bool apply_warning_zone_partial_reduction_on_position(
     Account& account,
     const State::StepKernelState& step_state,
     const std::vector<double>& mark_price_scratch,
-    int position_index) noexcept
+    int position_index,
+    std::vector<LiquidationPositionDelta>* out_position_deltas) noexcept
 {
     if (position_index < 0 || static_cast<size_t>(position_index) >= runtime_state.positions.size()) {
         return false;
@@ -123,14 +159,24 @@ bool apply_warning_zone_partial_reduction_on_position(
     const double fee = reduce_qty * mark * kLiquidationFeeRate;
     account.apply_perp_wallet_delta(realized_pnl - fee);
 
+    const double quantity_before = position.quantity;
     position.quantity -= reduce_qty;
+    const bool position_closed = position.quantity <= kEpsilon;
+    append_position_delta(
+        position,
+        quantity_before,
+        reduce_qty,
+        position_closed,
+        out_position_deltas);
     if (position.quantity <= kEpsilon) {
         runtime_state.positions.erase(
             runtime_state.positions.begin() + static_cast<std::vector<QTrading::dto::Position>::difference_type>(position_index));
+        ++runtime_state.positions_version;
         return true;
     }
     position.notional = std::abs(position.quantity * position.entry_price);
     position.maintenance_margin = compute_maintenance_margin(std::abs(position.quantity * mark));
+    ++runtime_state.positions_version;
     return true;
 }
 
@@ -140,7 +186,8 @@ bool LiquidationExecution::Run(
     State::BinanceExchangeRuntimeState& runtime_state,
     Account& account,
     State::StepKernelState& step_state,
-    const QTrading::Dto::Market::Binance::MultiKlineDto& market_payload) noexcept
+    const QTrading::Dto::Market::Binance::MultiKlineDto& market_payload,
+    std::vector<LiquidationPositionDelta>* out_position_deltas) noexcept
 {
     // Current scope keeps liquidation as direct state reduction:
     // - no synthetic fill external contract is emitted here
@@ -166,11 +213,7 @@ bool LiquidationExecution::Run(
     bool state_mutated = cancel_all_perp_orders(runtime_state);
 
     if (!initial_health.distressed) {
-        const int warning_idx = LiquidationEligibilityDecision::FindWorstLossPerpPositionIndex(
-            runtime_state,
-            step_state,
-            has_mark_scratch,
-            mark_price_scratch);
+        const int warning_idx = initial_health.worst_loss_perp_position_index;
         if (warning_idx < 0) {
             return state_mutated;
         }
@@ -179,7 +222,8 @@ bool LiquidationExecution::Run(
                 account,
                 step_state,
                 mark_price_scratch,
-                warning_idx)) {
+                warning_idx,
+                out_position_deltas)) {
             state_mutated = true;
         }
         return state_mutated;
@@ -196,11 +240,7 @@ bool LiquidationExecution::Run(
         if (!health.distressed) {
             break;
         }
-        const int worst_idx = LiquidationEligibilityDecision::FindWorstLossPerpPositionIndex(
-            runtime_state,
-            step_state,
-            has_mark_scratch,
-            mark_price_scratch);
+        const int worst_idx = health.worst_loss_perp_position_index;
         if (worst_idx < 0) {
             break;
         }
@@ -209,7 +249,8 @@ bool LiquidationExecution::Run(
                 account,
                 step_state,
                 mark_price_scratch,
-                worst_idx)) {
+                worst_idx,
+                out_position_deltas)) {
             break;
         }
         state_mutated = true;
