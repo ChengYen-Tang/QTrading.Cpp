@@ -12,6 +12,9 @@
 #include "Queue/ChannelFactory.hpp"
 
 namespace QTrading::Infra::Exchanges::BinanceSim {
+namespace {
+constexpr size_t kReplayPayloadPrewarmPoolSize = 3;
+}
 
 BinanceExchange::BinanceExchange(const std::vector<SymbolDataset>& datasets,
     std::shared_ptr<QTrading::Log::Logger> logger, const Account::AccountInitConfig& account_init, uint64_t run_id)
@@ -123,6 +126,20 @@ void BinanceExchange::initialize_step_kernel_state_(const std::vector<SymbolData
     step_kernel_state_->last_observed_funding_by_symbol.assign(datasets.size(), std::nullopt);
     step_kernel_state_->next_ts_by_symbol.assign(datasets.size(), 0);
     step_kernel_state_->has_next_ts.assign(datasets.size(), 0);
+    step_kernel_state_->replay_has_trade_kline_by_symbol.assign(datasets.size(), 0);
+    step_kernel_state_->replay_trade_open_by_symbol.assign(datasets.size(), 0.0);
+    step_kernel_state_->replay_trade_high_by_symbol.assign(datasets.size(), 0.0);
+    step_kernel_state_->replay_trade_low_by_symbol.assign(datasets.size(), 0.0);
+    step_kernel_state_->replay_trade_close_by_symbol.assign(datasets.size(), 0.0);
+    step_kernel_state_->replay_trade_volume_by_symbol.assign(datasets.size(), 0.0);
+    step_kernel_state_->replay_trade_taker_buy_base_volume_by_symbol.assign(datasets.size(), 0.0);
+    step_kernel_state_->replay_has_mark_price_by_symbol.assign(datasets.size(), 0);
+    step_kernel_state_->replay_mark_price_by_symbol.assign(datasets.size(), 0.0);
+    step_kernel_state_->replay_has_index_price_by_symbol.assign(datasets.size(), 0);
+    step_kernel_state_->replay_index_price_by_symbol.assign(datasets.size(), 0.0);
+    step_kernel_state_->replay_has_funding_by_symbol.assign(datasets.size(), 0);
+    step_kernel_state_->replay_funding_rate_by_symbol.assign(datasets.size(), 0.0);
+    step_kernel_state_->replay_funding_time_by_symbol.assign(datasets.size(), 0);
 
     for (size_t i = 0; i < datasets.size(); ++i) {
         const auto& ds = datasets[i];
@@ -198,6 +215,34 @@ void BinanceExchange::initialize_step_kernel_state_(const std::vector<SymbolData
     snapshot_state_->last_index_price_source_by_symbol.assign(
         step_kernel_state_->symbols.size(),
         static_cast<int32_t>(Contracts::ReferencePriceSource::None));
+    snapshot_state_->price_rows_by_symbol.assign(
+        step_kernel_state_->symbols.size(),
+        State::SnapshotPriceRowById{});
+    snapshot_state_->price_row_dirty_by_symbol.assign(step_kernel_state_->symbols.size(), 1);
+    snapshot_state_->dirty_price_symbol_ids.clear();
+    snapshot_state_->dirty_price_symbol_ids.reserve(step_kernel_state_->symbols.size());
+    for (size_t i = 0; i < step_kernel_state_->symbols.size(); ++i) {
+        snapshot_state_->dirty_price_symbol_ids.push_back(i);
+    }
+    snapshot_state_->price_rows_version = step_kernel_state_->symbols.empty() ? 0 : 1;
+
+    step_kernel_state_->replay_payload_pool.clear();
+    step_kernel_state_->replay_payload_pool.reserve(kReplayPayloadPrewarmPoolSize);
+    for (size_t i = 0; i < kReplayPayloadPrewarmPoolSize; ++i) {
+        State::ReplayPayloadBuffer buffer{};
+        buffer.dto = std::make_shared<QTrading::Dto::Market::Binance::MultiKlineDto>();
+        buffer.dto->symbols = step_kernel_state_->symbols_shared;
+        buffer.dto->trade_klines_by_id.resize(step_kernel_state_->symbols.size());
+        buffer.dto->mark_klines_by_id.resize(step_kernel_state_->symbols.size());
+        buffer.dto->index_klines_by_id.resize(step_kernel_state_->symbols.size());
+        buffer.dto->funding_by_id.resize(step_kernel_state_->symbols.size());
+        buffer.touched_trade_ids.reserve(step_kernel_state_->symbols.size());
+        buffer.touched_mark_ids.reserve(step_kernel_state_->symbols.size());
+        buffer.touched_index_ids.reserve(step_kernel_state_->symbols.size());
+        buffer.touched_funding_ids.reserve(step_kernel_state_->symbols.size());
+        step_kernel_state_->replay_payload_pool.emplace_back(std::move(buffer));
+    }
+    step_kernel_state_->replay_payload_pool_cursor = 0;
 }
 
 } // namespace QTrading::Infra::Exchanges::BinanceSim

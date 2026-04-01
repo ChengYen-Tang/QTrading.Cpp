@@ -58,8 +58,14 @@ struct BinanceExchangeRuntimeState {
     int vip_level{ 0 };
     /// Live position book owned by the facade runtime.
     std::vector<QTrading::dto::Position> positions;
+    /// Dense symbol ids aligned with `positions` slots (runtime hot path).
+    std::vector<size_t> position_symbol_id_by_slot{};
     /// Live open-order book owned by the facade runtime.
     std::vector<QTrading::dto::Order> orders;
+    /// Dense symbol ids aligned with `orders` slots (runtime hot path).
+    std::vector<size_t> order_symbol_id_by_slot{};
+    /// Internal order-id to symbol-id cache for runtime hot paths.
+    std::unordered_map<int, size_t> order_symbol_id_by_order_id{};
     /// Deferred async-ack records waiting to resolve or already resolved.
     std::vector<Contracts::AsyncOrderAck> async_order_acks;
     /// Per-symbol leverage overrides exposed through the public facade.
@@ -106,6 +112,8 @@ struct BinanceExchangeRuntimeState {
     std::unordered_map<int, size_t> position_slot_by_id{};
     /// Internal `(symbol_id, instrument_type, side)` to position-id queue index.
     std::unordered_map<PositionIndexKey, std::deque<int>, PositionIndexKeyHash> position_ids_by_key{};
+    /// Internal position-id to symbol-id cache for runtime hot paths.
+    std::unordered_map<int, size_t> position_symbol_id_by_position_id{};
     /// True when internal fill-settlement position index mirrors `positions`.
     bool position_index_ready{ false };
     /// Next async request id assigned by the runtime.

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstddef>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -21,6 +23,8 @@ namespace QTrading::Infra::Exchanges::BinanceSim::Domain {
 struct MatchFill {
     /// Internal order id that produced the fill.
     int order_id{ 0 };
+    /// Runtime symbol id aligned to StepKernel symbol table when available.
+    size_t symbol_id{ std::numeric_limits<size_t>::max() };
     /// Symbol being matched.
     std::string symbol;
     /// Instrument lane for the fill.

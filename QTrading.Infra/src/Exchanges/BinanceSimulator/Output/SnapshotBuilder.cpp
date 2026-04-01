@@ -43,6 +43,69 @@ double compute_spot_inventory_value(
     return total;
 }
 
+void materialize_price_row(
+    const State::SnapshotState& snapshot_state,
+    const std::vector<std::string>& symbols,
+    size_t symbol_id,
+    Contracts::StatusPriceSnapshot& out_row)
+{
+    if (out_row.symbol != symbols[symbol_id]) {
+        out_row.symbol = symbols[symbol_id];
+    }
+
+    if (symbol_id < snapshot_state.price_rows_by_symbol.size()) {
+        const auto& row = snapshot_state.price_rows_by_symbol[symbol_id];
+        out_row.price = row.price;
+        out_row.has_price = row.has_price;
+        out_row.trade_price = row.trade_price;
+        out_row.has_trade_price = row.has_trade_price;
+        out_row.mark_price = row.mark_price;
+        out_row.has_mark_price = row.has_mark_price;
+        out_row.mark_price_source = row.mark_price_source;
+        out_row.index_price = row.index_price;
+        out_row.has_index_price = row.has_index_price;
+        out_row.index_price_source = row.index_price_source;
+        return;
+    }
+
+    out_row.price = 0.0;
+    out_row.has_price = false;
+    out_row.trade_price = 0.0;
+    out_row.has_trade_price = false;
+    out_row.mark_price = 0.0;
+    out_row.has_mark_price = false;
+    out_row.mark_price_source = kReferencePriceSourceNone;
+    out_row.index_price = 0.0;
+    out_row.has_index_price = false;
+    out_row.index_price_source = kReferencePriceSourceNone;
+    if (symbol_id < snapshot_state.has_last_trade_price_by_symbol.size() &&
+        snapshot_state.has_last_trade_price_by_symbol[symbol_id] != 0 &&
+        symbol_id < snapshot_state.last_trade_price_by_symbol.size()) {
+        out_row.trade_price = snapshot_state.last_trade_price_by_symbol[symbol_id];
+        out_row.has_trade_price = true;
+        out_row.price = out_row.trade_price;
+        out_row.has_price = true;
+    }
+    if (symbol_id < snapshot_state.has_last_mark_price_by_symbol.size() &&
+        snapshot_state.has_last_mark_price_by_symbol[symbol_id] != 0 &&
+        symbol_id < snapshot_state.last_mark_price_by_symbol.size()) {
+        out_row.mark_price = snapshot_state.last_mark_price_by_symbol[symbol_id];
+        out_row.has_mark_price = true;
+        if (symbol_id < snapshot_state.last_mark_price_source_by_symbol.size()) {
+            out_row.mark_price_source = snapshot_state.last_mark_price_source_by_symbol[symbol_id];
+        }
+    }
+    if (symbol_id < snapshot_state.has_last_index_price_by_symbol.size() &&
+        snapshot_state.has_last_index_price_by_symbol[symbol_id] != 0 &&
+        symbol_id < snapshot_state.last_index_price_by_symbol.size()) {
+        out_row.index_price = snapshot_state.last_index_price_by_symbol[symbol_id];
+        out_row.has_index_price = true;
+        if (symbol_id < snapshot_state.last_index_price_source_by_symbol.size()) {
+            out_row.index_price_source = snapshot_state.last_index_price_source_by_symbol[symbol_id];
+        }
+    }
+}
+
 } // namespace
 
 void SnapshotBuilder::Fill(const BinanceExchange& exchange, Contracts::StatusSnapshot& out)
@@ -100,52 +163,50 @@ void SnapshotBuilder::Fill(const BinanceExchange& exchange, Contracts::StatusSna
         return;
     }
     const size_t symbol_count = snapshot_state.symbols_shared->size();
+    const size_t previous_price_row_count = out.prices.size();
     out.prices.resize(symbol_count);
     const double basis_warning_bps = std::max(0.0, runtime_state.simulation_config.basis_warning_bps);
     const double basis_stress_bps = std::max(0.0, runtime_state.simulation_config.basis_stress_bps);
     const bool overlay_enabled = runtime_state.simulation_config.simulator_risk_overlay_enabled;
     const auto& symbols = *snapshot_state.symbols_shared;
+    const bool is_runtime_cache_target = &out == &runtime_state.last_status_snapshot;
+    bool has_symbol_alignment = previous_price_row_count == symbol_count;
+    if (has_symbol_alignment) {
+        for (size_t i = 0; i < symbol_count; ++i) {
+            if (out.prices[i].symbol != symbols[i]) {
+                has_symbol_alignment = false;
+                break;
+            }
+        }
+    }
+    const bool can_incremental_materialize =
+        is_runtime_cache_target &&
+        has_symbol_alignment &&
+        snapshot_state.price_rows_version > 0 &&
+        snapshot_state.price_rows_by_symbol.size() == symbol_count &&
+        !snapshot_state.dirty_price_symbol_ids.empty();
+    const bool can_skip_row_materialization =
+        is_runtime_cache_target &&
+        has_symbol_alignment &&
+        snapshot_state.price_rows_version > 0 &&
+        snapshot_state.price_rows_by_symbol.size() == symbol_count &&
+        snapshot_state.dirty_price_symbol_ids.empty();
+    if (can_incremental_materialize) {
+        for (const auto dirty_symbol_id : snapshot_state.dirty_price_symbol_ids) {
+            if (dirty_symbol_id >= symbol_count) {
+                continue;
+            }
+            materialize_price_row(snapshot_state, symbols, dirty_symbol_id, out.prices[dirty_symbol_id]);
+        }
+    }
+    else if (!can_skip_row_materialization) {
+        for (size_t i = 0; i < symbol_count; ++i) {
+            materialize_price_row(snapshot_state, symbols, i, out.prices[i]);
+        }
+    }
+
     for (size_t i = 0; i < symbol_count; ++i) {
         auto& price = out.prices[i];
-        if (price.symbol != symbols[i]) {
-            price.symbol = symbols[i];
-        }
-        price.price = 0.0;
-        price.has_price = false;
-        price.trade_price = 0.0;
-        price.has_trade_price = false;
-        price.mark_price = 0.0;
-        price.has_mark_price = false;
-        price.mark_price_source = kReferencePriceSourceNone;
-        price.index_price = 0.0;
-        price.has_index_price = false;
-        price.index_price_source = kReferencePriceSourceNone;
-        if (i < snapshot_state.has_last_trade_price_by_symbol.size() &&
-            snapshot_state.has_last_trade_price_by_symbol[i] != 0 &&
-            i < snapshot_state.last_trade_price_by_symbol.size()) {
-            price.trade_price = snapshot_state.last_trade_price_by_symbol[i];
-            price.has_trade_price = true;
-            price.price = price.trade_price;
-            price.has_price = true;
-        }
-        if (i < snapshot_state.has_last_mark_price_by_symbol.size() &&
-            snapshot_state.has_last_mark_price_by_symbol[i] != 0 &&
-            i < snapshot_state.last_mark_price_by_symbol.size()) {
-            price.mark_price = snapshot_state.last_mark_price_by_symbol[i];
-            price.has_mark_price = true;
-            if (i < snapshot_state.last_mark_price_source_by_symbol.size()) {
-                price.mark_price_source = snapshot_state.last_mark_price_source_by_symbol[i];
-            }
-        }
-        if (i < snapshot_state.has_last_index_price_by_symbol.size() &&
-            snapshot_state.has_last_index_price_by_symbol[i] != 0 &&
-            i < snapshot_state.last_index_price_by_symbol.size()) {
-            price.index_price = snapshot_state.last_index_price_by_symbol[i];
-            price.has_index_price = true;
-            if (i < snapshot_state.last_index_price_source_by_symbol.size()) {
-                price.index_price_source = snapshot_state.last_index_price_source_by_symbol[i];
-            }
-        }
         const bool has_mark_ts = i < snapshot_state.last_mark_price_ts_by_symbol.size() &&
             snapshot_state.last_mark_price_ts_by_symbol[i] != kUnsetSnapshotTimestamp;
         const bool has_index_ts = i < snapshot_state.last_index_price_ts_by_symbol.size() &&

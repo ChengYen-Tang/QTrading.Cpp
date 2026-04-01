@@ -38,20 +38,34 @@ double sigmoid(double x) noexcept
 }
 
 void seed_perp_reducible_quantities(
-    const State::BinanceExchangeRuntimeState& runtime_state,
+    State::BinanceExchangeRuntimeState& runtime_state,
     const State::StepKernelState& step_state,
     std::vector<double>& long_qty,
     std::vector<double>& short_qty)
 {
-    for (const auto& position : runtime_state.positions) {
+    if (runtime_state.position_symbol_id_by_slot.size() != runtime_state.positions.size()) {
+        runtime_state.position_symbol_id_by_slot.assign(
+            runtime_state.positions.size(),
+            std::numeric_limits<size_t>::max());
+    }
+    for (size_t i = 0; i < runtime_state.positions.size(); ++i) {
+        const auto& position = runtime_state.positions[i];
         if (position.instrument_type != QTrading::Dto::Trading::InstrumentType::Perp) {
             continue;
         }
-        const auto symbol_it = step_state.symbol_to_id.find(position.symbol);
-        if (symbol_it == step_state.symbol_to_id.end()) {
-            continue;
+        size_t idx = runtime_state.position_symbol_id_by_slot[i];
+        if (idx != std::numeric_limits<size_t>::max()) {
+            runtime_state.position_symbol_id_by_position_id[position.id] = idx;
         }
-        const size_t idx = symbol_it->second;
+        else {
+            const auto symbol_it = step_state.symbol_to_id.find(position.symbol);
+            if (symbol_it == step_state.symbol_to_id.end()) {
+                continue;
+            }
+            idx = symbol_it->second;
+            runtime_state.position_symbol_id_by_position_id[position.id] = idx;
+            runtime_state.position_symbol_id_by_slot[i] = idx;
+        }
         if (idx == std::numeric_limits<size_t>::max() || idx >= long_qty.size() || idx >= short_qty.size()) {
             continue;
         }
@@ -314,6 +328,53 @@ void insert_order_into_lane(
     lane.insert(insert_it, order_idx);
 }
 
+bool should_sync_trade_soa_from_payload(
+    const State::StepKernelState& step_state,
+    const QTrading::Dto::Market::Binance::MultiKlineDto& market) noexcept
+{
+    const size_t payload_symbols = market.trade_klines_by_id.size();
+    if (payload_symbols == 0) {
+        return false;
+    }
+    if (step_state.replay_has_trade_kline_by_symbol.size() != payload_symbols ||
+        step_state.replay_trade_open_by_symbol.size() != payload_symbols ||
+        step_state.replay_trade_high_by_symbol.size() != payload_symbols ||
+        step_state.replay_trade_low_by_symbol.size() != payload_symbols ||
+        step_state.replay_trade_close_by_symbol.size() != payload_symbols ||
+        step_state.replay_trade_volume_by_symbol.size() != payload_symbols ||
+        step_state.replay_trade_taker_buy_base_volume_by_symbol.size() != payload_symbols) {
+        return true;
+    }
+    return market.symbols != step_state.symbols_shared;
+}
+
+void sync_trade_soa_from_payload(
+    State::StepKernelState& step_state,
+    const QTrading::Dto::Market::Binance::MultiKlineDto& market)
+{
+    const size_t payload_symbols = market.trade_klines_by_id.size();
+    step_state.replay_has_trade_kline_by_symbol.assign(payload_symbols, 0);
+    step_state.replay_trade_open_by_symbol.assign(payload_symbols, 0.0);
+    step_state.replay_trade_high_by_symbol.assign(payload_symbols, 0.0);
+    step_state.replay_trade_low_by_symbol.assign(payload_symbols, 0.0);
+    step_state.replay_trade_close_by_symbol.assign(payload_symbols, 0.0);
+    step_state.replay_trade_volume_by_symbol.assign(payload_symbols, 0.0);
+    step_state.replay_trade_taker_buy_base_volume_by_symbol.assign(payload_symbols, 0.0);
+    for (size_t i = 0; i < payload_symbols; ++i) {
+        if (!market.trade_klines_by_id[i].has_value()) {
+            continue;
+        }
+        const auto& kline = *market.trade_klines_by_id[i];
+        step_state.replay_has_trade_kline_by_symbol[i] = 1;
+        step_state.replay_trade_open_by_symbol[i] = kline.OpenPrice;
+        step_state.replay_trade_high_by_symbol[i] = kline.HighPrice;
+        step_state.replay_trade_low_by_symbol[i] = kline.LowPrice;
+        step_state.replay_trade_close_by_symbol[i] = kline.ClosePrice;
+        step_state.replay_trade_volume_by_symbol[i] = kline.Volume;
+        step_state.replay_trade_taker_buy_base_volume_by_symbol[i] = kline.TakerBuyBaseVolume;
+    }
+}
+
 } // namespace
 
 void MatchingEngine::RunStep(
@@ -323,7 +384,14 @@ void MatchingEngine::RunStep(
     std::vector<MatchFill>& out_fills)
 {
     out_fills.clear();
-    if (!market.symbols || runtime_state.orders.empty()) {
+    if (runtime_state.orders.empty()) {
+        return;
+    }
+    if (should_sync_trade_soa_from_payload(step_state, market)) {
+        sync_trade_soa_from_payload(step_state, market);
+    }
+    const size_t symbol_count = step_state.replay_has_trade_kline_by_symbol.size();
+    if (symbol_count == 0) {
         return;
     }
 
@@ -345,22 +413,31 @@ void MatchingEngine::RunStep(
     const bool open_marketability_path =
         path_mode == Config::IntraBarPathMode::OpenMarketability ||
         path_mode == Config::IntraBarPathMode::MonteCarloPath;
-    liquidity_left.assign(market.symbols->size(), 0.0);
-    buy_liquidity_left.assign(market.symbols->size(), 0.0);
-    sell_liquidity_left.assign(market.symbols->size(), 0.0);
-    taker_buy_ratio_by_symbol.assign(market.symbols->size(), 0.0);
-    has_liquidity.assign(market.symbols->size(), 0);
-    reducible_long_qty.assign(market.symbols->size(), 0.0);
-    reducible_short_qty.assign(market.symbols->size(), 0.0);
+    liquidity_left.assign(symbol_count, 0.0);
+    buy_liquidity_left.assign(symbol_count, 0.0);
+    sell_liquidity_left.assign(symbol_count, 0.0);
+    taker_buy_ratio_by_symbol.assign(symbol_count, 0.0);
+    has_liquidity.assign(symbol_count, 0);
+    reducible_long_qty.assign(symbol_count, 0.0);
+    reducible_short_qty.assign(symbol_count, 0.0);
     seed_perp_reducible_quantities(runtime_state, step_state, reducible_long_qty, reducible_short_qty);
-    for (size_t i = 0; i < market.symbols->size(); ++i) {
-        if (!market.trade_klines_by_id[i].has_value()) {
+    for (size_t i = 0; i < symbol_count; ++i) {
+        if (i >= step_state.replay_has_trade_kline_by_symbol.size() ||
+            step_state.replay_has_trade_kline_by_symbol[i] == 0) {
             continue;
         }
-        const double raw = market.trade_klines_by_id[i]->Volume;
+        QTrading::Dto::Market::Binance::TradeKlineDto kline{};
+        kline.Timestamp = market.Timestamp;
+        kline.OpenPrice = step_state.replay_trade_open_by_symbol[i];
+        kline.HighPrice = step_state.replay_trade_high_by_symbol[i];
+        kline.LowPrice = step_state.replay_trade_low_by_symbol[i];
+        kline.ClosePrice = step_state.replay_trade_close_by_symbol[i];
+        kline.Volume = step_state.replay_trade_volume_by_symbol[i];
+        kline.TakerBuyBaseVolume = step_state.replay_trade_taker_buy_base_volume_by_symbol[i];
+        const double raw = kline.Volume;
         const double base_liquidity = raw > 0.0 ? raw : std::numeric_limits<double>::infinity();
         const double taker_buy_ratio = resolve_taker_buy_ratio(
-            *market.trade_klines_by_id[i],
+            kline,
             runtime_state.simulation_config,
             market.Timestamp,
             i);
@@ -378,13 +455,20 @@ void MatchingEngine::RunStep(
     }
 
     auto& orders = runtime_state.orders;
+    auto& order_symbol_ids_by_slot = runtime_state.order_symbol_id_by_slot;
     auto& next_orders = step_state.matching_orders_next_scratch;
     next_orders.clear();
     next_orders.reserve(orders.size());
+    auto& next_order_symbol_ids = step_state.matching_order_index_scratch;
+    next_order_symbol_ids.clear();
+    next_order_symbol_ids.reserve(orders.size());
+    if (order_symbol_ids_by_slot.size() != orders.size()) {
+        order_symbol_ids_by_slot.assign(orders.size(), std::numeric_limits<size_t>::max());
+    }
     auto& remaining_qty = step_state.matching_order_remaining_qty_scratch;
     auto& order_symbol_ids = step_state.matching_order_symbol_id_scratch;
     auto& has_order_symbol_id = step_state.matching_order_has_symbol_id_scratch;
-    const size_t lane_count = market.symbols->size() * 2;
+    const size_t lane_count = symbol_count * 2;
     auto& order_lanes = step_state.matching_order_lanes_scratch;
     if (order_lanes.size() != lane_count) {
         order_lanes.assign(lane_count, {});
@@ -397,14 +481,22 @@ void MatchingEngine::RunStep(
     has_order_symbol_id.resize(orders.size(), 0);
     for (size_t i = 0; i < orders.size(); ++i) {
         remaining_qty[i] = std::max(0.0, orders[i].quantity);
-        const auto symbol_it = step_state.symbol_to_id.find(orders[i].symbol);
-        if (symbol_it == step_state.symbol_to_id.end()) {
-            continue;
+        size_t symbol_index = order_symbol_ids_by_slot[i];
+        if (symbol_index != std::numeric_limits<size_t>::max()) {
+            runtime_state.order_symbol_id_by_order_id[orders[i].id] = symbol_index;
         }
-        const size_t symbol_index = symbol_it->second;
+        else {
+            const auto symbol_it = step_state.symbol_to_id.find(orders[i].symbol);
+            if (symbol_it == step_state.symbol_to_id.end()) {
+                continue;
+            }
+            symbol_index = symbol_it->second;
+            runtime_state.order_symbol_id_by_order_id[orders[i].id] = symbol_index;
+            order_symbol_ids_by_slot[i] = symbol_index;
+        }
         if (symbol_index == std::numeric_limits<size_t>::max() ||
-            symbol_index >= market.trade_klines_by_id.size() ||
-            !market.trade_klines_by_id[symbol_index].has_value() ||
+            symbol_index >= step_state.replay_has_trade_kline_by_symbol.size() ||
+            step_state.replay_has_trade_kline_by_symbol[symbol_index] == 0 ||
             !has_liquidity[symbol_index]) {
             continue;
         }
@@ -417,12 +509,19 @@ void MatchingEngine::RunStep(
         insert_order_into_lane(order_lanes[idx], orders, i);
     }
 
-    for (size_t symbol_index = 0; symbol_index < market.symbols->size(); ++symbol_index) {
-        if (symbol_index >= market.trade_klines_by_id.size() ||
-            !market.trade_klines_by_id[symbol_index].has_value()) {
+    for (size_t symbol_index = 0; symbol_index < symbol_count; ++symbol_index) {
+        if (symbol_index >= step_state.replay_has_trade_kline_by_symbol.size() ||
+            step_state.replay_has_trade_kline_by_symbol[symbol_index] == 0) {
             continue;
         }
-        const auto& kline = *market.trade_klines_by_id[symbol_index];
+        QTrading::Dto::Market::Binance::TradeKlineDto kline{};
+        kline.Timestamp = market.Timestamp;
+        kline.OpenPrice = step_state.replay_trade_open_by_symbol[symbol_index];
+        kline.HighPrice = step_state.replay_trade_high_by_symbol[symbol_index];
+        kline.LowPrice = step_state.replay_trade_low_by_symbol[symbol_index];
+        kline.ClosePrice = step_state.replay_trade_close_by_symbol[symbol_index];
+        kline.Volume = step_state.replay_trade_volume_by_symbol[symbol_index];
+        kline.TakerBuyBaseVolume = step_state.replay_trade_taker_buy_base_volume_by_symbol[symbol_index];
         const double taker_buy_ratio = taker_buy_ratio_by_symbol[symbol_index];
         for (size_t side_lane = 0; side_lane < 2; ++side_lane) {
             const size_t idx = symbol_index * 2 + side_lane;
@@ -519,6 +618,7 @@ void MatchingEngine::RunStep(
 
                 MatchFill fill{};
                 fill.order_id = order.id;
+                fill.symbol_id = symbol_index;
                 fill.symbol = order.symbol;
                 fill.instrument_type = order.instrument_type;
                 fill.side = order.side;
@@ -561,14 +661,19 @@ void MatchingEngine::RunStep(
 
     for (size_t i = 0; i < orders.size(); ++i) {
         if (remaining_qty[i] <= kEpsilon) {
+            runtime_state.order_symbol_id_by_order_id.erase(orders[i].id);
             continue;
         }
         auto order = std::move(orders[i]);
         order.quantity = remaining_qty[i];
         next_orders.emplace_back(std::move(order));
+        next_order_symbol_ids.push_back(i < order_symbol_ids_by_slot.size()
+                ? order_symbol_ids_by_slot[i]
+                : std::numeric_limits<size_t>::max());
     }
     const bool order_book_mutated = !out_fills.empty();
     orders.swap(next_orders);
+    order_symbol_ids_by_slot.swap(next_order_symbol_ids);
     if (order_book_mutated) {
         ++runtime_state.orders_version;
     }

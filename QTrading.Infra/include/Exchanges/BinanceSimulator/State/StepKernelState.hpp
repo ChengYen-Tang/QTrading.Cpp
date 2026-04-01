@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <memory>
@@ -11,6 +12,7 @@
 
 #include "Data/Binance/MarketData.hpp"
 #include "Data/Binance/FundingRateData.hpp"
+#include "Dto/Market/Binance/MultiKline.hpp"
 #include "Dto/Market/Binance/FundingRate.hpp"
 #include "Dto/Order.hpp"
 #include "Dto/Position.hpp"
@@ -20,6 +22,15 @@
 #include "Exchanges/BinanceSimulator/State/StepKernelHeapTypes.hpp"
 
 namespace QTrading::Infra::Exchanges::BinanceSim::State {
+
+/// Reusable replay payload buffer with touched-index tracking.
+struct ReplayPayloadBuffer {
+    std::shared_ptr<QTrading::Dto::Market::Binance::MultiKlineDto> dto;
+    std::vector<size_t> touched_trade_ids;
+    std::vector<size_t> touched_mark_ids;
+    std::vector<size_t> touched_index_ids;
+    std::vector<size_t> touched_funding_ids;
+};
 
 /// Mutable state owned by StepKernel/MarketReplayKernel.
 /// This struct is the replay hot-path state; keeping it compact/allocation-light
@@ -80,6 +91,34 @@ struct StepKernelState {
     std::vector<uint8_t> has_next_ts;
     std::priority_queue<StepKernelHeapItem, std::vector<StepKernelHeapItem>, StepKernelHeapItemGreater> next_ts_heap;
     std::priority_queue<StepKernelHeapItem, std::vector<StepKernelHeapItem>, StepKernelHeapItemGreater> next_funding_ts_heap;
+    /// SoA cache: whether current step has trade kline per symbol.
+    std::vector<uint8_t> replay_has_trade_kline_by_symbol;
+    /// SoA cache: current-step trade open price per symbol.
+    std::vector<double> replay_trade_open_by_symbol;
+    /// SoA cache: current-step trade high price per symbol.
+    std::vector<double> replay_trade_high_by_symbol;
+    /// SoA cache: current-step trade low price per symbol.
+    std::vector<double> replay_trade_low_by_symbol;
+    /// SoA cache: current-step trade close price per symbol.
+    std::vector<double> replay_trade_close_by_symbol;
+    /// SoA cache: current-step trade volume per symbol.
+    std::vector<double> replay_trade_volume_by_symbol;
+    /// SoA cache: current-step trade taker-buy base volume per symbol.
+    std::vector<double> replay_trade_taker_buy_base_volume_by_symbol;
+    /// SoA cache: whether current step has mark price per symbol.
+    std::vector<uint8_t> replay_has_mark_price_by_symbol;
+    /// SoA cache: current-step mark close price per symbol.
+    std::vector<double> replay_mark_price_by_symbol;
+    /// SoA cache: whether current step has index price per symbol.
+    std::vector<uint8_t> replay_has_index_price_by_symbol;
+    /// SoA cache: current-step index close price per symbol.
+    std::vector<double> replay_index_price_by_symbol;
+    /// SoA cache: whether current step has funding row per symbol.
+    std::vector<uint8_t> replay_has_funding_by_symbol;
+    /// SoA cache: current-step funding rate per symbol.
+    std::vector<double> replay_funding_rate_by_symbol;
+    /// SoA cache: current-step funding timestamp per symbol.
+    std::vector<uint64_t> replay_funding_time_by_symbol;
     /// Monotonic successful-step sequence used by logs and replay diagnostics.
     uint64_t step_seq{ 0 };
     /// True once all public channels have been closed.
@@ -159,6 +198,10 @@ struct StepKernelState {
     std::vector<double> liquidation_mark_price_scratch;
     /// Scratch mark-availability flags used by liquidation evaluation.
     std::vector<uint8_t> liquidation_has_mark_scratch;
+    /// Reusable `MultiKlineDto` buffers for replay hot path allocation avoidance.
+    std::vector<ReplayPayloadBuffer> replay_payload_pool;
+    /// Round-robin cursor for selecting next reusable replay payload buffer.
+    size_t replay_payload_pool_cursor{ 0 };
 };
 
 } // namespace QTrading::Infra::Exchanges::BinanceSim::State

@@ -339,8 +339,19 @@ double recompute_spot_symbol_buy_reservation(
     size_t symbol_id)
 {
     double reserved = 0.0;
-    for (const auto& order : runtime_state.orders) {
-        const auto order_symbol_id = try_resolve_order_symbol_id(step_state, order.symbol);
+    for (size_t i = 0; i < runtime_state.orders.size(); ++i) {
+        const auto& order = runtime_state.orders[i];
+        std::optional<size_t> order_symbol_id = std::nullopt;
+        if (i < runtime_state.order_symbol_id_by_slot.size() &&
+            runtime_state.order_symbol_id_by_slot[i] != std::numeric_limits<size_t>::max()) {
+            order_symbol_id = runtime_state.order_symbol_id_by_slot[i];
+        }
+        else {
+            const auto cached_it = runtime_state.order_symbol_id_by_order_id.find(order.id);
+            order_symbol_id = cached_it != runtime_state.order_symbol_id_by_order_id.end()
+                ? std::optional<size_t>(cached_it->second)
+                : try_resolve_order_symbol_id(step_state, order.symbol);
+        }
         if (!order_symbol_id.has_value() || *order_symbol_id != symbol_id) {
             continue;
         }
@@ -361,13 +372,24 @@ double recompute_perp_symbol_reservation(
 
     double reserved = 0.0;
     double effective_net = runtime_state.hedge_mode ? 0.0 : runtime_state.perp_net_position_qty_by_symbol[symbol_id];
-    for (const auto& order : runtime_state.orders) {
+    for (size_t i = 0; i < runtime_state.orders.size(); ++i) {
+        const auto& order = runtime_state.orders[i];
         if (order.instrument_type != QTrading::Dto::Trading::InstrumentType::Perp ||
             order.reduce_only ||
             order.close_position) {
             continue;
         }
-        const auto order_symbol_id = try_resolve_order_symbol_id(step_state, order.symbol);
+        std::optional<size_t> order_symbol_id = std::nullopt;
+        if (i < runtime_state.order_symbol_id_by_slot.size() &&
+            runtime_state.order_symbol_id_by_slot[i] != std::numeric_limits<size_t>::max()) {
+            order_symbol_id = runtime_state.order_symbol_id_by_slot[i];
+        }
+        else {
+            const auto cached_it = runtime_state.order_symbol_id_by_order_id.find(order.id);
+            order_symbol_id = cached_it != runtime_state.order_symbol_id_by_order_id.end()
+                ? std::optional<size_t>(cached_it->second)
+                : try_resolve_order_symbol_id(step_state, order.symbol);
+        }
         if (!order_symbol_id.has_value() || *order_symbol_id != symbol_id) {
             continue;
         }
@@ -501,6 +523,22 @@ void add_touched_symbol_id_for_order(
     }
 }
 
+std::optional<size_t> resolve_order_symbol_id_cached(
+    State::BinanceExchangeRuntimeState& runtime_state,
+    const State::StepKernelState& step_state,
+    const QTrading::dto::Order& order)
+{
+    const auto cached_it = runtime_state.order_symbol_id_by_order_id.find(order.id);
+    if (cached_it != runtime_state.order_symbol_id_by_order_id.end()) {
+        return cached_it->second;
+    }
+    const auto symbol_id = try_resolve_order_symbol_id(step_state, order.symbol);
+    if (symbol_id.has_value()) {
+        runtime_state.order_symbol_id_by_order_id[order.id] = *symbol_id;
+    }
+    return symbol_id;
+}
+
 bool is_self_trade_conflict(
     const QTrading::dto::Order& resting_order,
     const Contracts::OrderCommandRequest& incoming_request)
@@ -527,21 +565,43 @@ bool remove_order_by_id(
     int order_id)
 {
     auto& orders = runtime_state.orders;
+    auto& order_symbol_ids = runtime_state.order_symbol_id_by_slot;
     std::vector<size_t> touched_symbol_ids;
     touched_symbol_ids.reserve(1);
-    for (const auto& order : orders) {
+    if (order_symbol_ids.size() != orders.size()) {
+        order_symbol_ids.assign(orders.size(), std::numeric_limits<size_t>::max());
+    }
+    size_t write = 0;
+    bool removed = false;
+    for (size_t read = 0; read < orders.size(); ++read) {
+        auto& order = orders[read];
+        const size_t symbol_id = read < order_symbol_ids.size()
+            ? order_symbol_ids[read]
+            : std::numeric_limits<size_t>::max();
         if (order.id != order_id) {
+            if (write != read) {
+                orders[write] = std::move(order);
+                order_symbol_ids[write] = symbol_id;
+            }
+            ++write;
             continue;
         }
-        add_touched_symbol_id_for_order(step_state, order, touched_symbol_ids);
-        break;
+        removed = true;
+        if (symbol_id != std::numeric_limits<size_t>::max()) {
+            touched_symbol_ids.push_back(symbol_id);
+        }
+        else {
+            const auto resolved_symbol_id = resolve_order_symbol_id_cached(runtime_state, step_state, order);
+            if (resolved_symbol_id.has_value()) {
+                touched_symbol_ids.push_back(*resolved_symbol_id);
+            }
+        }
+        runtime_state.order_symbol_id_by_order_id.erase(order.id);
     }
-    const auto new_end = std::remove_if(orders.begin(), orders.end(), [&](const QTrading::dto::Order& order) {
-        return order.id == order_id;
-    });
-    const bool removed = new_end != orders.end();
-    orders.erase(new_end, orders.end());
+    orders.resize(write);
+    order_symbol_ids.resize(write);
     if (removed) {
+        runtime_state.order_symbol_id_by_order_id.erase(order_id);
         ++runtime_state.orders_version;
         refresh_symbol_reservations(runtime_state, step_state, touched_symbol_ids);
         return true;
@@ -556,18 +616,41 @@ size_t remove_orders_if(
     TPredicate&& predicate)
 {
     auto& orders = runtime_state.orders;
+    auto& order_symbol_ids = runtime_state.order_symbol_id_by_slot;
     std::vector<size_t> touched_symbol_ids;
     touched_symbol_ids.reserve(4);
-    const auto new_end = std::remove_if(orders.begin(), orders.end(), [&](const QTrading::dto::Order& order) {
+    if (order_symbol_ids.size() != orders.size()) {
+        order_symbol_ids.assign(orders.size(), std::numeric_limits<size_t>::max());
+    }
+    size_t write = 0;
+    size_t removed = 0;
+    for (size_t read = 0; read < orders.size(); ++read) {
+        auto& order = orders[read];
+        const size_t symbol_id = read < order_symbol_ids.size()
+            ? order_symbol_ids[read]
+            : std::numeric_limits<size_t>::max();
         if (!predicate(order)) {
-            return false;
+            if (write != read) {
+                orders[write] = std::move(order);
+                order_symbol_ids[write] = symbol_id;
+            }
+            ++write;
+            continue;
         }
-        add_touched_symbol_id_for_order(step_state, order, touched_symbol_ids);
-        return true;
-    });
-    const size_t removed =
-        static_cast<size_t>(std::distance(new_end, orders.end()));
-    orders.erase(new_end, orders.end());
+        ++removed;
+        if (symbol_id != std::numeric_limits<size_t>::max()) {
+            touched_symbol_ids.push_back(symbol_id);
+        }
+        else {
+            const auto resolved_symbol_id = resolve_order_symbol_id_cached(runtime_state, step_state, order);
+            if (resolved_symbol_id.has_value()) {
+                touched_symbol_ids.push_back(*resolved_symbol_id);
+            }
+        }
+        runtime_state.order_symbol_id_by_order_id.erase(order.id);
+    }
+    orders.resize(write);
+    order_symbol_ids.resize(write);
     if (removed > 0) {
         ++runtime_state.orders_version;
         refresh_symbol_reservations(runtime_state, step_state, touched_symbol_ids);
@@ -893,9 +976,12 @@ bool OrderEntryService::Execute(
     runtime_state.orders.emplace_back(std::move(order));
     ++runtime_state.orders_version;
     if (added_symbol_id.has_value()) {
+        runtime_state.order_symbol_id_by_order_id[runtime_state.orders.back().id] = *added_symbol_id;
+        runtime_state.order_symbol_id_by_slot.push_back(*added_symbol_id);
         refresh_symbol_reservations(runtime_state, step_state, std::vector<size_t>{ *added_symbol_id });
     }
     else {
+        runtime_state.order_symbol_id_by_slot.push_back(std::numeric_limits<size_t>::max());
         sync_open_order_margins(runtime_state, step_state);
     }
     ++step_state.account_state_version;

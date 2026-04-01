@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
+#include <optional>
 #include <utility>
 
 #include "Dto/Market/Binance/MultiKline.hpp"
@@ -34,16 +36,49 @@ double compute_maintenance_margin(double notional) noexcept
     return (notional * kTier2Rate) - bracket_deduction;
 }
 
+std::optional<size_t> resolve_position_symbol_id(
+    State::BinanceExchangeRuntimeState& runtime_state,
+    const State::StepKernelState& step_state,
+    const QTrading::dto::Position& position) noexcept
+{
+    const auto cached_it = runtime_state.position_symbol_id_by_position_id.find(position.id);
+    if (cached_it != runtime_state.position_symbol_id_by_position_id.end()) {
+        return cached_it->second;
+    }
+    const auto symbol_it = step_state.symbol_to_id.find(position.symbol);
+    if (symbol_it == step_state.symbol_to_id.end()) {
+        return std::nullopt;
+    }
+    runtime_state.position_symbol_id_by_position_id[position.id] = symbol_it->second;
+    return symbol_it->second;
+}
+
 bool cancel_all_perp_orders(State::BinanceExchangeRuntimeState& runtime_state) noexcept
 {
-    const size_t before = runtime_state.orders.size();
-    runtime_state.orders.erase(
-        std::remove_if(runtime_state.orders.begin(), runtime_state.orders.end(),
-            [](const QTrading::dto::Order& order) {
-                return order.instrument_type == QTrading::Dto::Trading::InstrumentType::Perp;
-            }),
-        runtime_state.orders.end());
-    const bool removed = runtime_state.orders.size() != before;
+    auto& orders = runtime_state.orders;
+    auto& order_symbol_ids = runtime_state.order_symbol_id_by_slot;
+    if (order_symbol_ids.size() != orders.size()) {
+        order_symbol_ids.assign(orders.size(), std::numeric_limits<size_t>::max());
+    }
+    size_t write = 0;
+    size_t removed_count = 0;
+    for (size_t read = 0; read < orders.size(); ++read) {
+        auto& order = orders[read];
+        const size_t symbol_id = order_symbol_ids[read];
+        if (order.instrument_type == QTrading::Dto::Trading::InstrumentType::Perp) {
+            runtime_state.order_symbol_id_by_order_id.erase(order.id);
+            ++removed_count;
+            continue;
+        }
+        if (write != read) {
+            orders[write] = std::move(order);
+            order_symbol_ids[write] = symbol_id;
+        }
+        ++write;
+    }
+    orders.resize(write);
+    order_symbol_ids.resize(write);
+    const bool removed = removed_count > 0;
     if (removed) {
         ++runtime_state.orders_version;
     }
@@ -89,11 +124,11 @@ bool apply_full_liquidation_close_on_position(
         position.quantity <= kEpsilon) {
         return false;
     }
-    const auto symbol_it = step_state.symbol_to_id.find(position.symbol);
-    if (symbol_it == step_state.symbol_to_id.end()) {
+    const auto symbol_id_opt = resolve_position_symbol_id(runtime_state, step_state, position);
+    if (!symbol_id_opt.has_value()) {
         return false;
     }
-    const size_t symbol_id = symbol_it->second;
+    const size_t symbol_id = *symbol_id_opt;
     if (symbol_id >= mark_price_scratch.size()) {
         return false;
     }
@@ -116,6 +151,12 @@ bool apply_full_liquidation_close_on_position(
 
     runtime_state.positions.erase(
         runtime_state.positions.begin() + static_cast<std::vector<QTrading::dto::Position>::difference_type>(position_index));
+    if (static_cast<size_t>(position_index) < runtime_state.position_symbol_id_by_slot.size()) {
+        runtime_state.position_symbol_id_by_slot.erase(
+            runtime_state.position_symbol_id_by_slot.begin() +
+            static_cast<std::vector<size_t>::difference_type>(position_index));
+    }
+    runtime_state.position_symbol_id_by_position_id.erase(position.id);
     ++runtime_state.positions_version;
     return true;
 }
@@ -137,11 +178,11 @@ bool apply_warning_zone_partial_reduction_on_position(
         position.quantity <= kEpsilon) {
         return false;
     }
-    const auto symbol_it = step_state.symbol_to_id.find(position.symbol);
-    if (symbol_it == step_state.symbol_to_id.end()) {
+    const auto symbol_id_opt = resolve_position_symbol_id(runtime_state, step_state, position);
+    if (!symbol_id_opt.has_value()) {
         return false;
     }
-    const size_t symbol_id = symbol_it->second;
+    const size_t symbol_id = *symbol_id_opt;
     if (symbol_id >= mark_price_scratch.size()) {
         return false;
     }
@@ -171,6 +212,12 @@ bool apply_warning_zone_partial_reduction_on_position(
     if (position.quantity <= kEpsilon) {
         runtime_state.positions.erase(
             runtime_state.positions.begin() + static_cast<std::vector<QTrading::dto::Position>::difference_type>(position_index));
+        if (static_cast<size_t>(position_index) < runtime_state.position_symbol_id_by_slot.size()) {
+            runtime_state.position_symbol_id_by_slot.erase(
+                runtime_state.position_symbol_id_by_slot.begin() +
+                static_cast<std::vector<size_t>::difference_type>(position_index));
+        }
+        runtime_state.position_symbol_id_by_position_id.erase(position.id);
         ++runtime_state.positions_version;
         return true;
     }

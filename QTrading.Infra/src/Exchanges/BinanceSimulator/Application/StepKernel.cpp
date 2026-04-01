@@ -153,49 +153,124 @@ void update_snapshot_state(
     const State::StepKernelState& step_state,
     const Output::StepObservableContext& observable_ctx)
 {
+    auto mark_price_row_dirty = [&](size_t symbol_id) {
+        if (symbol_id >= snapshot_state.price_row_dirty_by_symbol.size() ||
+            snapshot_state.price_row_dirty_by_symbol[symbol_id] != 0) {
+            return;
+        }
+        snapshot_state.price_row_dirty_by_symbol[symbol_id] = 1;
+        snapshot_state.dirty_price_symbol_ids.push_back(symbol_id);
+    };
+    auto ensure_price_row_cache_shape = [&]() {
+        const size_t symbol_count = std::max(
+            snapshot_state.last_trade_price_by_symbol.size(),
+            std::max(
+                snapshot_state.last_mark_price_by_symbol.size(),
+                snapshot_state.last_index_price_by_symbol.size()));
+        if (snapshot_state.price_rows_by_symbol.size() == symbol_count &&
+            snapshot_state.price_row_dirty_by_symbol.size() == symbol_count) {
+            return;
+        }
+        snapshot_state.price_rows_by_symbol.resize(symbol_count);
+        snapshot_state.price_row_dirty_by_symbol.assign(symbol_count, 1);
+        snapshot_state.dirty_price_symbol_ids.clear();
+        snapshot_state.dirty_price_symbol_ids.reserve(symbol_count);
+        for (size_t i = 0; i < symbol_count; ++i) {
+            snapshot_state.dirty_price_symbol_ids.push_back(i);
+        }
+    };
+
+    for (const auto dirty_id : snapshot_state.dirty_price_symbol_ids) {
+        if (dirty_id < snapshot_state.price_row_dirty_by_symbol.size()) {
+            snapshot_state.price_row_dirty_by_symbol[dirty_id] = 0;
+        }
+    }
+    snapshot_state.dirty_price_symbol_ids.clear();
+    ensure_price_row_cache_shape();
+
     snapshot_state.ts_exchange = observable_ctx.ts_exchange;
     snapshot_state.step_seq = observable_ctx.step_seq;
     snapshot_state.progress_pct = compute_progress_pct(step_state);
-    snapshot_state.last_market_payload = observable_ctx.market_payload;
     if (!observable_ctx.market_payload) {
         return;
     }
-    const auto& payload = *observable_ctx.market_payload;
     const size_t count = std::min(
-        payload.trade_klines_by_id.size(),
+        step_state.replay_has_trade_kline_by_symbol.size(),
         snapshot_state.last_trade_price_by_symbol.size());
     for (size_t i = 0; i < count; ++i) {
-        if (!payload.trade_klines_by_id[i].has_value()) {
+        if (step_state.replay_has_trade_kline_by_symbol[i] == 0 ||
+            i >= step_state.replay_trade_close_by_symbol.size()) {
             continue;
         }
-        snapshot_state.last_trade_price_by_symbol[i] = payload.trade_klines_by_id[i]->ClosePrice;
+        const double trade_price = step_state.replay_trade_close_by_symbol[i];
+        const bool changed =
+            snapshot_state.has_last_trade_price_by_symbol[i] == 0 ||
+            snapshot_state.last_trade_price_by_symbol[i] != trade_price;
+        snapshot_state.last_trade_price_by_symbol[i] = trade_price;
         snapshot_state.has_last_trade_price_by_symbol[i] = 1;
+        auto& row = snapshot_state.price_rows_by_symbol[i];
+        row.trade_price = trade_price;
+        row.has_trade_price = true;
+        row.price = trade_price;
+        row.has_price = true;
+        if (changed) {
+            mark_price_row_dirty(i);
+        }
     }
     const size_t mark_count = std::min(
-        payload.mark_klines_by_id.size(),
+        step_state.replay_has_mark_price_by_symbol.size(),
         snapshot_state.last_mark_price_by_symbol.size());
     for (size_t i = 0; i < mark_count; ++i) {
-        if (!payload.mark_klines_by_id[i].has_value()) {
+        if (step_state.replay_has_mark_price_by_symbol[i] == 0 ||
+            i >= step_state.replay_mark_price_by_symbol.size()) {
             continue;
         }
-        snapshot_state.last_mark_price_by_symbol[i] = payload.mark_klines_by_id[i]->ClosePrice;
+        const double mark_price = step_state.replay_mark_price_by_symbol[i];
+        const int32_t mark_source = static_cast<int32_t>(Contracts::ReferencePriceSource::Raw);
+        const bool changed =
+            snapshot_state.has_last_mark_price_by_symbol[i] == 0 ||
+            snapshot_state.last_mark_price_by_symbol[i] != mark_price ||
+            snapshot_state.last_mark_price_source_by_symbol[i] != mark_source;
+        snapshot_state.last_mark_price_by_symbol[i] = mark_price;
         snapshot_state.has_last_mark_price_by_symbol[i] = 1;
-        snapshot_state.last_mark_price_ts_by_symbol[i] = payload.Timestamp;
-        snapshot_state.last_mark_price_source_by_symbol[i] =
-            static_cast<int32_t>(Contracts::ReferencePriceSource::Raw);
+        snapshot_state.last_mark_price_ts_by_symbol[i] = observable_ctx.ts_exchange;
+        snapshot_state.last_mark_price_source_by_symbol[i] = mark_source;
+        auto& row = snapshot_state.price_rows_by_symbol[i];
+        row.mark_price = mark_price;
+        row.has_mark_price = true;
+        row.mark_price_source = mark_source;
+        if (changed) {
+            mark_price_row_dirty(i);
+        }
     }
     const size_t index_count = std::min(
-        payload.index_klines_by_id.size(),
+        step_state.replay_has_index_price_by_symbol.size(),
         snapshot_state.last_index_price_by_symbol.size());
     for (size_t i = 0; i < index_count; ++i) {
-        if (!payload.index_klines_by_id[i].has_value()) {
+        if (step_state.replay_has_index_price_by_symbol[i] == 0 ||
+            i >= step_state.replay_index_price_by_symbol.size()) {
             continue;
         }
-        snapshot_state.last_index_price_by_symbol[i] = payload.index_klines_by_id[i]->ClosePrice;
+        const double index_price = step_state.replay_index_price_by_symbol[i];
+        const int32_t index_source = static_cast<int32_t>(Contracts::ReferencePriceSource::Raw);
+        const bool changed =
+            snapshot_state.has_last_index_price_by_symbol[i] == 0 ||
+            snapshot_state.last_index_price_by_symbol[i] != index_price ||
+            snapshot_state.last_index_price_source_by_symbol[i] != index_source;
+        snapshot_state.last_index_price_by_symbol[i] = index_price;
         snapshot_state.has_last_index_price_by_symbol[i] = 1;
-        snapshot_state.last_index_price_ts_by_symbol[i] = payload.Timestamp;
-        snapshot_state.last_index_price_source_by_symbol[i] =
-            static_cast<int32_t>(Contracts::ReferencePriceSource::Raw);
+        snapshot_state.last_index_price_ts_by_symbol[i] = observable_ctx.ts_exchange;
+        snapshot_state.last_index_price_source_by_symbol[i] = index_source;
+        auto& row = snapshot_state.price_rows_by_symbol[i];
+        row.index_price = index_price;
+        row.has_index_price = true;
+        row.index_price_source = index_source;
+        if (changed) {
+            mark_price_row_dirty(i);
+        }
+    }
+    if (!snapshot_state.dirty_price_symbol_ids.empty()) {
+        ++snapshot_state.price_rows_version;
     }
 }
 
@@ -1318,6 +1393,9 @@ bool StepKernel::run_step() const
                     }
                     Domain::MatchFill synthetic{};
                     synthetic.order_id = -999999;
+                    synthetic.symbol_id = symbol_it != step_state.symbol_to_id.end()
+                        ? symbol_it->second
+                        : std::numeric_limits<size_t>::max();
                     synthetic.symbol = delta.symbol;
                     synthetic.instrument_type = delta.instrument_type;
                     synthetic.side = delta.is_long
