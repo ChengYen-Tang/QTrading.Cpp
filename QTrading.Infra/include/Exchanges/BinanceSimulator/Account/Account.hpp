@@ -22,8 +22,6 @@ public:
     };
 
     Account() = default;
-    /// Legacy compatibility constructor mapping init balance into perp wallet.
-    Account(double init_balance, int);
     /// Initializes spot/perp balance ledgers from bootstrap config.
     explicit Account(const AccountInitConfig& init);
 
@@ -66,7 +64,6 @@ public:
     /// Moves cash from perp to spot if available balance is sufficient.
     bool transfer_perp_to_spot(double amount);
 private:
-    static AccountInitConfig build_init_from_balance_(double init_balance);
     static double validate_non_negative_(double value, const char* field);
     static void validate_non_negative_int_(int value, const char* field);
     static QTrading::Dto::Account::BalanceSnapshot make_balance_(double wallet);
@@ -79,5 +76,3 @@ private:
 };
 
 } // namespace QTrading::Infra::Exchanges::BinanceSim
-
-using Account = QTrading::Infra::Exchanges::BinanceSim::Account;

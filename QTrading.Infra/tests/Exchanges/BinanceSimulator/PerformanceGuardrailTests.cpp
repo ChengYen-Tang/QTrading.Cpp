@@ -19,7 +19,6 @@
 #include "Dto/Market/Binance/Kline.hpp"
 #include "Dto/Trading/Side.hpp"
 #include "Exchanges/BinanceSimulator/Account/Account.hpp"
-#include "Exchanges/BinanceSimulator/Support/BinanceExchangeSkeletonSupport.hpp"
 #include "Queue/ChannelFactory.hpp"
 #include "Exchanges/BinanceSimulator/State/BinanceExchangeRuntimeState.hpp"
 #include "Exchanges/BinanceSimulator/State/SnapshotState.hpp"
@@ -40,6 +39,16 @@ namespace ReplayCompare = QTrading::Infra::Exchanges::BinanceSim::Diagnostics::C
 namespace fs = std::filesystem;
 
 using BinanceExchangeImpl = QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+
+Account::AccountInitConfig MakeAccountInitConfig(double init_balance, int vip_level = 0)
+{
+    Account::AccountInitConfig cfg{};
+    cfg.init_balance = init_balance;
+    cfg.spot_initial_cash = init_balance;
+    cfg.perp_initial_wallet = init_balance;
+    cfg.vip_level = vip_level;
+    return cfg;
+}
 
 class BinanceExchangeCompat {
 public:
@@ -92,7 +101,7 @@ public:
         std::shared_ptr<QTrading::Log::Logger> logger,
         double init_balance)
         : impl_(std::vector<SymbolDataset>(datasets), std::move(logger),
-              Support::BuildInitConfig(init_balance, 0)),
+              MakeAccountInitConfig(init_balance)),
           spot(impl_.spot),
           perp(impl_.perp),
           account(impl_.account),

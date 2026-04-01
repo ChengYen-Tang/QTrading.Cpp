@@ -11,7 +11,6 @@
 #undef private
 #include "Exchanges/BinanceSimulator/Contracts/OrderRejectInfo.hpp"
 #include "Exchanges/BinanceSimulator/State/BinanceExchangeRuntimeState.hpp"
-#include "Exchanges/BinanceSimulator/Support/BinanceExchangeSkeletonSupport.hpp"
 #include "ReplaySemanticsInputPinning.hpp"
 
 using namespace QTrading::Dto::Market::Binance;
@@ -22,9 +21,31 @@ using QTrading::Infra::Exchanges::BinanceSim::Api::AccountApi;
 using QTrading::Infra::Exchanges::BinanceSim::Api::PerpApi;
 using QTrading::Infra::Exchanges::BinanceSim::Api::SpotApi;
 namespace Contracts = QTrading::Infra::Exchanges::BinanceSim::Contracts;
-namespace Support = QTrading::Infra::Exchanges::BinanceSim::Support;
-
 using BinanceExchangeImpl = QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+
+namespace {
+
+Account::AccountInitConfig MakeAccountInitConfig(double init_balance, int vip_level = 0)
+{
+    Account::AccountInitConfig cfg{};
+    cfg.init_balance = init_balance;
+    cfg.spot_initial_cash = init_balance;
+    cfg.perp_initial_wallet = init_balance;
+    cfg.vip_level = vip_level;
+    return cfg;
+}
+
+Account::AccountInitConfig MakeLegacyCtorInitConfig(double init_balance, int vip_level = 0)
+{
+    Account::AccountInitConfig cfg{};
+    cfg.init_balance = init_balance;
+    cfg.spot_initial_cash = 0.0;
+    cfg.perp_initial_wallet = init_balance;
+    cfg.vip_level = vip_level;
+    return cfg;
+}
+
+} // namespace
 
 class BinanceExchange {
 public:
@@ -46,13 +67,13 @@ public:
 
     BinanceExchange(std::initializer_list<SymbolDataset> datasets,
         std::shared_ptr<QTrading::Log::Logger> logger)
-        : BinanceExchange(std::vector<SymbolDataset>(datasets), std::move(logger), Support::BuildInitConfig(1'000'000.0, 0))
+        : BinanceExchange(std::vector<SymbolDataset>(datasets), std::move(logger), MakeAccountInitConfig(1'000'000.0))
     {
     }
 
     BinanceExchange(std::initializer_list<SymbolDataset> datasets,
         std::shared_ptr<QTrading::Log::Logger> logger, double init_balance)
-        : BinanceExchange(std::vector<SymbolDataset>(datasets), std::move(logger), Support::BuildInitConfig(init_balance, 0))
+        : BinanceExchange(std::vector<SymbolDataset>(datasets), std::move(logger), MakeAccountInitConfig(init_balance))
     {
     }
 
@@ -976,7 +997,7 @@ TEST_F(BinanceExchangeFixture, NewCorePrimaryBridgeFallsBackWhenV2Unavailable)
         {0,100,100,100,100,1000, 30000,100,1,0,0}
         });
 
-    auto legacy_account = std::make_shared<Account>(1000.0, 0);
+    auto legacy_account = std::make_shared<Account>(MakeLegacyCtorInitConfig(1000.0));
     BinanceExchange ex(
         { {"BTCUSDT",(tmpDir / "btc.csv").string()} },
         logger,
@@ -1233,7 +1254,7 @@ TEST_F(BinanceExchangeFixture, FacadeContractFallbackKeepsLegacyBehaviorWhenV2Un
             double,
             BinanceExchange::StatusSnapshot,
             std::optional<BinanceExchange::AccountFacadeBridgeDiagnostic>> {
-        auto account = std::make_shared<Account>(1000.0, 0);
+        auto account = std::make_shared<Account>(MakeLegacyCtorInitConfig(1000.0));
         BinanceExchange ex(
             { BinanceExchange::SymbolDataset{
                 "BTCUSDT",

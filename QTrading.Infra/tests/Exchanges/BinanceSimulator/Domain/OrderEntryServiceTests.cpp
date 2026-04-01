@@ -27,6 +27,16 @@ using QTrading::Infra::Exchanges::BinanceSim::State::StepKernelState;
 
 namespace {
 
+Account::AccountInitConfig MakeLegacyCtorInitConfig(double init_balance, int vip_level = 0)
+{
+    Account::AccountInitConfig cfg{};
+    cfg.init_balance = init_balance;
+    cfg.spot_initial_cash = 0.0;
+    cfg.perp_initial_wallet = init_balance;
+    cfg.vip_level = vip_level;
+    return cfg;
+}
+
 StepKernelState make_step_state_with_perp_symbol()
 {
     StepKernelState state{};
@@ -134,7 +144,7 @@ TEST(OrderEntryServiceTest, InstrumentFiltersRejectInvalidPriceTickAndRange)
     spec.min_price = 100.0;
     spec.max_price = 200.0;
     spec.price_tick_size = 0.1;
-    Account account(10000.0, 0);
+    Account account(MakeLegacyCtorInitConfig(10000.0));
     std::optional<OrderRejectInfo> reject{};
 
     EXPECT_FALSE(OrderEntryService::Execute(
@@ -172,7 +182,7 @@ TEST(OrderEntryServiceTest, InstrumentFiltersRejectInvalidQuantityStepAndBounds)
     spec.min_qty = 0.1;
     spec.max_qty = 5.0;
     spec.qty_step_size = 0.1;
-    Account account(10000.0, 0);
+    Account account(MakeLegacyCtorInitConfig(10000.0));
     std::optional<OrderRejectInfo> reject{};
 
     EXPECT_FALSE(OrderEntryService::Execute(
@@ -208,7 +218,7 @@ TEST(OrderEntryServiceTest, InstrumentFiltersRejectOrderByMinNotional)
     StepKernelState step_state = make_step_state_with_perp_symbol();
     auto& spec = step_state.symbol_spec_by_id[0];
     spec.min_notional = 50.0;
-    Account account(10000.0, 0);
+    Account account(MakeLegacyCtorInitConfig(10000.0));
     std::optional<OrderRejectInfo> reject{};
 
     EXPECT_FALSE(OrderEntryService::Execute(
@@ -235,7 +245,7 @@ TEST(OrderEntryServiceTest, InstrumentFiltersPerpMarketNotionalUsesMarkPrice)
     StepKernelState step_state = make_step_state_with_perp_symbol();
     auto& spec = step_state.symbol_spec_by_id[0];
     spec.min_notional = 150.0;
-    Account account(10000.0, 0);
+    Account account(MakeLegacyCtorInitConfig(10000.0));
     std::optional<OrderRejectInfo> reject{};
 
     const auto trade_csv = write_single_kline_csv("order_entry_trade", 100.0);
@@ -262,7 +272,7 @@ TEST(OrderEntryServiceTest, ImmediatelyExecutableLimitIsTakerFee)
 {
     BinanceExchangeRuntimeState runtime_state{};
     StepKernelState step_state = make_step_state_with_perp_symbol();
-    Account account(10000.0, 0);
+    Account account(MakeLegacyCtorInitConfig(10000.0));
     std::optional<OrderRejectInfo> reject{};
 
     ASSERT_TRUE(OrderEntryService::Execute(
@@ -293,7 +303,7 @@ TEST(OrderEntryServiceTest, LimitOrderFillsAtLimitPrice)
 {
     BinanceExchangeRuntimeState runtime_state{};
     StepKernelState step_state = make_step_state_with_perp_symbol();
-    Account account(10000.0, 0);
+    Account account(MakeLegacyCtorInitConfig(10000.0));
     std::optional<OrderRejectInfo> reject{};
 
     ASSERT_TRUE(OrderEntryService::Execute(
@@ -324,7 +334,7 @@ TEST(OrderEntryServiceTest, TickPriceTimePriority_BuyHigherLimitFillsFirst)
 {
     BinanceExchangeRuntimeState runtime_state{};
     StepKernelState step_state = make_step_state_with_perp_symbol();
-    Account account(100000.0, 0);
+    Account account(MakeLegacyCtorInitConfig(100000.0));
     std::optional<OrderRejectInfo> reject{};
 
     ASSERT_TRUE(OrderEntryService::Execute(runtime_state, account, step_state, make_perp_limit_request(1.0, 1100.0), reject));
@@ -353,7 +363,7 @@ TEST(OrderEntryServiceTest, TickPriceTimePriority_SamePriceLowerIdFillsFirst)
 {
     BinanceExchangeRuntimeState runtime_state{};
     StepKernelState step_state = make_step_state_with_perp_symbol();
-    Account account(100000.0, 0);
+    Account account(MakeLegacyCtorInitConfig(100000.0));
     std::optional<OrderRejectInfo> reject{};
 
     ASSERT_TRUE(OrderEntryService::Execute(runtime_state, account, step_state, make_perp_limit_request(1.0, 1200.0), reject));
@@ -383,7 +393,7 @@ TEST(OrderEntryServiceTest, OhlcTrigger_BuyLimitTriggersOnLow)
 {
     BinanceExchangeRuntimeState runtime_state{};
     StepKernelState step_state = make_step_state_with_perp_symbol();
-    Account account(50000.0, 0);
+    Account account(MakeLegacyCtorInitConfig(50000.0));
     std::optional<OrderRejectInfo> reject{};
 
     ASSERT_TRUE(OrderEntryService::Execute(
@@ -413,7 +423,7 @@ TEST(OrderEntryServiceTest, OhlcTrigger_SellLimitTriggersOnHigh)
 {
     BinanceExchangeRuntimeState runtime_state{};
     StepKernelState step_state = make_step_state_with_perp_symbol();
-    Account account(50000.0, 0);
+    Account account(MakeLegacyCtorInitConfig(50000.0));
     std::optional<OrderRejectInfo> reject{};
 
     auto request = make_perp_limit_request(1.0, 115.0);
@@ -445,7 +455,7 @@ TEST(OrderEntryServiceTest, IntraBarExpectedPath_SplitsOppositePassiveLimitVolum
     runtime_state.simulation_config.intra_bar_path_mode =
         QTrading::Infra::Exchanges::BinanceSim::Config::IntraBarPathMode::OpenMarketability;
     StepKernelState step_state = make_step_state_with_perp_symbol();
-    Account account(100000.0, 0);
+    Account account(MakeLegacyCtorInitConfig(100000.0));
     std::optional<OrderRejectInfo> reject{};
 
     auto long_req = make_perp_limit_request(10.0, 95.0);
@@ -491,7 +501,7 @@ TEST(OrderEntryServiceTest, MarketOrderKeepsArrivalPriorityAgainstPricedOrders)
 {
     BinanceExchangeRuntimeState runtime_state{};
     StepKernelState step_state = make_step_state_with_perp_symbol();
-    Account account(100000.0, 0);
+    Account account(MakeLegacyCtorInitConfig(100000.0));
     std::optional<OrderRejectInfo> reject{};
 
     auto market_request = make_perp_market_request(1.0);
@@ -528,7 +538,7 @@ TEST(OrderEntryServiceTest, IntraBarPathModeUsesOpenMarketabilityForTakerClassif
     runtime_state.simulation_config.intra_bar_path_mode =
         QTrading::Infra::Exchanges::BinanceSim::Config::IntraBarPathMode::OpenMarketability;
     StepKernelState step_state = make_step_state_with_perp_symbol();
-    Account account(100000.0, 0);
+    Account account(MakeLegacyCtorInitConfig(100000.0));
     std::optional<OrderRejectInfo> reject{};
 
     ASSERT_TRUE(OrderEntryService::Execute(
@@ -562,7 +572,7 @@ TEST(OrderEntryServiceTest, IntraBarMonteCarloPathWithFixedSeedIsDeterministic)
         runtime_state.simulation_config.intra_bar_random_seed = seed;
         runtime_state.simulation_config.intra_bar_monte_carlo_samples = 257u;
         StepKernelState step_state = make_step_state_with_perp_symbol();
-        Account account(100000.0, 0);
+        Account account(MakeLegacyCtorInitConfig(100000.0));
         std::optional<OrderRejectInfo> reject{};
 
         auto long_req = make_perp_limit_request(10.0, 95.0);
@@ -614,7 +624,7 @@ TEST(OrderEntryServiceTest, IntraBarMonteCarloPathUsesOpenMarketabilityForTakerC
     runtime_state.simulation_config.intra_bar_random_seed = 42ull;
     runtime_state.simulation_config.intra_bar_monte_carlo_samples = 17u;
     StepKernelState step_state = make_step_state_with_perp_symbol();
-    Account account(100000.0, 0);
+    Account account(MakeLegacyCtorInitConfig(100000.0));
     std::optional<OrderRejectInfo> reject{};
 
     ASSERT_TRUE(OrderEntryService::Execute(
@@ -643,7 +653,7 @@ TEST(OrderEntryServiceTest, TickVolumeSplit_UsesTakerBuyBaseVolumePools)
     runtime_state.simulation_config.kline_volume_split_mode =
         QTrading::Infra::Exchanges::BinanceSim::Config::KlineVolumeSplitMode::OppositePassiveSplit;
     StepKernelState step_state = make_step_state_with_perp_symbol();
-    Account account(100000.0, 0);
+    Account account(MakeLegacyCtorInitConfig(100000.0));
     std::optional<OrderRejectInfo> reject{};
 
     auto long_req = make_perp_limit_request(10.0, 95.0);
@@ -692,7 +702,7 @@ TEST(OrderEntryServiceTest, TickVolumeSplit_Heuristic_CloseNearHighBiasesSellOrd
     runtime_state.simulation_config.kline_volume_split_mode =
         QTrading::Infra::Exchanges::BinanceSim::Config::KlineVolumeSplitMode::OppositePassiveSplit;
     StepKernelState step_state = make_step_state_with_perp_symbol();
-    Account account(100000.0, 0);
+    Account account(MakeLegacyCtorInitConfig(100000.0));
     std::optional<OrderRejectInfo> reject{};
 
     auto long_req = make_perp_limit_request(10.0, 95.0);
@@ -741,7 +751,7 @@ TEST(OrderEntryServiceTest, TickVolumeSplit_Heuristic_CloseNearLowBiasesBuyOrder
     runtime_state.simulation_config.kline_volume_split_mode =
         QTrading::Infra::Exchanges::BinanceSim::Config::KlineVolumeSplitMode::OppositePassiveSplit;
     StepKernelState step_state = make_step_state_with_perp_symbol();
-    Account account(100000.0, 0);
+    Account account(MakeLegacyCtorInitConfig(100000.0));
     std::optional<OrderRejectInfo> reject{};
 
     auto long_req = make_perp_limit_request(10.0, 95.0);
@@ -791,7 +801,7 @@ TEST(OrderEntryServiceTest, OpenOrderInitialMargin_MarketOrderUsesLastMarkWithBu
         QTrading::Infra::Exchanges::BinanceSim::Contracts::StatusPriceSnapshot{
             "BTCUSDT", 0.0, false, 0.0, false, 100.0, true });
     StepKernelState step_state = make_step_state_with_perp_symbol();
-    Account account(100000.0, 0);
+    Account account(MakeLegacyCtorInitConfig(100000.0));
     std::optional<OrderRejectInfo> reject{};
 
     ASSERT_TRUE(OrderEntryService::Execute(
@@ -810,7 +820,7 @@ TEST(OrderEntryServiceTest, OpenOrderInitialMargin_OneWayClosingDirectionDoesNot
     runtime_state.symbol_leverage["BTCUSDT"] = 10.0;
     runtime_state.positions.push_back(make_perp_position("BTCUSDT", true, 2.0, 100.0));
     StepKernelState step_state = make_step_state_with_perp_symbol();
-    Account account(100000.0, 0);
+    Account account(MakeLegacyCtorInitConfig(100000.0));
     std::optional<OrderRejectInfo> reject{};
 
     auto request = make_perp_limit_request(1.0, 100.0);
@@ -826,7 +836,7 @@ TEST(OrderEntryServiceTest, OpenOrderInitialMargin_OneWayFlipReservesOnlyForOpen
     runtime_state.symbol_leverage["BTCUSDT"] = 10.0;
     runtime_state.positions.push_back(make_perp_position("BTCUSDT", true, 2.0, 100.0));
     StepKernelState step_state = make_step_state_with_perp_symbol();
-    Account account(100000.0, 0);
+    Account account(MakeLegacyCtorInitConfig(100000.0));
     std::optional<OrderRejectInfo> reject{};
 
     auto request = make_perp_limit_request(5.0, 100.0);
@@ -842,7 +852,7 @@ TEST(OrderEntryServiceTest, OpenOrderInitialMargin_OneWayAggregatesMultipleOppos
     runtime_state.symbol_leverage["BTCUSDT"] = 10.0;
     runtime_state.positions.push_back(make_perp_position("BTCUSDT", true, 2.0, 100.0));
     StepKernelState step_state = make_step_state_with_perp_symbol();
-    Account account(100000.0, 0);
+    Account account(MakeLegacyCtorInitConfig(100000.0));
     std::optional<OrderRejectInfo> reject{};
 
     auto first = make_perp_limit_request(2.0, 100.0);
@@ -864,7 +874,7 @@ TEST(OrderEntryServiceTest, LimitFillProbabilityModelUsesPenetrationAndSizeRatio
     runtime_state.simulation_config.limit_fill_probability_penetration_weight = 2.0;
     runtime_state.simulation_config.limit_fill_probability_size_weight = 2.0;
     StepKernelState step_state = make_step_state_with_perp_symbol();
-    Account account(100000.0, 0);
+    Account account(MakeLegacyCtorInitConfig(100000.0));
     std::optional<OrderRejectInfo> reject{};
 
     ASSERT_TRUE(OrderEntryService::Execute(runtime_state, account, step_state, make_perp_limit_request(10.0, 99.0), reject));
@@ -917,7 +927,7 @@ TEST(OrderEntryServiceTest, MarketOrderFill_UsesExecutionSlippageBoundedByOHLC)
     BinanceExchangeRuntimeState runtime_state{};
     runtime_state.simulation_config.market_execution_slippage = 0.10;
     StepKernelState step_state = make_step_state_with_perp_symbol();
-    Account account(10000.0, 0);
+    Account account(MakeLegacyCtorInitConfig(10000.0));
     std::optional<OrderRejectInfo> reject{};
 
     ASSERT_TRUE(OrderEntryService::Execute(runtime_state, account, step_state, make_perp_market_request(1.0), reject));
@@ -933,7 +943,7 @@ TEST(OrderEntryServiceTest, LimitOrderFill_UsesExecutionSlippageButRespectsLimit
     BinanceExchangeRuntimeState runtime_state{};
     runtime_state.simulation_config.limit_execution_slippage = 0.10;
     StepKernelState step_state = make_step_state_with_perp_symbol();
-    Account account(50000.0, 0);
+    Account account(MakeLegacyCtorInitConfig(50000.0));
     std::optional<OrderRejectInfo> reject{};
 
     ASSERT_TRUE(OrderEntryService::Execute(runtime_state, account, step_state, make_perp_limit_request(1.0, 100.0), reject));
@@ -949,7 +959,7 @@ TEST(OrderEntryServiceTest, LimitOrderFill_ExecutionSlippageCanWorsenPriceWithin
     BinanceExchangeRuntimeState runtime_state{};
     runtime_state.simulation_config.limit_execution_slippage = 0.10;
     StepKernelState step_state = make_step_state_with_perp_symbol();
-    Account account(50000.0, 0);
+    Account account(MakeLegacyCtorInitConfig(50000.0));
     std::optional<OrderRejectInfo> reject{};
 
     ASSERT_TRUE(OrderEntryService::Execute(runtime_state, account, step_state, make_perp_limit_request(1.0, 110.0), reject));
@@ -968,7 +978,7 @@ TEST(OrderEntryServiceTest, MarketImpactSlippageCurveWorsensLargeOrderMoreThanSm
     runtime_state.simulation_config.market_impact_max_bps = 500.0;
     runtime_state.simulation_config.market_impact_size_exponent = 1.0;
     StepKernelState step_state = make_step_state_with_perp_symbol();
-    Account account(100000.0, 0);
+    Account account(MakeLegacyCtorInitConfig(100000.0));
     std::optional<OrderRejectInfo> reject{};
 
     ASSERT_TRUE(OrderEntryService::Execute(runtime_state, account, step_state, make_perp_market_request(1.0), reject));
@@ -1002,7 +1012,7 @@ TEST(OrderEntryServiceTest, MarketImpactSlippageRespectsLimitProtection)
     runtime_state.simulation_config.market_impact_max_bps = 5000.0;
     runtime_state.simulation_config.market_impact_size_exponent = 1.0;
     StepKernelState step_state = make_step_state_with_perp_symbol();
-    Account account(100000.0, 0);
+    Account account(MakeLegacyCtorInitConfig(100000.0));
     std::optional<OrderRejectInfo> reject{};
 
     ASSERT_TRUE(OrderEntryService::Execute(runtime_state, account, step_state, make_perp_limit_request(8.0, 100.0), reject));
@@ -1022,7 +1032,7 @@ TEST(OrderEntryServiceTest, TakerProbabilityModelUsesDiscreteFeeRate)
     runtime_state.simulation_config.taker_probability_size_weight = 0.5;
     runtime_state.simulation_config.taker_probability_taker_weight = 0.5;
     StepKernelState step_state = make_step_state_with_perp_symbol();
-    Account account(100000.0, 0);
+    Account account(MakeLegacyCtorInitConfig(100000.0));
     std::optional<OrderRejectInfo> reject{};
 
     ASSERT_TRUE(OrderEntryService::Execute(runtime_state, account, step_state, make_perp_limit_request(1.0, 99.0), reject));
@@ -1044,7 +1054,7 @@ TEST(OrderEntryServiceTest, CancelOrderByIdRemovesRemainingOpenOrderAndKeepsFill
 {
     BinanceExchangeRuntimeState runtime_state{};
     StepKernelState step_state = make_step_state_with_perp_symbol();
-    Account account(5000.0, 0);
+    Account account(MakeLegacyCtorInitConfig(5000.0));
     std::optional<OrderRejectInfo> reject{};
 
     ASSERT_TRUE(OrderEntryService::Execute(
@@ -1084,7 +1094,7 @@ TEST(OrderEntryServiceTest, ClientOrderIdMustBeUniqueAmongOpenOrders)
 {
     BinanceExchangeRuntimeState runtime_state{};
     StepKernelState step_state = make_step_state_with_perp_symbol();
-    Account account(10000.0, 0);
+    Account account(MakeLegacyCtorInitConfig(10000.0));
     std::optional<OrderRejectInfo> reject{};
 
     auto first = make_perp_limit_request(1.0, 100.0);
@@ -1107,7 +1117,7 @@ TEST(OrderEntryServiceTest, StpExpireTakerRejectsCrossingIncomingOrder)
 {
     BinanceExchangeRuntimeState runtime_state{};
     StepKernelState step_state = make_step_state_with_perp_symbol();
-    Account account(10000.0, 0);
+    Account account(MakeLegacyCtorInitConfig(10000.0));
     std::optional<OrderRejectInfo> reject{};
 
     ASSERT_TRUE(OrderEntryService::Execute(
@@ -1132,7 +1142,7 @@ TEST(OrderEntryServiceTest, StpExpireMakerCancelsConflictingRestingOrder)
 {
     BinanceExchangeRuntimeState runtime_state{};
     StepKernelState step_state = make_step_state_with_perp_symbol();
-    Account account(10000.0, 0);
+    Account account(MakeLegacyCtorInitConfig(10000.0));
     std::optional<OrderRejectInfo> reject{};
 
     ASSERT_TRUE(OrderEntryService::Execute(
@@ -1156,7 +1166,7 @@ TEST(OrderEntryServiceTest, StpExpireBothCancelsRestingAndRejectsIncomingOrder)
 {
     BinanceExchangeRuntimeState runtime_state{};
     StepKernelState step_state = make_step_state_with_perp_symbol();
-    Account account(10000.0, 0);
+    Account account(MakeLegacyCtorInitConfig(10000.0));
     std::optional<OrderRejectInfo> reject{};
 
     ASSERT_TRUE(OrderEntryService::Execute(
@@ -1230,7 +1240,7 @@ TEST(OrderEntryServiceTest, HedgeMode_OrderRequiresExplicitPositionSide_IsReject
     BinanceExchangeRuntimeState runtime_state{};
     runtime_state.hedge_mode = true;
     StepKernelState step_state = make_step_state_with_perp_symbol();
-    Account account(10000.0, 0);
+    Account account(MakeLegacyCtorInitConfig(10000.0));
     std::optional<OrderRejectInfo> reject{};
 
     auto request = make_perp_limit_request(1.0, 100.0);
@@ -1246,7 +1256,7 @@ TEST(OrderEntryServiceTest, HedgeModeReduceOnlyOrderRejectedByDefault)
     runtime_state.hedge_mode = true;
     runtime_state.strict_binance_mode = true;
     StepKernelState step_state = make_step_state_with_perp_symbol();
-    Account account(10000.0, 0);
+    Account account(MakeLegacyCtorInitConfig(10000.0));
     std::optional<OrderRejectInfo> reject{};
 
     runtime_state.positions.push_back(make_perp_position("BTCUSDT", true));
@@ -1268,7 +1278,7 @@ TEST(OrderEntryServiceTest, CompatibilityModeAllowsHedgeReduceOnlyWhenStrictDisa
     runtime_state.hedge_mode = true;
     runtime_state.strict_binance_mode = false;
     StepKernelState step_state = make_step_state_with_perp_symbol();
-    Account account(10000.0, 0);
+    Account account(MakeLegacyCtorInitConfig(10000.0));
     std::optional<OrderRejectInfo> reject{};
 
     runtime_state.positions.push_back(make_perp_position("BTCUSDT", true));
@@ -1304,7 +1314,7 @@ TEST(OrderEntryServiceTest, HedgeModeReduceOnly_WrongSideOrNoMatchingPosition_Is
     runtime_state.hedge_mode = true;
     runtime_state.strict_binance_mode = false;
     StepKernelState step_state = make_step_state_with_perp_symbol();
-    Account account(10000.0, 0);
+    Account account(MakeLegacyCtorInitConfig(10000.0));
     std::optional<OrderRejectInfo> reject{};
 
     runtime_state.positions.push_back(make_perp_position("BTCUSDT", true));
@@ -1332,7 +1342,7 @@ TEST(OrderEntryServiceTest, ReduceOnly_HedgeMode_RequiresExplicitPositionSide)
     runtime_state.hedge_mode = true;
     runtime_state.strict_binance_mode = false;
     StepKernelState step_state = make_step_state_with_perp_symbol();
-    Account account(10000.0, 0);
+    Account account(MakeLegacyCtorInitConfig(10000.0));
     std::optional<OrderRejectInfo> reject{};
 
     runtime_state.positions.push_back(make_perp_position("BTCUSDT", true));
@@ -1353,7 +1363,7 @@ TEST(OrderEntryServiceTest, ReduceOnly_HedgeMode_DirectionMustCloseCorrectSide)
     runtime_state.hedge_mode = true;
     runtime_state.strict_binance_mode = false;
     StepKernelState step_state = make_step_state_with_perp_symbol();
-    Account account(10000.0, 0);
+    Account account(MakeLegacyCtorInitConfig(10000.0));
     std::optional<OrderRejectInfo> reject{};
 
     runtime_state.positions.push_back(make_perp_position("BTCUSDT", true));

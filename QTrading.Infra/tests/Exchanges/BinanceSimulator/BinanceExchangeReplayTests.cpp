@@ -14,12 +14,24 @@
 #include "Exchanges/BinanceSimulator/Domain/LiquidationEligibilityDecision.hpp"
 #include "Exchanges/BinanceSimulator/State/BinanceExchangeRuntimeState.hpp"
 #include "Exchanges/BinanceSimulator/State/StepKernelState.hpp"
-#include "Exchanges/BinanceSimulator/Support/BinanceExchangeSkeletonSupport.hpp"
 
 namespace {
 
 using QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+using QTrading::Infra::Exchanges::BinanceSim::Account;
 namespace fs = std::filesystem;
+
+QTrading::Infra::Exchanges::BinanceSim::Account::AccountInitConfig MakeAccountInitConfig(
+    double init_balance,
+    int vip_level = 0)
+{
+    QTrading::Infra::Exchanges::BinanceSim::Account::AccountInitConfig cfg{};
+    cfg.init_balance = init_balance;
+    cfg.spot_initial_cash = init_balance;
+    cfg.perp_initial_wallet = init_balance;
+    cfg.vip_level = vip_level;
+    return cfg;
+}
 
 class BinanceExchangeFixture : public ::testing::Test {
 protected:
@@ -98,7 +110,7 @@ protected:
         return BinanceExchange(
             datasets,
             nullptr,
-            QTrading::Infra::Exchanges::BinanceSim::Support::BuildInitConfig(1000.0, 0));
+            MakeAccountInitConfig(1000.0, 0));
     }
 
     BinanceExchange MakeExchangeWithInit(
@@ -2447,7 +2459,7 @@ TEST_F(BinanceExchangeFixture, StatusSnapshotExposesRawMarkIndexAndBasisWarningI
             std::optional<std::string>((tmp_dir / "btc_mark.csv").string()),
             std::optional<std::string>((tmp_dir / "btc_index.csv").string()) } },
         nullptr,
-        QTrading::Infra::Exchanges::BinanceSim::Support::BuildInitConfig(1000.0, 0));
+        MakeAccountInitConfig(1000.0, 0));
 
     auto cfg = exchange.simulation_config();
     cfg.basis_warning_bps = 100.0;
@@ -2491,7 +2503,7 @@ TEST_F(BinanceExchangeFixture, StatusSnapshotSuppressesBasisWarningWhenMarkIndex
             std::optional<std::string>((tmp_dir / "btc_mark.csv").string()),
             std::optional<std::string>((tmp_dir / "btc_index.csv").string()) } },
         nullptr,
-        QTrading::Infra::Exchanges::BinanceSim::Support::BuildInitConfig(1000.0, 0));
+        MakeAccountInitConfig(1000.0, 0));
 
     auto cfg = exchange.simulation_config();
     cfg.basis_warning_bps = 100.0;

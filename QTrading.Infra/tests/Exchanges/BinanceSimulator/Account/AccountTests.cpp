@@ -6,9 +6,23 @@
 
 using QTrading::Infra::Exchanges::BinanceSim::Account;
 
+namespace {
+
+Account::AccountInitConfig MakeLegacyCtorInitConfig(double init_balance, int vip_level = 0)
+{
+    Account::AccountInitConfig cfg{};
+    cfg.init_balance = init_balance;
+    cfg.spot_initial_cash = 0.0;
+    cfg.perp_initial_wallet = init_balance;
+    cfg.vip_level = vip_level;
+    return cfg;
+}
+
+} // namespace
+
 TEST(AccountTest, ConstructorAndGetters)
 {
-    Account account(1000.0, 0);
+    Account account(MakeLegacyCtorInitConfig(1000.0));
     const auto bal = account.get_perp_balance();
     EXPECT_DOUBLE_EQ(bal.WalletBalance, 1000.0);
     EXPECT_DOUBLE_EQ(account.total_unrealized_pnl(), 0.0);

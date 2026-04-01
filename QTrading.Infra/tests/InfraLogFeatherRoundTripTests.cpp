@@ -7,11 +7,22 @@
 #include <gtest/gtest.h>
 
 #include "Exchanges/BinanceSimulator/BinanceExchange.hpp"
-#include "Exchanges/BinanceSimulator/Support/BinanceExchangeSkeletonSupport.hpp"
 #include "FeatherRoundTripFixture.hpp"
 #include "Global.hpp"
 
 namespace {
+
+QTrading::Infra::Exchanges::BinanceSim::Account::AccountInitConfig MakeAccountInitConfig(
+    double init_balance,
+    int vip_level = 0)
+{
+    QTrading::Infra::Exchanges::BinanceSim::Account::AccountInitConfig cfg{};
+    cfg.init_balance = init_balance;
+    cfg.spot_initial_cash = init_balance;
+    cfg.perp_initial_wallet = init_balance;
+    cfg.vip_level = vip_level;
+    return cfg;
+}
 
 void WriteBinanceCsv(
     const fs::path& path,
@@ -324,7 +335,7 @@ TEST_F(InfraLogFeatherRoundTripFixture, ArrowRowCountsMatchInMemorySinkRowsAfter
                 (tmp_dir / "rowcount_trade.csv").string(),
                 (tmp_dir / "rowcount_funding.csv").string() } },
             logger,
-            QTrading::Infra::Exchanges::BinanceSim::Support::BuildInitConfig(1000.0, 0),
+            MakeAccountInitConfig(1000.0, 0),
             8600u);
         auto market_channel = exchange.get_market_channel();
 

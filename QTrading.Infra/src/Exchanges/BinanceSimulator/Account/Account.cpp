@@ -5,9 +5,6 @@
 
 namespace QTrading::Infra::Exchanges::BinanceSim {
 
-Account::Account(double init_balance, int)
-    : Account(build_init_from_balance_(init_balance)) {}
-
 Account::Account(const AccountInitConfig& init)
     : spot_balance_(make_balance_(validate_non_negative_(init.spot_initial_cash, "spot_initial_cash"))),
       perp_balance_(make_balance_(validate_non_negative_(init.perp_initial_wallet, "perp_initial_wallet"))),
@@ -144,14 +141,6 @@ bool Account::transfer_perp_to_spot(double amount)
     apply_perp_wallet_delta(-amount);
     apply_spot_cash_delta(amount);
     return true;
-}
-
-Account::AccountInitConfig Account::build_init_from_balance_(double init_balance)
-{
-    AccountInitConfig init{};
-    init.perp_initial_wallet = validate_non_negative_(init_balance, "init_balance");
-    init.spot_initial_cash = 0.0;
-    return init;
 }
 
 double Account::validate_non_negative_(double value, const char* field)
