@@ -13,13 +13,18 @@
 
 namespace QTrading::Infra::Exchanges::BinanceSim::Domain {
 
+/// Summary of account-policy mutations produced by one execution pass.
 struct AccountPolicyUpdateResult {
+    /// Net perp wallet delta after fees and realized pnl settlement.
     double perp_wallet_delta{ 0.0 };
+    /// Number of fills applied during the pass.
     uint32_t filled_count{ 0 };
 };
 
+/// Legacy-style account policy executor retained for policy-oriented tests.
 class AccountPolicyExecutionService final {
 public:
+    /// Validates and queues one order into the provided open-order book.
     static bool TryQueueOrder(
         const std::string& symbol,
         double quantity,
@@ -30,6 +35,7 @@ public:
         int& next_order_id,
         std::vector<QTrading::dto::Order>& open_orders);
 
+    /// Applies account-policy fills and updates to the provided books.
     static AccountPolicyUpdateResult ApplyUpdates(
         const std::unordered_map<std::string, QTrading::Dto::Market::Binance::TradeKlineDto>& symbol_kline,
         const std::unordered_map<std::string, double>& symbol_mark_price,
@@ -41,4 +47,3 @@ public:
 };
 
 } // namespace QTrading::Infra::Exchanges::BinanceSim::Domain
-

@@ -17,8 +17,10 @@ struct StepKernelState;
 
 namespace QTrading::Infra::Exchanges::BinanceSim::Domain {
 
+/// Executes the reduced liquidation path once eligibility has been established.
 class LiquidationExecution final {
 public:
+    /// Cancels conflicting orders and reduces the worst distressed perp position.
     static bool Run(
         State::BinanceExchangeRuntimeState& runtime_state,
         Account& account,

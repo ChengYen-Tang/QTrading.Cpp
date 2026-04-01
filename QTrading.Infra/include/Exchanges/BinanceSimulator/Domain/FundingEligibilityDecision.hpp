@@ -2,6 +2,7 @@
 
 namespace QTrading::Infra::Exchanges::BinanceSim::Domain {
 
+/// Reduced funding-step action chosen after checking duplicate and mark prerequisites.
 enum class FundingDecisionAction : int {
     Apply = 0,
     SkipNoMark = 1,
@@ -9,8 +10,10 @@ enum class FundingDecisionAction : int {
     NoOp = 3,
 };
 
+/// Stateless helper that decides whether a funding row should mutate account state.
 class FundingEligibilityDecision final {
 public:
+    /// Chooses the reduced funding action from duplicate/mark/account availability flags.
     static FundingDecisionAction Decide(
         bool is_duplicate,
         bool has_mark_price,

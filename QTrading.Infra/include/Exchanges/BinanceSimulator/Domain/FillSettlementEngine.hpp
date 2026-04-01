@@ -18,6 +18,7 @@ namespace QTrading::Infra::Exchanges::BinanceSim::Domain {
 /// Applies fill deltas to account balances and spot/perp positions.
 class FillSettlementEngine final {
 public:
+    /// Applies matched fills to balances, positions, fees, and order visibility.
     static void Apply(State::BinanceExchangeRuntimeState& runtime_state, Account& account,
         const std::vector<MatchFill>& fills);
 };

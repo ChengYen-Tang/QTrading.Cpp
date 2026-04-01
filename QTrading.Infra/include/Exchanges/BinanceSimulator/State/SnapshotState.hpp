@@ -23,14 +23,23 @@ struct SnapshotState {
     std::shared_ptr<const std::vector<std::string>> symbols_shared;
     /// Latest trade close price observed per symbol.
     std::vector<double> last_trade_price_by_symbol;
+    /// Availability flags paired with the cached trade prices.
     std::vector<uint8_t> has_last_trade_price_by_symbol;
+    /// Latest mark price observed per symbol.
     std::vector<double> last_mark_price_by_symbol;
+    /// Availability flags paired with the cached mark prices.
     std::vector<uint8_t> has_last_mark_price_by_symbol;
+    /// Exchange timestamp of the cached mark price per symbol.
     std::vector<uint64_t> last_mark_price_ts_by_symbol;
+    /// Encoded `ReferencePriceSource` for the cached mark price per symbol.
     std::vector<int32_t> last_mark_price_source_by_symbol;
+    /// Latest index price observed per symbol.
     std::vector<double> last_index_price_by_symbol;
+    /// Availability flags paired with the cached index prices.
     std::vector<uint8_t> has_last_index_price_by_symbol;
+    /// Exchange timestamp of the cached index price per symbol.
     std::vector<uint64_t> last_index_price_ts_by_symbol;
+    /// Encoded `ReferencePriceSource` for the cached index price per symbol.
     std::vector<int32_t> last_index_price_source_by_symbol;
     /// Last full market payload, kept for future output extensions.
     std::shared_ptr<QTrading::Dto::Market::Binance::MultiKlineDto> last_market_payload;
