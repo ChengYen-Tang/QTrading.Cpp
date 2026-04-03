@@ -1364,7 +1364,7 @@ TEST(OrderEntryServiceTest, TickVolumeSplit_Heuristic_CloseNearLowBiasesBuyOrder
     EXPECT_NEAR(short_qty, 0.5, 1e-6);
 }
 
-TEST(OrderEntryServiceTest, OpenOrderInitialMargin_MarketOrderUsesLastMarkWithBuffer)
+TEST(OrderEntryServiceTest, OpenOrderInitialMargin_MarketOrderUsesVisibleReferencePrice)
 {
     BinanceExchangeRuntimeState runtime_state{};
     runtime_state.symbol_leverage["BTCUSDT"] = 10.0;
@@ -1384,7 +1384,7 @@ TEST(OrderEntryServiceTest, OpenOrderInitialMargin_MarketOrderUsesLastMarkWithBu
         make_perp_market_request(2.0),
         reject));
     EXPECT_FALSE(reject.has_value());
-    EXPECT_NEAR(runtime_state.perp_open_order_initial_margin, (2.0 * 100.0 * 1.001) / 10.0, 1e-9);
+    EXPECT_NEAR(runtime_state.perp_open_order_initial_margin, (2.0 * 100.0) / 10.0, 1e-9);
 }
 
 TEST(OrderEntryServiceTest, PerpLimitOrderRejectsWhenInitialMarginExceedsAvailableBalance)
@@ -1413,11 +1413,51 @@ TEST(OrderEntryServiceTest, PerpMarketOrderRejectsWhenInitialMarginExceedsAvaila
     Account account(MakeLegacyCtorInitConfig(19.0));
     std::optional<OrderRejectInfo> reject{};
 
-    auto request = make_perp_market_request(2.0); // required margin about 20.02 > available 19
+    auto request = make_perp_market_request(2.0); // required margin 20 > available 19
     EXPECT_FALSE(OrderEntryService::Execute(runtime_state, account, step_state, request, reject));
     ASSERT_TRUE(reject.has_value());
     EXPECT_EQ(reject->code, OrderRejectInfo::Code::PerpInsufficientMargin);
     EXPECT_TRUE(runtime_state.orders.empty());
+}
+
+TEST(OrderEntryServiceTest, PerpMarketOrderAcceptsAtExactVisibleAvailableBalanceBoundary)
+{
+    BinanceExchangeRuntimeState runtime_state{};
+    runtime_state.symbol_leverage["BTCUSDT"] = 10.0;
+    runtime_state.last_status_snapshot.prices.push_back(
+        QTrading::Infra::Exchanges::BinanceSim::Contracts::StatusPriceSnapshot{
+            "BTCUSDT", 0.0, false, 0.0, false, 100.0, true });
+    StepKernelState step_state = make_step_state_with_perp_symbol();
+    Account account(MakeLegacyCtorInitConfig(20.0));
+    std::optional<OrderRejectInfo> reject{};
+
+    EXPECT_TRUE(OrderEntryService::Execute(runtime_state, account, step_state, make_perp_market_request(2.0), reject));
+    EXPECT_FALSE(reject.has_value());
+    ASSERT_EQ(runtime_state.orders.size(), 1u);
+    EXPECT_NEAR(runtime_state.perp_open_order_initial_margin, 20.0, 1e-12);
+}
+
+TEST(OrderEntryServiceTest, PerpAdmissionUsesVisibleAvailableBalanceWhenFixtureStateDiverges)
+{
+    BinanceExchangeRuntimeState runtime_state{};
+    runtime_state.symbol_leverage["BTCUSDT"] = 10.0;
+    runtime_state.positions.push_back(make_perp_position("BTCUSDT", true, 1.0, 100.0));
+    runtime_state.positions.back().initial_margin = 80.0;
+    runtime_state.last_status_snapshot.prices.push_back(
+        QTrading::Infra::Exchanges::BinanceSim::Contracts::StatusPriceSnapshot{
+            "BTCUSDT", 0.0, false, 0.0, false, 100.0, true });
+
+    StepKernelState step_state = make_step_state_with_perp_symbol();
+    Account account(MakeLegacyCtorInitConfig(100.0));
+    account.update_perp_mark_state(/*unrealized_pnl=*/0.0, /*position_initial_margin=*/0.0, /*maintenance_margin=*/0.0);
+    account.sync_open_order_initial_margins(/*spot=*/0.0, /*perp=*/0.0);
+    ASSERT_NEAR(account.get_perp_balance().AvailableBalance, 100.0, 1e-12);
+
+    std::optional<OrderRejectInfo> reject{};
+    auto request = make_perp_limit_request(1.0, 100.0); // incremental margin 10 should fit visible available balance 100
+    EXPECT_TRUE(OrderEntryService::Execute(runtime_state, account, step_state, request, reject));
+    EXPECT_FALSE(reject.has_value());
+    ASSERT_EQ(runtime_state.orders.size(), 1u);
 }
 
 TEST(OrderEntryServiceTest, OpenOrderInitialMargin_OneWayClosingDirectionDoesNotReserveMargin)

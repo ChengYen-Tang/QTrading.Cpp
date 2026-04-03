@@ -19,7 +19,6 @@ namespace QTrading::Infra::Exchanges::BinanceSim::Domain {
 
 namespace {
 
-constexpr double kPerpMarketReservationBuffer = 1.001;
 constexpr double kEpsilon = 1e-12;
 
 double spot_buy_reservation_multiplier(const State::BinanceExchangeRuntimeState& runtime_state)
@@ -415,17 +414,17 @@ void rebuild_perp_reference_price_cache(
         }
         if (snapshot.has_mark_price && snapshot.mark_price > 0.0) {
             runtime_state.perp_reference_price_by_symbol[*symbol_id] =
-                snapshot.mark_price * kPerpMarketReservationBuffer;
+                snapshot.mark_price;
             continue;
         }
         if (snapshot.has_trade_price && snapshot.trade_price > 0.0) {
             runtime_state.perp_reference_price_by_symbol[*symbol_id] =
-                snapshot.trade_price * kPerpMarketReservationBuffer;
+                snapshot.trade_price;
             continue;
         }
         if (snapshot.has_price && snapshot.price > 0.0) {
             runtime_state.perp_reference_price_by_symbol[*symbol_id] =
-                snapshot.price * kPerpMarketReservationBuffer;
+                snapshot.price;
         }
     }
 }
@@ -1294,12 +1293,7 @@ bool OrderEntryService::Execute(
         !request.reduce_only &&
         !request.close_position) {
         const auto perp = account.get_perp_balance();
-        const double position_initial_margin = std::max(
-            std::max(0.0, perp.PositionInitialMargin),
-            sum_perp_position_initial_margin(runtime_state));
-        const double available = perp.MarginBalance -
-            position_initial_margin -
-            runtime_state.perp_open_order_initial_margin;
+        const double available = std::max(0.0, perp.AvailableBalance);
         const double required = estimate_added_perp_open_order_margin(
             runtime_state,
             step_state,
