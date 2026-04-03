@@ -11,6 +11,7 @@
 #undef private
 #include "Exchanges/BinanceSimulator/Contracts/OrderRejectInfo.hpp"
 #include "Exchanges/BinanceSimulator/State/BinanceExchangeRuntimeState.hpp"
+#include "Exchanges/BinanceSimulator/State/StepKernelState.hpp"
 #include "ReplaySemanticsInputPinning.hpp"
 
 using namespace QTrading::Dto::Market::Binance;
@@ -97,6 +98,7 @@ public:
     auto get_market_channel() { return impl_.get_market_channel(); }
     auto get_position_channel() { return impl_.get_position_channel(); }
     auto get_order_channel() { return impl_.get_order_channel(); }
+    auto& step_kernel_state() { return *impl_.step_kernel_state_; }
 
     void set_order_latency_bars(size_t latency_bars) { impl_.runtime_state_->order_latency_bars = latency_bars; }
     std::vector<AsyncOrderAck> drain_async_order_acks()
@@ -1782,6 +1784,11 @@ TEST_F(BinanceExchangeFixture, PerpUnrealizedPnlUsesMarkDatasetWhenAvailable)
     ASSERT_TRUE(ex.step());
     mCh->Receive();
     ex.FillStatusSnapshot(snap);
+    ASSERT_FALSE(snap.prices.empty());
+    EXPECT_TRUE(snap.prices[0].has_trade_price);
+    EXPECT_TRUE(snap.prices[0].has_mark_price);
+    EXPECT_NEAR(snap.prices[0].trade_price, 100.0, 1e-8);
+    EXPECT_NEAR(snap.prices[0].mark_price, 80.0, 1e-8);
     EXPECT_NEAR(snap.unrealized_pnl, -20.0, 1e-8);
 }
 
@@ -2287,6 +2294,26 @@ TEST_F(BinanceExchangeFixture, LegacyLeverageWrapperMatchesPerpFacade)
 
     ex.perp.set_symbol_leverage("BTCUSDT", 8.0);
     EXPECT_DOUBLE_EQ(ex.get_symbol_leverage("BTCUSDT"), 8.0);
+}
+
+TEST_F(BinanceExchangeFixture, SymbolSpecificTiersCapPerpLeverage)
+{
+    writeCsv("btc_perp_symbol_tiers.csv", {
+        {      0, 1000,1000,1000,1000,1000, 30000,100,1,0,0 },
+        {  60000, 1000,1000,1000,1000,1000, 90000,100,1,0,0 }
+        });
+
+    BinanceExchange ex({ {"BTCUSDT",(tmpDir / "btc_perp_symbol_tiers.csv").string()} }, logger, /*balance*/ 1000.0);
+    ex.step_kernel_state().symbol_maintenance_margin_tiers_by_id[0] = {
+        { 5000.0, 0.0040, 25.0 },
+        { std::numeric_limits<double>::max(), 0.0100, 10.0 }
+    };
+
+    ex.set_symbol_leverage("BTCUSDT", 30.0);
+    EXPECT_DOUBLE_EQ(ex.get_symbol_leverage("BTCUSDT"), 1.0);
+
+    ex.set_symbol_leverage("BTCUSDT", 25.0);
+    EXPECT_DOUBLE_EQ(ex.get_symbol_leverage("BTCUSDT"), 25.0);
 }
 
 TEST_F(BinanceExchangeFixture, StatusSnapshotExposesDualLedgerTotals)

@@ -8,7 +8,9 @@
 
 #include "Dto/Market/Binance/MultiKline.hpp"
 #include "Exchanges/BinanceSimulator/Account/Account.hpp"
+#include "Exchanges/BinanceSimulator/Account/Config.hpp"
 #include "Exchanges/BinanceSimulator/Domain/LiquidationEligibilityDecision.hpp"
+#include "Exchanges/BinanceSimulator/Domain/MaintenanceMarginModel.hpp"
 #include "Exchanges/BinanceSimulator/State/BinanceExchangeRuntimeState.hpp"
 #include "Exchanges/BinanceSimulator/State/StepKernelState.hpp"
 
@@ -16,24 +18,48 @@ namespace QTrading::Infra::Exchanges::BinanceSim::Domain {
 namespace {
 
 constexpr int kMaxLiquidationStepsPerTick = 8;
-constexpr double kLiquidationFeeRate = 0.001;
-constexpr double kWarningMaintenanceMultiplier = 2.0;
-constexpr double kWarningReductionRatio = 0.5;
+constexpr double kDefaultWarningMaintenanceMultiplier = 1.0;
+constexpr double kDefaultWarningReductionRatio = 0.5;
 constexpr double kEpsilon = 1e-12;
-constexpr double kTier1Cap = 50'000.0;
-constexpr double kTier1Rate = 0.004;
-constexpr double kTier2Rate = 0.005;
 
-double compute_maintenance_margin(double notional) noexcept
+double resolve_default_perp_taker_fee_rate(const State::BinanceExchangeRuntimeState& runtime_state) noexcept
 {
-    if (!(notional > 0.0)) {
+    auto fee_it = ::vip_fee_rates.find(runtime_state.vip_level);
+    if (fee_it == ::vip_fee_rates.end()) {
+        fee_it = ::vip_fee_rates.find(0);
+    }
+    if (fee_it == ::vip_fee_rates.end()) {
         return 0.0;
     }
-    if (notional <= kTier1Cap) {
-        return notional * kTier1Rate;
+    return fee_it->second.taker_fee_rate;
+}
+
+double resolve_perp_taker_fee_rate(
+    const State::BinanceExchangeRuntimeState& runtime_state,
+    const State::StepKernelState& step_state,
+    size_t symbol_id) noexcept
+{
+    if (symbol_id < step_state.symbols.size()) {
+        const auto symbol_it = runtime_state.perp_symbol_fee_overrides.find(step_state.symbols[symbol_id]);
+        if (symbol_it != runtime_state.perp_symbol_fee_overrides.end()) {
+            return symbol_it->second.taker_fee_rate;
+        }
     }
-    const double bracket_deduction = kTier1Cap * (kTier2Rate - kTier1Rate);
-    return (notional * kTier2Rate) - bracket_deduction;
+    return resolve_default_perp_taker_fee_rate(runtime_state);
+}
+
+double resolve_liquidation_fee_rate(
+    const State::BinanceExchangeRuntimeState& runtime_state,
+    const State::StepKernelState& step_state,
+    size_t symbol_id) noexcept
+{
+    if (symbol_id < step_state.symbol_spec_by_id.size()) {
+        const double symbol_liquidation_fee_rate = step_state.symbol_spec_by_id[symbol_id].liquidation_fee_rate;
+        if (symbol_liquidation_fee_rate >= 0.0 && std::isfinite(symbol_liquidation_fee_rate)) {
+            return symbol_liquidation_fee_rate;
+        }
+    }
+    return resolve_default_perp_taker_fee_rate(runtime_state);
 }
 
 std::optional<size_t> resolve_position_symbol_id(
@@ -107,6 +133,20 @@ void append_position_delta(
     out_position_deltas->emplace_back(std::move(delta));
 }
 
+void apply_liquidation_wallet_delta(Account& account, double delta) noexcept
+{
+    if (!(delta < 0.0)) {
+        account.apply_perp_wallet_delta(delta);
+        return;
+    }
+    const double wallet_before = account.get_wallet_balance();
+    if (!(wallet_before > 0.0)) {
+        return;
+    }
+    const double bounded_delta = std::max(delta, -wallet_before);
+    account.apply_perp_wallet_delta(bounded_delta);
+}
+
 bool apply_full_liquidation_close_on_position(
     State::BinanceExchangeRuntimeState& runtime_state,
     Account& account,
@@ -140,8 +180,9 @@ bool apply_full_liquidation_close_on_position(
     const double close_qty = position.quantity;
     const double direction = position.is_long ? 1.0 : -1.0;
     const double realized_pnl = (mark - position.entry_price) * close_qty * direction;
-    const double fee = close_qty * mark * kLiquidationFeeRate;
-    account.apply_perp_wallet_delta(realized_pnl - fee);
+    const double liquidation_fee_rate = resolve_liquidation_fee_rate(runtime_state, step_state, symbol_id);
+    const double fee = close_qty * mark * liquidation_fee_rate;
+    apply_liquidation_wallet_delta(account, realized_pnl - fee);
     append_position_delta(
         position,
         close_qty,
@@ -167,6 +208,7 @@ bool apply_warning_zone_partial_reduction_on_position(
     const State::StepKernelState& step_state,
     const std::vector<double>& mark_price_scratch,
     int position_index,
+    double warning_reduction_ratio,
     std::vector<LiquidationPositionDelta>* out_position_deltas) noexcept
 {
     if (position_index < 0 || static_cast<size_t>(position_index) >= runtime_state.positions.size()) {
@@ -191,14 +233,15 @@ bool apply_warning_zone_partial_reduction_on_position(
         return false;
     }
 
-    const double reduce_qty = position.quantity * kWarningReductionRatio;
+    const double reduce_qty = position.quantity * warning_reduction_ratio;
     if (!(reduce_qty > kEpsilon)) {
         return false;
     }
     const double direction = position.is_long ? 1.0 : -1.0;
     const double realized_pnl = (mark - position.entry_price) * reduce_qty * direction;
-    const double fee = reduce_qty * mark * kLiquidationFeeRate;
-    account.apply_perp_wallet_delta(realized_pnl - fee);
+    const double taker_fee_rate = resolve_perp_taker_fee_rate(runtime_state, step_state, symbol_id);
+    const double fee = reduce_qty * mark * taker_fee_rate;
+    apply_liquidation_wallet_delta(account, realized_pnl - fee);
 
     const double quantity_before = position.quantity;
     position.quantity -= reduce_qty;
@@ -222,7 +265,10 @@ bool apply_warning_zone_partial_reduction_on_position(
         return true;
     }
     position.notional = std::abs(position.quantity * position.entry_price);
-    position.maintenance_margin = compute_maintenance_margin(std::abs(position.quantity * mark));
+    position.maintenance_margin = ComputeMaintenanceMarginForSymbol(
+        std::abs(position.quantity * mark),
+        step_state,
+        symbol_id);
     ++runtime_state.positions_version;
     return true;
 }
@@ -249,10 +295,25 @@ bool LiquidationExecution::Run(
         market_payload,
         mark_price_scratch,
         has_mark_scratch);
-    const bool warning_zone = initial_health.has_perp_positions &&
+    const double warning_maintenance_multiplier = std::max(
+        kEpsilon,
+        runtime_state.simulation_config.liquidation_warning_maintenance_multiplier > 0.0
+            ? runtime_state.simulation_config.liquidation_warning_maintenance_multiplier
+            : kDefaultWarningMaintenanceMultiplier);
+    const double warning_reduction_ratio = std::clamp(
+        runtime_state.simulation_config.liquidation_warning_reduction_ratio > 0.0
+            ? runtime_state.simulation_config.liquidation_warning_reduction_ratio
+            : kDefaultWarningReductionRatio,
+        kEpsilon,
+        1.0);
+    const bool warning_overlay_enabled =
+        warning_maintenance_multiplier > 1.0 + kEpsilon &&
+        warning_reduction_ratio > kEpsilon;
+    const bool warning_zone = warning_overlay_enabled &&
+        initial_health.has_perp_positions &&
         initial_health.has_full_mark_context &&
         initial_health.maintenance_margin > kEpsilon &&
-        initial_health.equity + kEpsilon < initial_health.maintenance_margin * kWarningMaintenanceMultiplier;
+        initial_health.equity + kEpsilon < initial_health.maintenance_margin * warning_maintenance_multiplier;
     if (!initial_health.distressed && !warning_zone) {
         return false;
     }
@@ -270,6 +331,7 @@ bool LiquidationExecution::Run(
                 step_state,
                 mark_price_scratch,
                 warning_idx,
+                warning_reduction_ratio,
                 out_position_deltas)) {
             state_mutated = true;
         }

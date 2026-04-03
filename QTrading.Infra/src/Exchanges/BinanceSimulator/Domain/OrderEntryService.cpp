@@ -59,6 +59,10 @@ double current_mark_price(
     const State::StepKernelState& step_state,
     const std::string& symbol);
 
+double current_index_price(
+    const State::StepKernelState& step_state,
+    const std::string& symbol);
+
 bool is_multiple_of_step(double value, double step_size)
 {
     if (step_size <= 0.0) {
@@ -83,6 +87,56 @@ bool validate_filters(
     const auto& spec = step_state.symbol_spec_by_id[symbol_index];
 
     if (request.price > 0.0) {
+        auto resolve_percent_price_reference = [&]() -> double {
+            double ref = current_reference_price(step_state, request.symbol);
+            if (ref <= 0.0 && request.instrument_type == QTrading::Dto::Trading::InstrumentType::Perp) {
+                ref = current_mark_price(step_state, request.symbol);
+            }
+            return ref;
+        };
+
+        if (spec.percent_price_by_side) {
+            const bool is_buy = request.side == QTrading::Dto::Trading::OrderSide::Buy;
+            const double multiplier_up = is_buy ? spec.bid_multiplier_up : spec.ask_multiplier_up;
+            const double multiplier_down = is_buy ? spec.bid_multiplier_down : spec.ask_multiplier_down;
+            if (multiplier_up > 0.0 || multiplier_down > 0.0) {
+                const double reference = resolve_percent_price_reference();
+                if (reference > 0.0) {
+                    if (multiplier_up > 0.0 && request.price - kEpsilon > reference * multiplier_up) {
+                        reject = Contracts::OrderRejectInfo{
+                            Contracts::OrderRejectInfo::Code::PercentPriceAboveBound,
+                            "price above percent price upper bound" };
+                        return false;
+                    }
+                    if (multiplier_down > 0.0 && request.price + kEpsilon < reference * multiplier_down) {
+                        reject = Contracts::OrderRejectInfo{
+                            Contracts::OrderRejectInfo::Code::PercentPriceBelowBound,
+                            "price below percent price lower bound" };
+                        return false;
+                    }
+                }
+            }
+        }
+        else if (spec.percent_price_multiplier_up > 0.0 || spec.percent_price_multiplier_down > 0.0) {
+            const double reference = resolve_percent_price_reference();
+            if (reference > 0.0) {
+                if (spec.percent_price_multiplier_up > 0.0 &&
+                    request.price - kEpsilon > reference * spec.percent_price_multiplier_up) {
+                    reject = Contracts::OrderRejectInfo{
+                        Contracts::OrderRejectInfo::Code::PercentPriceAboveBound,
+                        "price above percent price upper bound" };
+                    return false;
+                }
+                if (spec.percent_price_multiplier_down > 0.0 &&
+                    request.price + kEpsilon < reference * spec.percent_price_multiplier_down) {
+                    reject = Contracts::OrderRejectInfo{
+                        Contracts::OrderRejectInfo::Code::PercentPriceBelowBound,
+                        "price below percent price lower bound" };
+                    return false;
+                }
+            }
+        }
+
         if (spec.min_price > 0.0 && request.price + kEpsilon < spec.min_price) {
             reject = Contracts::OrderRejectInfo{
                 Contracts::OrderRejectInfo::Code::PriceFilterBelowMin,
@@ -213,6 +267,34 @@ double current_mark_price(
     const size_t cursor = step_state.mark_cursor_by_symbol[symbol_index];
     const size_t idx = cursor == 0 ? 0 : std::min(cursor - 1, count - 1);
     return mark_data.get_kline(idx).ClosePrice;
+}
+
+double current_index_price(
+    const State::StepKernelState& step_state,
+    const std::string& symbol)
+{
+    const size_t symbol_index = find_symbol_index(step_state, symbol);
+    if (symbol_index == std::numeric_limits<size_t>::max() ||
+        symbol_index >= step_state.index_data_id_by_symbol.size() ||
+        symbol_index >= step_state.index_cursor_by_symbol.size()) {
+        return 0.0;
+    }
+
+    const int32_t index_data_id = step_state.index_data_id_by_symbol[symbol_index];
+    if (index_data_id < 0 ||
+        static_cast<size_t>(index_data_id) >= step_state.index_data_pool.size()) {
+        return 0.0;
+    }
+
+    const auto& index_data = step_state.index_data_pool[static_cast<size_t>(index_data_id)];
+    const size_t count = index_data.get_klines_count();
+    if (count == 0) {
+        return 0.0;
+    }
+
+    const size_t cursor = step_state.index_cursor_by_symbol[symbol_index];
+    const size_t idx = cursor == 0 ? 0 : std::min(cursor - 1, count - 1);
+    return index_data.get_kline(idx).ClosePrice;
 }
 
 double sum_spot_inventory(const State::BinanceExchangeRuntimeState& runtime_state, const std::string& symbol)
@@ -423,6 +505,68 @@ double recompute_perp_symbol_reservation(
         reserved += leverage > 0.0 ? (notional / leverage) : notional;
     }
     return reserved;
+}
+
+double sum_perp_position_initial_margin(const State::BinanceExchangeRuntimeState& runtime_state)
+{
+    double total = 0.0;
+    for (const auto& position : runtime_state.positions) {
+        if (position.instrument_type != QTrading::Dto::Trading::InstrumentType::Perp) {
+            continue;
+        }
+        total += std::max(0.0, position.initial_margin);
+    }
+    return total;
+}
+
+double estimate_added_perp_open_order_margin(
+    State::BinanceExchangeRuntimeState& runtime_state,
+    const State::StepKernelState& step_state,
+    const Contracts::OrderCommandRequest& request,
+    double quantity)
+{
+    if (request.instrument_type != QTrading::Dto::Trading::InstrumentType::Perp ||
+        request.reduce_only ||
+        request.close_position ||
+        quantity <= kEpsilon) {
+        return 0.0;
+    }
+
+    const auto symbol_id = try_resolve_order_symbol_id(step_state, request.symbol);
+    if (!symbol_id.has_value()) {
+        return 0.0;
+    }
+
+    ensure_order_reservation_cache_shape(runtime_state, step_state);
+    rebuild_perp_reference_price_cache(runtime_state, step_state);
+    rebuild_perp_net_position_qty_cache(runtime_state, step_state);
+
+    const double current_symbol_margin = recompute_perp_symbol_reservation(
+        runtime_state,
+        step_state,
+        *symbol_id);
+
+    QTrading::dto::Order synthetic{};
+    synthetic.id = -1;
+    synthetic.symbol = request.symbol;
+    synthetic.quantity = quantity;
+    synthetic.price = request.price;
+    synthetic.side = request.side;
+    synthetic.position_side = request.position_side;
+    synthetic.reduce_only = request.reduce_only;
+    synthetic.instrument_type = request.instrument_type;
+    synthetic.client_order_id = request.client_order_id;
+    synthetic.stp_mode = request.stp_mode;
+    synthetic.close_position = request.close_position;
+    synthetic.quote_order_qty = request.quote_order_qty;
+    runtime_state.orders.emplace_back(std::move(synthetic));
+    const double with_candidate = recompute_perp_symbol_reservation(
+        runtime_state,
+        step_state,
+        *symbol_id);
+    runtime_state.orders.pop_back();
+
+    return std::max(0.0, with_candidate - current_symbol_margin);
 }
 
 void refresh_order_margin_totals_from_symbol_cache(State::BinanceExchangeRuntimeState& runtime_state)
@@ -704,18 +848,21 @@ double reducible_perp_quantity(
 
 std::optional<double> current_basis_bps(
     const State::BinanceExchangeRuntimeState& runtime_state,
+    const State::StepKernelState& step_state,
     const std::string& symbol)
 {
-    for (const auto& snap : runtime_state.last_status_snapshot.prices) {
-        if (snap.symbol != symbol ||
-            !snap.has_mark_price ||
-            !snap.has_index_price ||
-            std::abs(snap.index_price) <= kEpsilon) {
-            continue;
-        }
-        return std::abs((snap.mark_price - snap.index_price) / snap.index_price) * 10000.0;
+    const auto symbol_id = try_resolve_order_symbol_id(step_state, symbol);
+    if (!symbol_id.has_value() ||
+        *symbol_id >= runtime_state.last_status_snapshot.prices.size()) {
+        return std::nullopt;
     }
-    return std::nullopt;
+    const auto& snap = runtime_state.last_status_snapshot.prices[*symbol_id];
+    if (!snap.has_mark_price ||
+        !snap.has_index_price ||
+        std::abs(snap.index_price) <= kEpsilon) {
+        return std::nullopt;
+    }
+    return std::abs((snap.mark_price - snap.index_price) / snap.index_price) * 10000.0;
 }
 
 bool request_opens_target(
@@ -732,6 +879,133 @@ bool request_closes_target(
 {
     return (target_is_long && request.side == QTrading::Dto::Trading::OrderSide::Sell) ||
         (!target_is_long && request.side == QTrading::Dto::Trading::OrderSide::Buy);
+}
+
+constexpr uint8_t stp_mode_bit(Account::SelfTradePreventionMode mode)
+{
+    return static_cast<uint8_t>(1u << static_cast<uint8_t>(mode));
+}
+
+bool is_supported_stp_mode_value(int mode_value)
+{
+    return mode_value >= static_cast<int>(Account::SelfTradePreventionMode::None) &&
+        mode_value <= static_cast<int>(Account::SelfTradePreventionMode::ExpireBoth);
+}
+
+bool resolve_effective_stp_mode(
+    const State::StepKernelState& step_state,
+    const Contracts::OrderCommandRequest& request,
+    Account::SelfTradePreventionMode& effective_mode,
+    std::optional<Contracts::OrderRejectInfo>& reject)
+{
+    if (!is_supported_stp_mode_value(request.stp_mode)) {
+        reject = Contracts::OrderRejectInfo{
+            Contracts::OrderRejectInfo::Code::InvalidStpMode,
+            "invalid selfTradePreventionMode" };
+        return false;
+    }
+
+    const size_t symbol_index = find_symbol_index(step_state, request.symbol);
+    const auto& spec = symbol_index < step_state.symbol_spec_by_id.size()
+        ? step_state.symbol_spec_by_id[symbol_index]
+        : QTrading::Dto::Trading::PerpInstrumentSpec();
+
+    int mode_value = request.stp_mode;
+    if (mode_value == static_cast<int>(Account::SelfTradePreventionMode::None)) {
+        mode_value = spec.default_stp_mode;
+    }
+    if (!is_supported_stp_mode_value(mode_value)) {
+        reject = Contracts::OrderRejectInfo{
+            Contracts::OrderRejectInfo::Code::InvalidStpMode,
+            "invalid default selfTradePreventionMode" };
+        return false;
+    }
+
+    const auto mode = static_cast<Account::SelfTradePreventionMode>(mode_value);
+    const uint8_t allowed_mask = spec.allowed_stp_modes_mask;
+    if ((allowed_mask & stp_mode_bit(mode)) == 0) {
+        reject = Contracts::OrderRejectInfo{
+            Contracts::OrderRejectInfo::Code::StpModeNotAllowed,
+            "selfTradePreventionMode not allowed for symbol" };
+        return false;
+    }
+
+    effective_mode = mode;
+    return true;
+}
+
+bool validate_perp_protection_constraints(
+    const State::BinanceExchangeRuntimeState& runtime_state,
+    const State::StepKernelState& step_state,
+    const Contracts::OrderCommandRequest& request,
+    std::optional<Contracts::OrderRejectInfo>& reject)
+{
+    if (request.instrument_type != QTrading::Dto::Trading::InstrumentType::Perp || request.price > 0.0) {
+        return true;
+    }
+
+    const size_t symbol_index = find_symbol_index(step_state, request.symbol);
+    if (symbol_index == std::numeric_limits<size_t>::max() ||
+        symbol_index >= step_state.symbol_spec_by_id.size()) {
+        return true;
+    }
+    const auto& spec = step_state.symbol_spec_by_id[symbol_index];
+    const auto* snapshot = symbol_index < runtime_state.last_status_snapshot.prices.size()
+        ? &runtime_state.last_status_snapshot.prices[symbol_index]
+        : nullptr;
+
+    if (spec.market_take_bound > 0.0) {
+        double mark_price = 0.0;
+        double market_reference = 0.0;
+        if (snapshot != nullptr) {
+            mark_price = snapshot->has_mark_price ? snapshot->mark_price : 0.0;
+            if (snapshot->has_trade_price && snapshot->trade_price > 0.0) {
+                market_reference = snapshot->trade_price;
+            }
+            else if (snapshot->has_price && snapshot->price > 0.0) {
+                market_reference = snapshot->price;
+            }
+        }
+        if (mark_price <= 0.0) {
+            mark_price = current_mark_price(step_state, request.symbol);
+        }
+        if (market_reference <= 0.0) {
+            market_reference = current_reference_price(step_state, request.symbol);
+        }
+        if (mark_price > 0.0 &&
+            market_reference > 0.0 &&
+            std::abs(market_reference - mark_price) / mark_price > spec.market_take_bound + kEpsilon) {
+            reject = Contracts::OrderRejectInfo{
+                Contracts::OrderRejectInfo::Code::MarketTakeBoundExceeded,
+                "market order exceeds marketTakeBound" };
+            return false;
+        }
+    }
+
+    if (spec.trigger_protect > 0.0) {
+        double mark_price = 0.0;
+        double index_price = 0.0;
+        if (snapshot != nullptr) {
+            mark_price = snapshot->has_mark_price ? snapshot->mark_price : 0.0;
+            index_price = snapshot->has_index_price ? snapshot->index_price : 0.0;
+        }
+        if (mark_price <= 0.0) {
+            mark_price = current_mark_price(step_state, request.symbol);
+        }
+        if (index_price <= 0.0) {
+            index_price = current_index_price(step_state, request.symbol);
+        }
+        if (mark_price > 0.0 &&
+            std::abs(index_price) > kEpsilon &&
+            std::abs(mark_price - index_price) / std::abs(index_price) > spec.trigger_protect + kEpsilon) {
+            reject = Contracts::OrderRejectInfo{
+                Contracts::OrderRejectInfo::Code::TriggerProtectExceeded,
+                "order blocked by triggerProtect" };
+            return false;
+        }
+    }
+
+    return true;
 }
 
 } // namespace
@@ -792,6 +1066,13 @@ bool OrderEntryService::Execute(
         !validate_filters(step_state, request, quantity, reject)) {
         return false;
     }
+    if (!validate_perp_protection_constraints(runtime_state, step_state, request, reject)) {
+        return false;
+    }
+    Account::SelfTradePreventionMode effective_stp_mode = Account::SelfTradePreventionMode::None;
+    if (!resolve_effective_stp_mode(step_state, request, effective_stp_mode, reject)) {
+        return false;
+    }
 
     if (request.instrument_type == QTrading::Dto::Trading::InstrumentType::Spot) {
         if (request.side == QTrading::Dto::Trading::OrderSide::Sell) {
@@ -839,6 +1120,29 @@ bool OrderEntryService::Execute(
         }
     }
     if (request.instrument_type == QTrading::Dto::Trading::InstrumentType::Perp) {
+        if (request.kind == Contracts::OrderCommandKind::PerpClosePosition) {
+            if (!request.close_position || request.reduce_only || request.quantity > kEpsilon) {
+                reject = Contracts::OrderRejectInfo{
+                    Contracts::OrderRejectInfo::Code::ClosePositionInvalidParameters,
+                    "invalid closePosition parameter combination" };
+                return false;
+            }
+            if (!runtime_state.hedge_mode &&
+                request.position_side != QTrading::Dto::Trading::PositionSide::Both) {
+                reject = Contracts::OrderRejectInfo{
+                    Contracts::OrderRejectInfo::Code::ClosePositionInvalidParameters,
+                    "one-way closePosition requires BOTH position side" };
+                return false;
+            }
+            if (runtime_state.hedge_mode &&
+                request.position_side == QTrading::Dto::Trading::PositionSide::Both) {
+                reject = Contracts::OrderRejectInfo{
+                    Contracts::OrderRejectInfo::Code::HedgeModePositionSideRequired,
+                    "hedge mode requires explicit position side for closePosition" };
+                return false;
+            }
+        }
+
         if (runtime_state.hedge_mode) {
             if (request.kind != Contracts::OrderCommandKind::PerpClosePosition &&
                 request.position_side == QTrading::Dto::Trading::PositionSide::Both) {
@@ -903,22 +1207,22 @@ bool OrderEntryService::Execute(
             }
         }
     }
-    if (request.stp_mode != static_cast<int>(Account::SelfTradePreventionMode::None)) {
-        const auto stp_mode = static_cast<Account::SelfTradePreventionMode>(request.stp_mode);
-        const bool has_conflict = std::any_of(
-            runtime_state.orders.begin(),
-            runtime_state.orders.end(),
-            [&](const QTrading::dto::Order& order) {
-                return is_self_trade_conflict(order, request);
-            });
-        if (has_conflict) {
-            if (stp_mode == Account::SelfTradePreventionMode::ExpireTaker) {
+    if (effective_stp_mode != Account::SelfTradePreventionMode::None) {
+        if (effective_stp_mode == Account::SelfTradePreventionMode::ExpireTaker) {
+            const bool has_conflict = std::any_of(
+                runtime_state.orders.begin(),
+                runtime_state.orders.end(),
+                [&](const QTrading::dto::Order& order) {
+                    return is_self_trade_conflict(order, request);
+                });
+            if (has_conflict) {
                 reject = Contracts::OrderRejectInfo{
                     Contracts::OrderRejectInfo::Code::StpExpiredTaker,
                     "self trade prevention rejected incoming order" };
                 return false;
             }
-
+        }
+        else {
             const size_t removed = remove_orders_if(
                 runtime_state,
                 step_state,
@@ -927,12 +1231,12 @@ bool OrderEntryService::Execute(
                 });
             if (removed > 0) {
                 ++step_state.account_state_version;
-            }
-            if (stp_mode == Account::SelfTradePreventionMode::ExpireBoth) {
-                reject = Contracts::OrderRejectInfo{
-                    Contracts::OrderRejectInfo::Code::StpExpiredBoth,
-                    "self trade prevention canceled resting order and rejected incoming order" };
-                return false;
+                if (effective_stp_mode == Account::SelfTradePreventionMode::ExpireBoth) {
+                    reject = Contracts::OrderRejectInfo{
+                        Contracts::OrderRejectInfo::Code::StpExpiredBoth,
+                        "self trade prevention canceled resting order and rejected incoming order" };
+                    return false;
+                }
             }
         }
     }
@@ -942,6 +1246,28 @@ bool OrderEntryService::Execute(
             "duplicate client order id" };
         return false;
     }
+    if (request.instrument_type == QTrading::Dto::Trading::InstrumentType::Perp &&
+        !request.reduce_only &&
+        !request.close_position) {
+        const auto perp = account.get_perp_balance();
+        const double position_initial_margin = std::max(
+            std::max(0.0, perp.PositionInitialMargin),
+            sum_perp_position_initial_margin(runtime_state));
+        const double available = perp.MarginBalance -
+            position_initial_margin -
+            runtime_state.perp_open_order_initial_margin;
+        const double required = estimate_added_perp_open_order_margin(
+            runtime_state,
+            step_state,
+            request,
+            quantity);
+        if (required > available + kEpsilon) {
+            reject = Contracts::OrderRejectInfo{
+                Contracts::OrderRejectInfo::Code::PerpInsufficientMargin,
+                "insufficient perp margin" };
+            return false;
+        }
+    }
 
     if (request.instrument_type == QTrading::Dto::Trading::InstrumentType::Perp &&
         !request.reduce_only &&
@@ -949,7 +1275,7 @@ bool OrderEntryService::Execute(
         runtime_state.simulation_config.simulator_risk_overlay_enabled &&
         runtime_state.simulation_config.basis_stress_blocks_opening_orders &&
         runtime_state.simulation_config.basis_stress_bps > 0.0) {
-        const auto basis_bps = current_basis_bps(runtime_state, request.symbol);
+        const auto basis_bps = current_basis_bps(runtime_state, step_state, request.symbol);
         if (basis_bps.has_value() && *basis_bps >= runtime_state.simulation_config.basis_stress_bps) {
             ++runtime_state.basis_stress_blocked_orders_total;
             reject = Contracts::OrderRejectInfo{
@@ -969,7 +1295,7 @@ bool OrderEntryService::Execute(
     order.reduce_only = request.reduce_only;
     order.instrument_type = request.instrument_type;
     order.client_order_id = request.client_order_id;
-    order.stp_mode = request.stp_mode;
+    order.stp_mode = static_cast<int>(effective_stp_mode);
     order.close_position = request.close_position;
     order.quote_order_qty = request.quote_order_qty;
     const auto added_symbol_id = try_resolve_order_symbol_id(step_state, order.symbol);

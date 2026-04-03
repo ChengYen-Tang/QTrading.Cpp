@@ -68,6 +68,10 @@ public:
 
     void set_symbol_leverage(const std::string& symbol, double new_leverage) override;
     double get_symbol_leverage(const std::string& symbol) const override;
+    void set_spot_symbol_fee_rate(const std::string& symbol, double maker_fee_rate, double taker_fee_rate);
+    void set_perp_symbol_fee_rate(const std::string& symbol, double maker_fee_rate, double taker_fee_rate);
+    void set_perp_symbol_liquidation_fee_rate(const std::string& symbol, double liquidation_fee_rate);
+    void clear_symbol_fee_rate_overrides(const std::string& symbol);
     /// Applies simulation config knobs used by rebuilt kernels/builders.
     void apply_simulation_config(const SimulationConfig& config);
     const SimulationConfig& simulation_config() const;

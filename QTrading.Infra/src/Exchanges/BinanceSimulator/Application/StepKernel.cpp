@@ -20,6 +20,7 @@
 #include "Exchanges/BinanceSimulator/Domain/FundingApplyOrchestration.hpp"
 #include "Exchanges/BinanceSimulator/Domain/FundingEligibilityDecision.hpp"
 #include "Exchanges/BinanceSimulator/Domain/LiquidationExecution.hpp"
+#include "Exchanges/BinanceSimulator/Domain/MaintenanceMarginModel.hpp"
 #include "Exchanges/BinanceSimulator/Domain/MatchingEngine.hpp"
 #include "Exchanges/BinanceSimulator/Domain/OrderEntryService.hpp"
 #include "Exchanges/BinanceSimulator/Domain/ReferencePriceResolver.hpp"
@@ -625,7 +626,13 @@ void refresh_perp_mark_state(
         }
 
         const double direction = position.is_long ? 1.0 : -1.0;
-        total_unrealized += (reference_price - position.entry_price) * position.quantity * direction;
+        position.unrealized_pnl = (reference_price - position.entry_price) * position.quantity * direction;
+        position.notional = std::abs(reference_price * position.quantity);
+        position.maintenance_margin = Domain::ComputeMaintenanceMarginForSymbol(
+            position.notional,
+            step_state,
+            symbol_id);
+        total_unrealized += position.unrealized_pnl;
         total_position_initial_margin += position.initial_margin;
         total_maintenance_margin += position.maintenance_margin;
     }
@@ -865,11 +872,19 @@ void emit_account_position_order_events(
 
     auto fee_rate_for_fill = [&](const Domain::MatchFill& fill) {
         if (fill.instrument_type == QTrading::Dto::Trading::InstrumentType::Spot) {
+            const auto symbol_it = runtime_state.spot_symbol_fee_overrides.find(fill.symbol);
+            if (symbol_it != runtime_state.spot_symbol_fee_overrides.end()) {
+                return fill.is_taker ? symbol_it->second.taker_fee_rate : symbol_it->second.maker_fee_rate;
+            }
             auto spot_it = ::spot_vip_fee_rates.find(runtime_state.vip_level);
             if (spot_it == ::spot_vip_fee_rates.end()) {
                 spot_it = ::spot_vip_fee_rates.find(0);
             }
             return fill.is_taker ? spot_it->second.taker_fee_rate : spot_it->second.maker_fee_rate;
+        }
+        const auto symbol_it = runtime_state.perp_symbol_fee_overrides.find(fill.symbol);
+        if (symbol_it != runtime_state.perp_symbol_fee_overrides.end()) {
+            return fill.is_taker ? symbol_it->second.taker_fee_rate : symbol_it->second.maker_fee_rate;
         }
         auto perp_it = ::vip_fee_rates.find(runtime_state.vip_level);
         if (perp_it == ::vip_fee_rates.end()) {
@@ -1358,7 +1373,7 @@ bool StepKernel::run_step() const
                     orders_maybe_changed = true;
                     positions_maybe_changed = true;
                 }
-                Domain::FillSettlementEngine::Apply(runtime_state, exchange_.account_state(), fills);
+                Domain::FillSettlementEngine::Apply(runtime_state, exchange_.account_state(), step_state, fills);
                 if (runtime_state.simulation_config.funding_apply_timing ==
                     Contracts::FundingApplyTiming::AfterMatching) {
                     if (need_funding_apply_snapshot) {

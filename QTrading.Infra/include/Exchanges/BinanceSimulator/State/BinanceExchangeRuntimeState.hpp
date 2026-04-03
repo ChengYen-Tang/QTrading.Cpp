@@ -20,6 +20,11 @@
 
 namespace QTrading::Infra::Exchanges::BinanceSim::State {
 
+struct SymbolFeeRateOverride {
+    double maker_fee_rate{ 0.0 };
+    double taker_fee_rate{ 0.0 };
+};
+
 struct PositionIndexKey {
     size_t symbol_id{ 0 };
     QTrading::Dto::Trading::InstrumentType instrument_type{ QTrading::Dto::Trading::InstrumentType::Spot };
@@ -70,6 +75,10 @@ struct BinanceExchangeRuntimeState {
     std::vector<Contracts::AsyncOrderAck> async_order_acks;
     /// Per-symbol leverage overrides exposed through the public facade.
     std::unordered_map<std::string, double> symbol_leverage;
+    /// Optional per-symbol spot maker/taker fee-rate overrides.
+    std::unordered_map<std::string, SymbolFeeRateOverride> spot_symbol_fee_overrides;
+    /// Optional per-symbol perp maker/taker fee-rate overrides.
+    std::unordered_map<std::string, SymbolFeeRateOverride> perp_symbol_fee_overrides;
     /// Spot open-order margin reservation cached from the current order book.
     double spot_open_order_initial_margin{ 0.0 };
     /// Perp open-order margin reservation cached from the current order book.

@@ -16,6 +16,7 @@
 #include "Dto/Market/Binance/FundingRate.hpp"
 #include "Dto/Order.hpp"
 #include "Dto/Position.hpp"
+#include "Exchanges/BinanceSimulator/Account/Config.hpp"
 #include "Exchanges/BinanceSimulator/Contracts/BinanceExchangeDiagnostics.hpp"
 #include "Exchanges/BinanceSimulator/Contracts/BinanceExchangeRuntimeTypes.hpp"
 #include "Exchanges/BinanceSimulator/Domain/MatchingEngine.hpp"
@@ -62,6 +63,8 @@ struct StepKernelState {
     std::unordered_map<std::string, size_t> symbol_to_id;
     std::vector<QTrading::Dto::Trading::InstrumentType> symbol_instrument_type_by_id;
     std::vector<QTrading::Dto::Trading::InstrumentSpec> symbol_spec_by_id;
+    /// Optional symbol-level maintenance brackets; empty entry falls back to global `margin_tiers`.
+    std::vector<std::vector<MarginTier>> symbol_maintenance_margin_tiers_by_id;
     std::shared_ptr<const std::vector<std::string>> symbols_shared;
     std::vector<MarketData> market_data;
     std::vector<FundingRateData> funding_data_pool;

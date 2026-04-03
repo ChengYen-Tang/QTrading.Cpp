@@ -9,7 +9,9 @@
 
 #include "Exchanges/BinanceSimulator/Account/Account.hpp"
 #include "Exchanges/BinanceSimulator/Account/Config.hpp"
+#include "Exchanges/BinanceSimulator/Domain/MaintenanceMarginModel.hpp"
 #include "Exchanges/BinanceSimulator/State/BinanceExchangeRuntimeState.hpp"
+#include "Exchanges/BinanceSimulator/State/StepKernelState.hpp"
 
 namespace QTrading::Infra::Exchanges::BinanceSim::Domain {
 namespace {
@@ -27,17 +29,66 @@ double fee_rate_for_fill(
     const MatchFill& fill)
 {
     if (fill.instrument_type == QTrading::Dto::Trading::InstrumentType::Spot) {
+        const auto symbol_it = runtime_state.spot_symbol_fee_overrides.find(fill.symbol);
+        if (symbol_it != runtime_state.spot_symbol_fee_overrides.end()) {
+            return fill.is_taker ? symbol_it->second.taker_fee_rate : symbol_it->second.maker_fee_rate;
+        }
         auto spot_it = ::spot_vip_fee_rates.find(runtime_state.vip_level);
         if (spot_it == ::spot_vip_fee_rates.end()) {
             spot_it = ::spot_vip_fee_rates.find(0);
         }
         return fill.is_taker ? spot_it->second.taker_fee_rate : spot_it->second.maker_fee_rate;
     }
+    const auto symbol_it = runtime_state.perp_symbol_fee_overrides.find(fill.symbol);
+    if (symbol_it != runtime_state.perp_symbol_fee_overrides.end()) {
+        return fill.is_taker ? symbol_it->second.taker_fee_rate : symbol_it->second.maker_fee_rate;
+    }
     auto perp_it = ::vip_fee_rates.find(runtime_state.vip_level);
     if (perp_it == ::vip_fee_rates.end()) {
         perp_it = ::vip_fee_rates.find(0);
     }
     return fill.is_taker ? perp_it->second.taker_fee_rate : perp_it->second.maker_fee_rate;
+}
+
+double resolve_symbol_leverage(
+    const State::BinanceExchangeRuntimeState& runtime_state,
+    const std::string& symbol) noexcept
+{
+    const auto it = runtime_state.symbol_leverage.find(symbol);
+    if (it == runtime_state.symbol_leverage.end() || !(it->second > 0.0)) {
+        return 1.0;
+    }
+    return it->second;
+}
+
+double compute_perp_realized_pnl_for_close(
+    const QTrading::dto::Position& position,
+    double close_quantity,
+    double close_price) noexcept
+{
+    if (!(close_quantity > 0.0) || !(close_price > 0.0)) {
+        return 0.0;
+    }
+    const double direction = position.is_long ? 1.0 : -1.0;
+    return (close_price - position.entry_price) * close_quantity * direction;
+}
+
+void refresh_perp_position_risk_fields(
+    const State::BinanceExchangeRuntimeState& runtime_state,
+    QTrading::dto::Position& position,
+    const State::StepKernelState* step_state,
+    std::optional<size_t> symbol_id) noexcept
+{
+    const double leverage = resolve_symbol_leverage(runtime_state, position.symbol);
+    const double notional = std::max(0.0, position.quantity * position.entry_price);
+    position.leverage = leverage;
+    position.notional = notional;
+    position.initial_margin = notional / leverage;
+    if (step_state != nullptr && symbol_id.has_value()) {
+        position.maintenance_margin = ComputeMaintenanceMarginForSymbol(notional, *step_state, *symbol_id);
+        return;
+    }
+    position.maintenance_margin = ComputeMaintenanceMargin(notional);
 }
 
 void seed_next_position_id_if_needed(State::BinanceExchangeRuntimeState& runtime_state)
@@ -374,6 +425,7 @@ bool remove_position_by_id(
 
 void append_perp_position(
     State::BinanceExchangeRuntimeState& runtime_state,
+    const State::StepKernelState* step_state,
     const MatchFill& fill,
     double quantity,
     bool is_long,
@@ -394,6 +446,7 @@ void append_perp_position(
     created.leverage = 1.0;
     created.fee_rate = fee_rate;
     created.instrument_type = QTrading::Dto::Trading::InstrumentType::Perp;
+    refresh_perp_position_risk_fields(runtime_state, created, step_state, fill.symbol_id);
     runtime_state.positions.emplace_back(std::move(created));
     if (const auto symbol_id = resolve_fill_symbol_id(runtime_state, fill); symbol_id.has_value()) {
         runtime_state.position_symbol_id_by_slot.push_back(*symbol_id);
@@ -479,6 +532,7 @@ bool apply_spot_fill(
 bool apply_perp_fill(
     State::BinanceExchangeRuntimeState& runtime_state,
     Account& account,
+    const State::StepKernelState* step_state,
     const MatchFill& fill)
 {
     const double notional = fill.quantity * fill.price;
@@ -505,14 +559,15 @@ bool apply_perp_fill(
             if (effective <= kEpsilon) {
                 return false;
             }
-            account.apply_perp_wallet_delta(-fee);
+            const double realized_pnl = compute_perp_realized_pnl_for_close(*position, effective, fill.price);
+            account.apply_perp_wallet_delta(realized_pnl - fee);
             const double before_quantity = position->quantity;
             position->quantity = std::max(0.0, position->quantity - effective);
-            position->notional = position->quantity * position->entry_price;
             if (position->quantity <= kEpsilon) {
                 const int closed_id = position->id;
                 return remove_position_by_id(runtime_state, closed_id);
             }
+            refresh_perp_position_risk_fields(runtime_state, *position, step_state, fill_symbol_id);
             return std::abs(position->quantity - before_quantity) > kEpsilon;
         }
 
@@ -520,6 +575,7 @@ bool apply_perp_fill(
         if (!position || !runtime_state.merge_positions_enabled) {
             append_perp_position(
                 runtime_state,
+                step_state,
                 fill,
                 fill.quantity,
                 fill.side == QTrading::Dto::Trading::OrderSide::Buy,
@@ -535,10 +591,10 @@ bool apply_perp_fill(
         }
         position->quantity = after;
         position->is_long = target_is_long;
-        position->notional = position->quantity * position->entry_price;
         position->fee += fee;
         position->fee_rate = fee_rate;
         position->instrument_type = QTrading::Dto::Trading::InstrumentType::Perp;
+        refresh_perp_position_risk_fields(runtime_state, *position, step_state, fill_symbol_id);
         return true;
     }
 
@@ -561,12 +617,21 @@ bool apply_perp_fill(
             return false;
         }
     }
-    account.apply_perp_wallet_delta(-fee);
+    double realized_pnl = 0.0;
+    if (position) {
+        const double current_signed = position->is_long ? position->quantity : -position->quantity;
+        if (current_signed * signed_fill < 0.0) {
+            const double close_quantity = std::min(std::abs(current_signed), std::abs(signed_fill));
+            realized_pnl = compute_perp_realized_pnl_for_close(*position, close_quantity, fill.price);
+        }
+    }
+    account.apply_perp_wallet_delta(realized_pnl - fee);
 
     if (!position || (runtime_state.merge_positions_enabled == false &&
             ((position->is_long && signed_fill > 0.0) || (!position->is_long && signed_fill < 0.0)))) {
         append_perp_position(
             runtime_state,
+            step_state,
             fill,
             std::abs(signed_fill),
             signed_fill > 0.0,
@@ -593,19 +658,18 @@ bool apply_perp_fill(
 
     position->quantity = std::abs(next_signed);
     position->is_long = next_signed > 0.0;
-    position->notional = position->quantity * position->entry_price;
     position->fee += fee;
     position->fee_rate = fee_rate;
     position->instrument_type = QTrading::Dto::Trading::InstrumentType::Perp;
+    refresh_perp_position_risk_fields(runtime_state, *position, step_state, fill_symbol_id);
     enqueue_position_for_lookup(runtime_state, *position);
     return true;
 }
 
-} // namespace
-
-void FillSettlementEngine::Apply(
+void apply_impl(
     State::BinanceExchangeRuntimeState& runtime_state,
     Account& account,
+    const State::StepKernelState* step_state,
     const std::vector<MatchFill>& fills)
 {
     rebuild_position_index(runtime_state);
@@ -618,11 +682,30 @@ void FillSettlementEngine::Apply(
             positions_mutated = apply_spot_fill(runtime_state, account, fill) || positions_mutated;
             continue;
         }
-        positions_mutated = apply_perp_fill(runtime_state, account, fill) || positions_mutated;
+        positions_mutated = apply_perp_fill(runtime_state, account, step_state, fill) || positions_mutated;
     }
     if (positions_mutated) {
         ++runtime_state.positions_version;
     }
+}
+
+} // namespace
+
+void FillSettlementEngine::Apply(
+    State::BinanceExchangeRuntimeState& runtime_state,
+    Account& account,
+    const std::vector<MatchFill>& fills)
+{
+    apply_impl(runtime_state, account, nullptr, fills);
+}
+
+void FillSettlementEngine::Apply(
+    State::BinanceExchangeRuntimeState& runtime_state,
+    Account& account,
+    const State::StepKernelState& step_state,
+    const std::vector<MatchFill>& fills)
+{
+    apply_impl(runtime_state, account, &step_state, fills);
 }
 
 } // namespace QTrading::Infra::Exchanges::BinanceSim::Domain

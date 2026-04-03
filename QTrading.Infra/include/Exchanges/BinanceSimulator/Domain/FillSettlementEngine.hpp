@@ -10,6 +10,7 @@ class Account;
 
 namespace QTrading::Infra::Exchanges::BinanceSim::State {
 struct BinanceExchangeRuntimeState;
+struct StepKernelState;
 }
 
 namespace QTrading::Infra::Exchanges::BinanceSim::Domain {
@@ -21,6 +22,9 @@ public:
     /// Applies matched fills to balances, positions, fees, and order visibility.
     static void Apply(State::BinanceExchangeRuntimeState& runtime_state, Account& account,
         const std::vector<MatchFill>& fills);
+    /// Applies matched fills with symbol metadata for symbol-driven risk updates.
+    static void Apply(State::BinanceExchangeRuntimeState& runtime_state, Account& account,
+        const State::StepKernelState& step_state, const std::vector<MatchFill>& fills);
 };
 
 } // namespace QTrading::Infra::Exchanges::BinanceSim::Domain

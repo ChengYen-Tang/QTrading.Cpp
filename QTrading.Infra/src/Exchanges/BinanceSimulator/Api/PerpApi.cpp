@@ -35,10 +35,25 @@ bool PerpApi::place_close_position_order(const std::string& symbol,
 
 void PerpApi::close_position(const std::string& symbol, double price)
 {
+    if (place_close_position_order(
+            symbol,
+            QTrading::Dto::Trading::OrderSide::Sell,
+            QTrading::Dto::Trading::PositionSide::Both,
+            price)) {
+        return;
+    }
+
+    // Hedge-mode fallback for convenience close-by-symbol API:
+    // attempt closing each side explicitly when BOTH is rejected.
     (void)place_close_position_order(
         symbol,
         QTrading::Dto::Trading::OrderSide::Sell,
-        QTrading::Dto::Trading::PositionSide::Both,
+        QTrading::Dto::Trading::PositionSide::Long,
+        price);
+    (void)place_close_position_order(
+        symbol,
+        QTrading::Dto::Trading::OrderSide::Buy,
+        QTrading::Dto::Trading::PositionSide::Short,
         price);
 }
 
@@ -90,16 +105,30 @@ bool is_spot_symbol(
         QTrading::Dto::Trading::InstrumentType::Spot;
 }
 
+const std::vector<MarginTier>& resolve_symbol_margin_tiers(
+    const State::StepKernelState& step_state,
+    size_t symbol_id) noexcept
+{
+    if (symbol_id < step_state.symbol_maintenance_margin_tiers_by_id.size()) {
+        const auto& symbol_tiers = step_state.symbol_maintenance_margin_tiers_by_id[symbol_id];
+        if (!symbol_tiers.empty()) {
+            return symbol_tiers;
+        }
+    }
+    return ::margin_tiers;
+}
+
 double symbol_max_leverage(
     const State::StepKernelState& step_state,
     const State::BinanceExchangeRuntimeState& runtime_state,
     const std::string& symbol)
 {
     double max_allowed = std::numeric_limits<double>::max();
+    size_t symbol_id = std::numeric_limits<size_t>::max();
 
     const auto it = step_state.symbol_to_id.find(symbol);
     if (it != step_state.symbol_to_id.end()) {
-        const size_t symbol_id = it->second;
+        symbol_id = it->second;
         if (symbol_id < step_state.symbol_spec_by_id.size()) {
             const double spec_max = step_state.symbol_spec_by_id[symbol_id].max_leverage;
             if (spec_max > 0.0 && std::isfinite(spec_max)) {
@@ -117,7 +146,10 @@ double symbol_max_leverage(
         symbol_notional += std::abs(position.notional);
     }
 
-    for (const auto& tier : ::margin_tiers) {
+    const auto& tiers = symbol_id != std::numeric_limits<size_t>::max()
+        ? resolve_symbol_margin_tiers(step_state, symbol_id)
+        : ::margin_tiers;
+    for (const auto& tier : tiers) {
         if (symbol_notional <= tier.notional_upper) {
             max_allowed = std::min(max_allowed, tier.max_leverage);
             break;
@@ -157,6 +189,79 @@ double BinanceExchange::get_symbol_leverage(const std::string& symbol) const
         return 1.0;
     }
     return it->second;
+}
+
+void BinanceExchange::set_spot_symbol_fee_rate(
+    const std::string& symbol,
+    double maker_fee_rate,
+    double taker_fee_rate)
+{
+    if (!(maker_fee_rate >= 0.0) ||
+        !(taker_fee_rate >= 0.0) ||
+        !std::isfinite(maker_fee_rate) ||
+        !std::isfinite(taker_fee_rate)) {
+        return;
+    }
+    runtime_state_->spot_symbol_fee_overrides[symbol] = State::SymbolFeeRateOverride{
+        maker_fee_rate,
+        taker_fee_rate };
+}
+
+void BinanceExchange::set_perp_symbol_fee_rate(
+    const std::string& symbol,
+    double maker_fee_rate,
+    double taker_fee_rate)
+{
+    if (!(maker_fee_rate >= 0.0) ||
+        !(taker_fee_rate >= 0.0) ||
+        !std::isfinite(maker_fee_rate) ||
+        !std::isfinite(taker_fee_rate)) {
+        return;
+    }
+    runtime_state_->perp_symbol_fee_overrides[symbol] = State::SymbolFeeRateOverride{
+        maker_fee_rate,
+        taker_fee_rate };
+}
+
+void BinanceExchange::set_perp_symbol_liquidation_fee_rate(
+    const std::string& symbol,
+    double liquidation_fee_rate)
+{
+    if (!(liquidation_fee_rate >= 0.0) ||
+        !std::isfinite(liquidation_fee_rate)) {
+        return;
+    }
+    const auto symbol_it = step_kernel_state_->symbol_to_id.find(symbol);
+    if (symbol_it == step_kernel_state_->symbol_to_id.end()) {
+        return;
+    }
+    const size_t symbol_id = symbol_it->second;
+    if (symbol_id >= step_kernel_state_->symbol_spec_by_id.size()) {
+        return;
+    }
+    auto& spec = step_kernel_state_->symbol_spec_by_id[symbol_id];
+    if (spec.type != QTrading::Dto::Trading::InstrumentType::Perp) {
+        return;
+    }
+    spec.liquidation_fee_rate = liquidation_fee_rate;
+}
+
+void BinanceExchange::clear_symbol_fee_rate_overrides(const std::string& symbol)
+{
+    runtime_state_->spot_symbol_fee_overrides.erase(symbol);
+    runtime_state_->perp_symbol_fee_overrides.erase(symbol);
+    const auto symbol_it = step_kernel_state_->symbol_to_id.find(symbol);
+    if (symbol_it == step_kernel_state_->symbol_to_id.end()) {
+        return;
+    }
+    const size_t symbol_id = symbol_it->second;
+    if (symbol_id >= step_kernel_state_->symbol_spec_by_id.size()) {
+        return;
+    }
+    auto& spec = step_kernel_state_->symbol_spec_by_id[symbol_id];
+    if (spec.type == QTrading::Dto::Trading::InstrumentType::Perp) {
+        spec.liquidation_fee_rate = -1.0;
+    }
 }
 
 } // namespace QTrading::Infra::Exchanges::BinanceSim

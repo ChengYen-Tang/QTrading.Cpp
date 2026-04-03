@@ -33,6 +33,12 @@ struct OrderRejectInfo {
         SpotNoInventory = 24,
         SpotQuantityExceedsInventory = 25,
         SpotNoLongPositionToClose = 26,
+        PerpInsufficientMargin = 27,
+        ClosePositionInvalidParameters = 28,
+        TriggerProtectExceeded = 29,
+        MarketTakeBoundExceeded = 30,
+        InvalidStpMode = 31,
+        StpModeNotAllowed = 32,
     };
 
     /// Machine-readable reject category.

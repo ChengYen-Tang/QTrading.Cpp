@@ -14,6 +14,7 @@ add_library(QTrading.Infra.Library STATIC
   Exchanges/BinanceSimulator/Domain/FillSettlementEngine.cpp
   Exchanges/BinanceSimulator/Domain/LiquidationEligibilityDecision.cpp
   Exchanges/BinanceSimulator/Domain/LiquidationExecution.cpp
+  Exchanges/BinanceSimulator/Domain/MaintenanceMarginModel.cpp
   Exchanges/BinanceSimulator/Domain/MatchingEngine.cpp
   Exchanges/BinanceSimulator/Domain/OrderEntryService.cpp
   Exchanges/BinanceSimulator/Domain/ReferencePriceResolver.cpp

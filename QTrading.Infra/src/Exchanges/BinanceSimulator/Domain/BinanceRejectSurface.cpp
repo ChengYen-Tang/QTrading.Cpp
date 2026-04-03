@@ -20,6 +20,9 @@ std::pair<int, std::string> BinanceRejectSurface::MapToBinanceError(
     case Code::StpExpiredTaker:
     case Code::StpExpiredBoth:
         return { -2010, "Order would trigger self-trade prevention." };
+    case Code::InvalidStpMode:
+    case Code::StpModeNotAllowed:
+        return { -1130, "Data sent for parameter 'selfTradePreventionMode' is not valid." };
     case Code::SpotHedgeModeUnsupported:
     case Code::HedgeModePositionSideRequired:
         return { -4061, "Order's position side does not match user's setting." };
@@ -41,7 +44,15 @@ std::pair<int, std::string> BinanceRejectSurface::MapToBinanceError(
     case Code::PercentPriceAboveBound:
     case Code::PercentPriceBelowBound:
         return { -1013, "Filter failure: PERCENT_PRICE" };
+    case Code::TriggerProtectExceeded:
+        return { -2021, "Order would immediately trigger." };
+    case Code::MarketTakeBoundExceeded:
+        return { -4131, "The counterparty's best price does not meet the PERCENT_PRICE filter limit." };
     case Code::SpotInsufficientCash:
+    case Code::PerpInsufficientMargin:
+        return { -2019, "Margin is insufficient." };
+    case Code::ClosePositionInvalidParameters:
+        return { -1106, "Parameter sent when not required." };
     case Code::SpotNoInventory:
     case Code::SpotQuantityExceedsInventory:
     case Code::SpotNoLongPositionToClose:

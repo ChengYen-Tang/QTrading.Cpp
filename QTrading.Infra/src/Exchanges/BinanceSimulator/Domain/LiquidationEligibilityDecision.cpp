@@ -6,6 +6,7 @@
 
 #include "Dto/Market/Binance/MultiKline.hpp"
 #include "Exchanges/BinanceSimulator/Account/Account.hpp"
+#include "Exchanges/BinanceSimulator/Domain/MaintenanceMarginModel.hpp"
 #include "Exchanges/BinanceSimulator/State/BinanceExchangeRuntimeState.hpp"
 #include "Exchanges/BinanceSimulator/State/StepKernelState.hpp"
 
@@ -13,22 +14,6 @@ namespace QTrading::Infra::Exchanges::BinanceSim::Domain {
 namespace {
 
 constexpr double kEpsilon = 1e-12;
-constexpr double kTier1Cap = 50'000.0;
-constexpr double kTier1Rate = 0.004;
-constexpr double kTier2Rate = 0.005;
-
-double compute_maintenance_margin(double notional) noexcept
-{
-    if (!(notional > 0.0)) {
-        return 0.0;
-    }
-    if (notional <= kTier1Cap) {
-        return notional * kTier1Rate;
-    }
-    const double tier1_maint = kTier1Cap * kTier1Rate;
-    const double tier2_notional = notional - kTier1Cap;
-    return tier1_maint + (tier2_notional * kTier2Rate);
-}
 
 } // namespace
 
@@ -80,7 +65,7 @@ LiquidationHealthSnapshot LiquidationEligibilityDecision::Evaluate(
         const double direction = position.is_long ? 1.0 : -1.0;
         const double unrealized = (mark - position.entry_price) * position.quantity * direction;
         const double notional = std::abs(position.quantity * mark);
-        const double maintenance = compute_maintenance_margin(notional);
+        const double maintenance = ComputeMaintenanceMarginForSymbol(notional, step_state, symbol_id);
         total_unrealized += unrealized;
         total_maintenance += maintenance;
         if (out.worst_loss_perp_position_index < 0 || unrealized < worst_unrealized) {

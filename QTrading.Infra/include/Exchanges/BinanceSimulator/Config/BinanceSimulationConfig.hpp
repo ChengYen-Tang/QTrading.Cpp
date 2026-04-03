@@ -59,6 +59,10 @@ struct SimulationConfig {
     bool simulator_risk_overlay_enabled{ true };
     bool basis_risk_guard_enabled{ false };
     bool basis_stress_blocks_opening_orders{ true };
+    // Binance-aligned default: no pre-liquidation warning-stage reduction.
+    // Set >1.0 to enable simulator-specific warning-zone overlay.
+    double liquidation_warning_maintenance_multiplier{ 1.0 };
+    double liquidation_warning_reduction_ratio{ 0.5 };
 };
 
 } // namespace QTrading::Infra::Exchanges::BinanceSim::Config

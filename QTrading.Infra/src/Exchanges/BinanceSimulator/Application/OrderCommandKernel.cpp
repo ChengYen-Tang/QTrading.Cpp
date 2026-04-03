@@ -111,46 +111,6 @@ bool OrderCommandKernel::PlacePerpClosePosition(const std::string& symbol, QTrad
     QTrading::Dto::Trading::PositionSide position_side, double price,
     const std::string& client_order_id, Account::SelfTradePreventionMode stp_mode) const
 {
-    if (position_side == QTrading::Dto::Trading::PositionSide::Both &&
-        exchange_.runtime_state_->hedge_mode) {
-        bool accepted = false;
-        const bool has_long = std::any_of(
-            exchange_.runtime_state_->positions.begin(),
-            exchange_.runtime_state_->positions.end(),
-            [&](const QTrading::dto::Position& position) {
-                return position.instrument_type == QTrading::Dto::Trading::InstrumentType::Perp &&
-                    position.symbol == symbol &&
-                    position.is_long;
-            });
-        const bool has_short = std::any_of(
-            exchange_.runtime_state_->positions.begin(),
-            exchange_.runtime_state_->positions.end(),
-            [&](const QTrading::dto::Position& position) {
-                return position.instrument_type == QTrading::Dto::Trading::InstrumentType::Perp &&
-                    position.symbol == symbol &&
-                    !position.is_long;
-            });
-        if (has_long) {
-            accepted |= PlacePerpClosePosition(
-                symbol,
-                QTrading::Dto::Trading::OrderSide::Sell,
-                QTrading::Dto::Trading::PositionSide::Long,
-                price,
-                client_order_id,
-                stp_mode);
-        }
-        if (has_short) {
-            accepted |= PlacePerpClosePosition(
-                symbol,
-                QTrading::Dto::Trading::OrderSide::Buy,
-                QTrading::Dto::Trading::PositionSide::Short,
-                price,
-                client_order_id,
-                stp_mode);
-        }
-        return accepted;
-    }
-
     Contracts::OrderCommandRequest request{};
     request.kind = Contracts::OrderCommandKind::PerpClosePosition;
     request.instrument_type = QTrading::Dto::Trading::InstrumentType::Perp;

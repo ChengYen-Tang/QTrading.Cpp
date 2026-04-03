@@ -17,6 +17,8 @@ struct InstrumentSpec {
     bool allow_short{ true };
     bool funding_enabled{ true };
     bool maintenance_margin_enabled{ true };
+    // Futures symbol-level liquidation fee. Negative means "unset" and falls back to simulator defaults.
+    double liquidation_fee_rate{ -1.0 };
 
     // PRICE_FILTER
     double min_price{ 0.0 };
@@ -47,6 +49,18 @@ struct InstrumentSpec {
     double bid_multiplier_down{ 0.0 };
     double ask_multiplier_up{ 0.0 };
     double ask_multiplier_down{ 0.0 };
+
+    // Futures symbol-level protection constraints.
+    // trigger_protect is a max relative divergence between mark and index prices.
+    // market_take_bound is a max relative divergence between market execution reference and mark.
+    double trigger_protect{ 0.0 };
+    double market_take_bound{ 0.0 };
+
+    // Symbol-level STP policy.
+    // default_stp_mode follows Account::SelfTradePreventionMode numeric values.
+    // allowed_stp_modes_mask bit i enables mode i (0=None,1=ExpireTaker,2=ExpireMaker,3=ExpireBoth).
+    int default_stp_mode{ 0 };
+    uint8_t allowed_stp_modes_mask{ 0x0F };
 };
 
 inline InstrumentSpec SpotInstrumentSpec()
