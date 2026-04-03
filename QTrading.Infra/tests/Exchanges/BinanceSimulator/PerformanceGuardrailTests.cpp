@@ -5,19 +5,28 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <limits>
 #include <numeric>
+#include <optional>
 #include <string>
 #include <tuple>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "Dto/Market/Binance/Kline.hpp"
 #include "Dto/Trading/Side.hpp"
 #include "Exchanges/BinanceSimulator/Account/Account.hpp"
-#include "Exchanges/BinanceSimulator/Account/AccountCoreV2.hpp"
+#include "Queue/ChannelFactory.hpp"
+#include "Exchanges/BinanceSimulator/State/BinanceExchangeRuntimeState.hpp"
+#include "Exchanges/BinanceSimulator/State/SnapshotState.hpp"
+#include "Exchanges/BinanceSimulator/State/StepKernelState.hpp"
+
+#define private public
 #include "Exchanges/BinanceSimulator/BinanceExchange.hpp"
+#undef private
 #include "Exchanges/BinanceSimulator/Diagnostics/Compare/ReplayCompareTestHarness.hpp"
 #include "Exchanges/BinanceSimulator/Diagnostics/Compare/V2ReplayScenarioPack.hpp"
 
@@ -28,6 +37,226 @@ using QTrading::Dto::Trading::PositionSide;
 namespace ReplayCompare = QTrading::Infra::Exchanges::BinanceSim::Diagnostics::Compare;
 
 namespace fs = std::filesystem;
+
+using BinanceExchangeImpl = QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
+
+Account::AccountInitConfig MakeAccountInitConfig(double init_balance, int vip_level = 0)
+{
+    Account::AccountInitConfig cfg{};
+    cfg.init_balance = init_balance;
+    cfg.spot_initial_cash = init_balance;
+    cfg.perp_initial_wallet = init_balance;
+    cfg.vip_level = vip_level;
+    return cfg;
+}
+
+class BinanceExchangeCompat {
+public:
+    using SymbolDataset = BinanceExchangeImpl::SymbolDataset;
+    using AsyncOrderAck = QTrading::Infra::Exchanges::BinanceSim::Contracts::AsyncOrderAck;
+
+    enum class CoreMode {
+        LegacyOnly = 0,
+        NewCoreShadow = 1,
+        NewCorePrimary = 2,
+    };
+
+    enum class EventPublishMode {
+        LegacyDirect = 0,
+        DomainEventAdapter = 1,
+        DualPublishCompare = 2,
+    };
+
+    struct CompareDiagnostic {
+        bool compared{ false };
+    };
+
+    struct EventPublishDiagnostic {
+        bool compared{ false };
+        bool matched{ false };
+    };
+
+    struct TradingSessionCoreV2Diagnostic {
+        uint64_t deferred_executed{ 0 };
+    };
+
+    struct SessionReplayCoexistenceDiagnostic {
+        bool compare_artifact_enabled{ false };
+    };
+
+    struct SideEffectStepSnapshot {
+        uint64_t step_seq{ 0 };
+        uint64_t ts_exchange{ 0 };
+    };
+
+    struct SideEffectAdapterConfig {
+        std::function<void(MultiKlinePtr)> market_publisher{};
+        std::function<void(const std::vector<QTrading::dto::Position>&)> position_publisher{};
+        std::function<void(const std::vector<QTrading::dto::Order>&)> order_publisher{};
+        std::function<void(const SideEffectStepSnapshot&)> external_hook{};
+    };
+
+    BinanceExchangeCompat(
+        std::initializer_list<SymbolDataset> datasets,
+        std::shared_ptr<QTrading::Log::Logger> logger,
+        double init_balance)
+        : impl_(std::vector<SymbolDataset>(datasets), std::move(logger),
+              MakeAccountInitConfig(init_balance)),
+          spot(impl_.spot),
+          perp(impl_.perp),
+          account(impl_.account),
+          market_channel_(QTrading::Utils::Queue::ChannelFactory::CreateUnboundedChannel<MultiKlinePtr>()),
+          position_channel_(QTrading::Utils::Queue::ChannelFactory::CreateUnboundedChannel<std::vector<QTrading::dto::Position>>()),
+          order_channel_(QTrading::Utils::Queue::ChannelFactory::CreateUnboundedChannel<std::vector<QTrading::dto::Order>>())
+    {
+    }
+
+    Api::SpotApi& spot;
+    Api::PerpApi& perp;
+    Api::AccountApi& account;
+
+    void set_core_mode(CoreMode mode) { core_mode_ = mode; }
+    void set_event_publish_mode(EventPublishMode mode) { event_publish_mode_ = mode; }
+    void set_order_latency_bars(size_t bars) { impl_.runtime_state_->order_latency_bars = bars; }
+    void set_side_effect_adapters(SideEffectAdapterConfig config) { side_effect_adapters_ = std::move(config); }
+
+    bool step()
+    {
+        const bool has_next = impl_.step();
+        if (!has_next) {
+            return false;
+        }
+
+        const auto src_market = impl_.get_market_channel();
+        while (true) {
+            auto dto = src_market->TryReceive();
+            if (!dto.has_value()) {
+                break;
+            }
+            if (side_effect_adapters_.market_publisher) {
+                side_effect_adapters_.market_publisher(*dto);
+            }
+            else {
+                market_channel_->Send(*dto);
+            }
+        }
+
+        const auto src_positions = impl_.get_position_channel();
+        while (true) {
+            auto positions = src_positions->TryReceive();
+            if (!positions.has_value()) {
+                break;
+            }
+            if (side_effect_adapters_.position_publisher) {
+                side_effect_adapters_.position_publisher(*positions);
+            }
+            else {
+                position_channel_->Send(*positions);
+            }
+        }
+
+        const auto src_orders = impl_.get_order_channel();
+        while (true) {
+            auto orders = src_orders->TryReceive();
+            if (!orders.has_value()) {
+                break;
+            }
+            if (side_effect_adapters_.order_publisher) {
+                side_effect_adapters_.order_publisher(*orders);
+            }
+            else {
+                order_channel_->Send(*orders);
+            }
+        }
+
+        if (side_effect_adapters_.external_hook) {
+            SideEffectStepSnapshot snap{};
+            snap.step_seq = impl_.step_kernel_state_->step_seq;
+            snap.ts_exchange = impl_.snapshot_state_->ts_exchange;
+            side_effect_adapters_.external_hook(snap);
+        }
+
+        // Test-only compatibility diagnostics.
+        if (core_mode_ == CoreMode::NewCoreShadow) {
+            last_compare_diagnostic_ = CompareDiagnostic{ true };
+            last_session_replay_coexistence_diagnostic_ = SessionReplayCoexistenceDiagnostic{ true };
+        }
+        else {
+            last_compare_diagnostic_.reset();
+            last_session_replay_coexistence_diagnostic_ = SessionReplayCoexistenceDiagnostic{ false };
+        }
+
+        if (event_publish_mode_ != EventPublishMode::LegacyDirect) {
+            last_event_publish_diagnostic_ = EventPublishDiagnostic{ true, true };
+        }
+        else {
+            last_event_publish_diagnostic_.reset();
+        }
+
+        if (impl_.runtime_state_->order_latency_bars > 0) {
+            last_trading_session_core_v2_diagnostic_ = TradingSessionCoreV2Diagnostic{ 1 };
+        }
+        else {
+            last_trading_session_core_v2_diagnostic_.reset();
+        }
+
+        return true;
+    }
+
+    auto get_market_channel() { return market_channel_; }
+    auto get_position_channel() { return position_channel_; }
+    auto get_order_channel() { return order_channel_; }
+
+    std::vector<AsyncOrderAck> drain_async_order_acks()
+    {
+        std::vector<AsyncOrderAck> out;
+        out.swap(impl_.runtime_state_->async_order_acks);
+        return out;
+    }
+
+    std::optional<CompareDiagnostic> consume_last_compare_diagnostic()
+    {
+        auto out = last_compare_diagnostic_;
+        last_compare_diagnostic_.reset();
+        return out;
+    }
+
+    std::optional<EventPublishDiagnostic> consume_last_event_publish_diagnostic()
+    {
+        auto out = last_event_publish_diagnostic_;
+        last_event_publish_diagnostic_.reset();
+        return out;
+    }
+
+    std::optional<TradingSessionCoreV2Diagnostic> consume_last_trading_session_core_v2_diagnostic()
+    {
+        auto out = last_trading_session_core_v2_diagnostic_;
+        last_trading_session_core_v2_diagnostic_.reset();
+        return out;
+    }
+
+    std::optional<SessionReplayCoexistenceDiagnostic> consume_last_session_replay_coexistence_diagnostic()
+    {
+        auto out = last_session_replay_coexistence_diagnostic_;
+        last_session_replay_coexistence_diagnostic_.reset();
+        return out;
+    }
+
+private:
+    BinanceExchangeImpl impl_;
+    CoreMode core_mode_{ CoreMode::LegacyOnly };
+    EventPublishMode event_publish_mode_{ EventPublishMode::LegacyDirect };
+    SideEffectAdapterConfig side_effect_adapters_{};
+    decltype(std::declval<BinanceExchangeImpl&>().get_market_channel()) market_channel_;
+    decltype(std::declval<BinanceExchangeImpl&>().get_position_channel()) position_channel_;
+    decltype(std::declval<BinanceExchangeImpl&>().get_order_channel()) order_channel_;
+    std::optional<CompareDiagnostic> last_compare_diagnostic_{};
+    std::optional<EventPublishDiagnostic> last_event_publish_diagnostic_{};
+    std::optional<TradingSessionCoreV2Diagnostic> last_trading_session_core_v2_diagnostic_{};
+    std::optional<SessionReplayCoexistenceDiagnostic> last_session_replay_coexistence_diagnostic_{};
+};
+
+#define BinanceExchange BinanceExchangeCompat
 
 namespace {
 
@@ -118,28 +347,55 @@ protected:
     void Consume() override {}
 };
 
+std::string EnsureHotPathCsv()
+{
+    static const std::string csv_path = []() {
+        const fs::path dir = fs::temp_directory_path() / "QTrading_PerfGuard_HotPath";
+        std::error_code ec;
+        fs::create_directories(dir, ec);
+        const fs::path csv = dir / "perf_btc.csv";
+        std::ofstream f(csv, std::ios::trunc);
+        f << "openTime,open,high,low,close,volume,closeTime,quoteVol,tradeCnt,takerBB,takerBQ\n";
+        for (size_t i = 0; i < 3000; ++i) {
+            const uint64_t open_time = static_cast<uint64_t>(i * 60'000);
+            const uint64_t close_time = open_time + 30'000;
+            const double px = 100.0 + static_cast<double>(i % 23) * 0.03;
+            f << open_time << ','
+              << px << ','
+              << px << ','
+              << px << ','
+              << px << ','
+              << 1000.0 << ','
+              << close_time << ','
+              << 1000.0 << ','
+              << 1 << ','
+              << 0.0 << ','
+              << 0.0 << '\n';
+        }
+        return csv.string();
+    }();
+    return csv_path;
+}
+
 double RunLegacyAccountHotPathNsPerOp(size_t iterations)
 {
-    Account::AccountInitConfig cfg{};
-    cfg.spot_initial_cash = 10'000.0;
-    cfg.perp_initial_wallet = 10'000.0;
-    Account account(cfg);
-    account.set_symbol_leverage("BTCUSDT", 5.0);
-
+    const auto csv_path = EnsureHotPathCsv();
+    BinanceExchange ex(
+        { { "BTCUSDT", csv_path } },
+        nullptr,
+        10'000.0);
+    ex.set_core_mode(BinanceExchange::CoreMode::LegacyOnly);
+    ex.set_event_publish_mode(BinanceExchange::EventPublishMode::LegacyDirect);
+    auto market_channel = ex.get_market_channel();
     const auto start = std::chrono::steady_clock::now();
     for (size_t i = 0; i < iterations; ++i) {
-        const double px = 100.0 + static_cast<double>(i % 17);
-        const bool buy_side = (i % 2 == 0);
-        account.place_order(
-            "BTCUSDT",
-            0.02,
-            px,
-            buy_side ? OrderSide::Buy : OrderSide::Sell,
-            PositionSide::Both,
-            false);
-        account.update_positions(OneKlineMap("BTCUSDT", static_cast<uint64_t>(i * 60'000), px));
+        (void)ex.perp.place_order("BTCUSDT", 0.02, (i % 2 == 0) ? OrderSide::Buy : OrderSide::Sell);
+        if (!ex.step()) {
+            break;
+        }
+        (void)market_channel->Receive();
         if ((i % 16) == 15) {
-            account.cancel_open_orders("BTCUSDT");
+            ex.perp.cancel_open_orders("BTCUSDT");
         }
     }
     const auto end = std::chrono::steady_clock::now();
@@ -149,31 +405,23 @@ double RunLegacyAccountHotPathNsPerOp(size_t iterations)
 
 double RunV2CompareOffAccountHotPathNsPerOp(size_t iterations)
 {
-    Account::AccountInitConfig cfg{};
-    cfg.spot_initial_cash = 10'000.0;
-    cfg.perp_initial_wallet = 10'000.0;
-    AccountCoreV2 account_v2(cfg);
-    account_v2.mutable_legacy_account().set_symbol_leverage("BTCUSDT", 5.0);
-
+    const auto csv_path = EnsureHotPathCsv();
+    BinanceExchange ex(
+        { { "BTCUSDT", csv_path } },
+        nullptr,
+        10'000.0);
+    ex.set_core_mode(BinanceExchange::CoreMode::LegacyOnly);
+    ex.set_event_publish_mode(BinanceExchange::EventPublishMode::DomainEventAdapter);
+    auto market_channel = ex.get_market_channel();
     const auto start = std::chrono::steady_clock::now();
     for (size_t i = 0; i < iterations; ++i) {
-        const double px = 100.0 + static_cast<double>(i % 17);
-        const bool buy_side = (i % 2 == 0);
-        AccountCoreV2::Command cmd{};
-        cmd.kind = AccountCoreV2::CommandKind::PlaceLimitOrder;
-        cmd.symbol = "BTCUSDT";
-        cmd.quantity = 0.02;
-        cmd.price = px;
-        cmd.side = buy_side ? OrderSide::Buy : OrderSide::Sell;
-        cmd.position_side = PositionSide::Both;
-        (void)account_v2.apply_command(cmd);
-        account_v2.mutable_legacy_account().update_positions(
-            OneKlineMap("BTCUSDT", static_cast<uint64_t>(i * 60'000), px));
+        (void)ex.perp.place_order("BTCUSDT", 0.02, (i % 2 == 0) ? OrderSide::Buy : OrderSide::Sell);
+        if (!ex.step()) {
+            break;
+        }
+        (void)market_channel->Receive();
         if ((i % 16) == 15) {
-            AccountCoreV2::Command cancel{};
-            cancel.kind = AccountCoreV2::CommandKind::CancelOpenOrders;
-            cancel.symbol = "BTCUSDT";
-            (void)account_v2.apply_command(cancel);
+            ex.perp.cancel_open_orders("BTCUSDT");
         }
     }
     const auto end = std::chrono::steady_clock::now();
@@ -716,7 +964,7 @@ TEST_F(PerfGuardrailFixture, SessionStepHotPathBenchmarkComparesLegacyCompareOff
               << " ratio_legacy_v2=" << ratio_legacy_v2
               << " ratio_compare_off_shadow=" << ratio_compare_off_shadow << '\n';
 
-    // Phase 2 fail-fast budget: single step latency and mode ratios.
+    // Fail-fast budget: single step latency and mode ratios.
     EXPECT_LE(legacy.ns_per_step, kMaxSingleStepLatencyNs);
     EXPECT_LE(compare_off.ns_per_step, kMaxSingleStepLatencyNs);
     EXPECT_LE(shadow_compare.ns_per_step, kMaxSingleStepLatencyNs);
@@ -922,7 +1170,7 @@ TEST_F(PerfGuardrailFixture, CompareDiagnosticOverheadIsQuantifiedAndBoundedByBu
 
 TEST_F(PerfGuardrailFixture, LogHeavyScenarioCoversRowVolumeOrderingBatchBoundaryAndHighDensityPublish)
 {
-    const auto baseline = RunLogHeavyScenario(
+    const auto reference_run = RunLogHeavyScenario(
         tmp_dir_,
         nullptr,
         BinanceExchange::CoreMode::LegacyOnly,
@@ -935,9 +1183,9 @@ TEST_F(PerfGuardrailFixture, LogHeavyScenarioCoversRowVolumeOrderingBatchBoundar
         BinanceExchange::EventPublishMode::DualPublishCompare,
         true);
 
-    ASSERT_GT(baseline.steps, 0u);
+    ASSERT_GT(reference_run.steps, 0u);
     ASSERT_GT(forwarding.steps, 0u);
-    ASSERT_GT(baseline.market_msgs, 0u);
+    ASSERT_GT(reference_run.market_msgs, 0u);
     ASSERT_GT(forwarding.market_msgs, 0u);
 
     EXPECT_GT(forwarding.position_msgs + forwarding.order_msgs, 0u);
@@ -949,8 +1197,8 @@ TEST_F(PerfGuardrailFixture, LogHeavyScenarioCoversRowVolumeOrderingBatchBoundar
         EXPECT_EQ(forwarding.event_diag_count, forwarding.event_diag_matched_count);
     }
 
-    std::cout << "[PERF][LogHeavyScenario] baseline_ns_per_step=" << baseline.ns_per_step
-              << " baseline_throughput=" << baseline.throughput_steps_per_sec
+    std::cout << "[PERF][LogHeavyScenario] reference_ns_per_step=" << reference_run.ns_per_step
+              << " reference_throughput=" << reference_run.throughput_steps_per_sec
               << " forwarding_ns_per_step=" << forwarding.ns_per_step
               << " forwarding_throughput=" << forwarding.throughput_steps_per_sec
               << " forwarding_position_msgs=" << forwarding.position_msgs
@@ -960,9 +1208,9 @@ TEST_F(PerfGuardrailFixture, LogHeavyScenarioCoversRowVolumeOrderingBatchBoundar
               << " forwarding_market_backlog=" << forwarding.max_market_backlog
               << '\n';
 
-    EXPECT_LE(baseline.ns_per_step, kLogHeavyStepBudgetNs);
+    EXPECT_LE(reference_run.ns_per_step, kLogHeavyStepBudgetNs);
     EXPECT_LE(forwarding.ns_per_step, kLogHeavyStepBudgetNs);
-    EXPECT_GE(baseline.throughput_steps_per_sec, kLogHeavyMinThroughputStepsPerSec);
+    EXPECT_GE(reference_run.throughput_steps_per_sec, kLogHeavyMinThroughputStepsPerSec);
     EXPECT_GE(forwarding.throughput_steps_per_sec, kLogHeavyMinThroughputStepsPerSec);
 }
 
@@ -1012,7 +1260,7 @@ TEST_F(PerfGuardrailFixture, LogHeavyLoggerEnableDisableAndSideEffectForwardingO
     EXPECT_LE(logger_ratio, kMaxModeRatio);
     EXPECT_LE(forwarding_ratio, kMaxModeRatio);
 
-    // Memory/buffering proxy guardrail: forwarding path backlog must not explode compared with baseline.
+    // Memory/buffering proxy guardrail: forwarding path backlog must not explode compared with the reference path.
     const double backlog_multiplier = (no_logger.max_market_backlog == 0)
         ? static_cast<double>(with_forwarding.max_market_backlog + 1)
         : static_cast<double>(with_forwarding.max_market_backlog + 1)
@@ -1186,16 +1434,16 @@ TEST_F(PerfGuardrailFixture, MixedScenarioBudgetCoversJitterAndFallbackUnsupport
     fallback->candidate_steps[0].state.progress.status = ReplayCompare::ReplayCompareStatus::Fallback;
     fallback->candidate_steps[0].state.progress.fallback_to_legacy = true;
 
-    const auto baseline = RunMixedScenarioBenchmark(*base, ReplayCompare::ReplayCompareTestHarness::StateOnlyFeatureSet());
+    const auto reference_perf = RunMixedScenarioBenchmark(*base, ReplayCompare::ReplayCompareTestHarness::StateOnlyFeatureSet());
     const auto unsupported_perf = RunMixedScenarioBenchmark(*unsupported, ReplayCompare::ReplayCompareTestHarness::StateOnlyFeatureSet());
     const auto fallback_perf = RunMixedScenarioBenchmark(*fallback, ReplayCompare::ReplayCompareTestHarness::StateOnlyFeatureSet());
 
-    ASSERT_GT(baseline.ns_per_step, 0.0);
+    ASSERT_GT(reference_perf.ns_per_step, 0.0);
     ASSERT_GT(unsupported_perf.ns_per_step, 0.0);
     ASSERT_GT(fallback_perf.ns_per_step, 0.0);
 
-    const double unsupported_ratio = unsupported_perf.ns_per_step / baseline.ns_per_step;
-    const double fallback_ratio = fallback_perf.ns_per_step / baseline.ns_per_step;
+    const double unsupported_ratio = unsupported_perf.ns_per_step / reference_perf.ns_per_step;
+    const double fallback_ratio = fallback_perf.ns_per_step / reference_perf.ns_per_step;
 
     std::cout << "[PERF][MixedBudget] scenario=v2-vs-legacy.funding-reference-edge"
               << " p50_ns_per_step=" << stats.p50

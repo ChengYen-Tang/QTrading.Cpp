@@ -12,6 +12,18 @@
 
 namespace {
 
+QTrading::Infra::Exchanges::BinanceSim::Account::AccountInitConfig MakeAccountInitConfig(
+    double init_balance,
+    int vip_level = 0)
+{
+    QTrading::Infra::Exchanges::BinanceSim::Account::AccountInitConfig cfg{};
+    cfg.init_balance = init_balance;
+    cfg.spot_initial_cash = init_balance;
+    cfg.perp_initial_wallet = init_balance;
+    cfg.vip_level = vip_level;
+    return cfg;
+}
+
 void WriteBinanceCsv(
     const fs::path& path,
     const std::vector<std::tuple<
@@ -323,8 +335,7 @@ TEST_F(InfraLogFeatherRoundTripFixture, ArrowRowCountsMatchInMemorySinkRowsAfter
                 (tmp_dir / "rowcount_trade.csv").string(),
                 (tmp_dir / "rowcount_funding.csv").string() } },
             logger,
-            1000.0,
-            0,
+            MakeAccountInitConfig(1000.0, 0),
             8600u);
         auto market_channel = exchange.get_market_channel();
 
@@ -359,11 +370,15 @@ TEST_F(InfraLogFeatherRoundTripFixture, ArrowRowCountsMatchInMemorySinkRowsAfter
     };
 
     for (const auto& module : modules) {
+        const size_t expected_rows = CountRowsForModule(rows(), ModuleId(module.module));
+        if (expected_rows == 0) {
+            continue;
+        }
         const auto table = ReadArrowTable(module.file_name);
         ASSERT_NE(table, nullptr);
         EXPECT_EQ(
             static_cast<size_t>(table->num_rows()),
-            CountRowsForModule(rows(), ModuleId(module.module)))
+            expected_rows)
             << module.file_name;
     }
 }

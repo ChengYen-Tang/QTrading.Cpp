@@ -1,10 +1,13 @@
 #include "Data/Binance/MarketData.hpp"
 #include <algorithm>
 #include <charconv>
+#include <cstdlib>
 #include <cstdint>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <string_view>
 
@@ -85,6 +88,87 @@ static bool parse_double(std::string_view sv, double& out)
     if (ec != std::errc{} || p != sv.data() + sv.size()) return false;
     out = v;
     return true;
+}
+
+static std::optional<uint64_t> parse_env_u64(const char* key)
+{
+    const char* raw = std::getenv(key);
+    if (raw == nullptr || *raw == '\0') {
+        return std::nullopt;
+    }
+    uint64_t value = 0;
+    const std::string_view sv(raw);
+    const auto [ptr, ec] = std::from_chars(sv.data(), sv.data() + sv.size(), value);
+    if (ec != std::errc{} || ptr != sv.data() + sv.size()) {
+        return std::nullopt;
+    }
+    return value;
+}
+
+static std::optional<uint64_t> parse_env_date_to_ts_ms(const char* key, bool end_of_day)
+{
+    const char* raw = std::getenv(key);
+    if (raw == nullptr || *raw == '\0') {
+        return std::nullopt;
+    }
+    std::tm tm{};
+    int y = 0;
+    int m = 0;
+    int d = 0;
+    if (std::sscanf(raw, "%d-%d-%d", &y, &m, &d) != 3) {
+        return std::nullopt;
+    }
+    tm.tm_year = y - 1900;
+    tm.tm_mon = m - 1;
+    tm.tm_mday = d;
+    tm.tm_hour = end_of_day ? 23 : 0;
+    tm.tm_min = end_of_day ? 59 : 0;
+    tm.tm_sec = end_of_day ? 59 : 0;
+#ifdef _WIN32
+    const auto epoch = _mkgmtime(&tm);
+#else
+    const auto epoch = timegm(&tm);
+#endif
+    if (epoch < 0) {
+        return std::nullopt;
+    }
+    uint64_t ts_ms = static_cast<uint64_t>(epoch) * 1000ull;
+    if (end_of_day) {
+        ts_ms += 999ull;
+    }
+    return ts_ms;
+}
+
+static std::pair<std::optional<uint64_t>, std::optional<uint64_t>> resolve_replay_window_ts_ms()
+{
+    auto start = parse_env_u64("QTR_SIM_START_TS_MS");
+    auto end = parse_env_u64("QTR_SIM_END_TS_MS");
+    if (!start.has_value()) {
+        start = parse_env_date_to_ts_ms("QTR_SIM_START_DATE", false);
+    }
+    if (!end.has_value()) {
+        end = parse_env_date_to_ts_ms("QTR_SIM_END_DATE", true);
+    }
+    return { start, end };
+}
+
+static void apply_replay_window(std::vector<TradeKlineDto>& klines)
+{
+    const auto [start_ts, end_ts] = resolve_replay_window_ts_ms();
+    if (!start_ts.has_value() && !end_ts.has_value()) {
+        return;
+    }
+    const auto first = std::remove_if(klines.begin(), klines.end(),
+        [&](const TradeKlineDto& kline) {
+            if (start_ts.has_value() && kline.Timestamp < *start_ts) {
+                return true;
+            }
+            if (end_ts.has_value() && kline.Timestamp > *end_ts) {
+                return true;
+            }
+            return false;
+        });
+    klines.erase(first, klines.end());
 }
 
 static bool parse_kline_line(std::string_view line, TradeKlineDto& out)
@@ -217,6 +301,8 @@ void MarketData::load_csv(const std::string& csv_file) {
                 return a.Timestamp < b.Timestamp;
             });
     }
+
+    apply_replay_window(klines);
 }
 
 /// @brief Get the most recent Kline entry.

@@ -20,7 +20,7 @@
 
 using namespace std;
 using BinanceExchange = QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
-using SimAccount = ::Account;
+using SimAccount = QTrading::Infra::Exchanges::BinanceSim::Account;
 
 /// @file QTrading.Service.cpp
 /// @brief Defines the application entry point and wires together exchange and arbitrage pipeline modules.

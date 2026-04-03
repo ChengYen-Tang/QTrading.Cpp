@@ -1,4 +1,5 @@
 add_executable(QTrading.Utils.Tests
+  Calibration/CalibrationMetricsTests.cpp
   Queue/BoundedChannelTests.cpp
   Queue/UnboundedChannelTests.cpp
   Time/ReplayTimeRangeTests.cpp
@@ -11,6 +12,7 @@ target_include_directories(QTrading.Utils.Tests
 
 target_link_libraries(QTrading.Utils.Tests
   PRIVATE
+    QTrading.Utils.Library
     GTest::gtest
     GTest::gtest_main
 )
