@@ -251,6 +251,12 @@ public:
         cfg.basis_stress_blocks_opening_orders = enabled;
         impl_.apply_simulation_config(cfg);
     }
+    void set_simulator_risk_overlay_enabled(bool enabled)
+    {
+        auto cfg = impl_.simulation_config();
+        cfg.simulator_risk_overlay_enabled = enabled;
+        impl_.apply_simulation_config(cfg);
+    }
     void set_uncertainty_band_bps(double bps)
     {
         auto cfg = impl_.simulation_config();
@@ -2840,6 +2846,7 @@ TEST_F(DeterministicReplayFixture, BasisStressOverlayBlockGoldenReplayProducesEx
                 MakeDeterministicAccount(),
                 kRunId);
             exchange.set_mark_index_basis_thresholds_bps(500.0, 1500.0);
+            exchange.set_simulator_risk_overlay_enabled(true);
             exchange.set_basis_stress_blocks_opening_orders(true);
             auto market_channel = exchange.get_market_channel();
 
@@ -4407,6 +4414,8 @@ TEST_F(InfraLogTestFixture, MarketSnapshotUncertaintyBandAndBasisDiagnosticsMatc
             6100u);
         exchange.set_uncertainty_band_bps(20.0);
         exchange.set_mark_index_basis_thresholds_bps(500.0, 1500.0);
+        exchange.set_simulator_risk_overlay_enabled(true);
+        exchange.set_basis_stress_blocks_opening_orders(true);
         auto market_channel = exchange.get_market_channel();
 
         ASSERT_TRUE(exchange.step());

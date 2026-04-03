@@ -129,6 +129,24 @@ std::filesystem::path write_single_kline_csv(const std::string& file_name, doubl
     return path;
 }
 
+std::filesystem::path write_single_kline_csv(
+    const std::string& file_name,
+    double open_price,
+    double high_price,
+    double low_price,
+    double close_price,
+    double volume)
+{
+    const auto unique = std::to_string(
+        std::chrono::steady_clock::now().time_since_epoch().count());
+    const auto path = std::filesystem::temp_directory_path() / (file_name + "_" + unique + ".csv");
+    std::ofstream file(path, std::ios::trunc);
+    file << "openTime,open,high,low,close,volume,closeTime,quoteVol,tradeCnt,takerBB,takerBQ\n";
+    file << "0," << open_price << ',' << high_price << ',' << low_price << ',' << close_price
+         << ',' << volume << ",60000," << (close_price * volume) << ",1,0,0\n";
+    return path;
+}
+
 QTrading::dto::Position make_perp_position(
     const std::string& symbol,
     bool is_long,
@@ -258,6 +276,48 @@ TEST(OrderEntryServiceTest, InstrumentFiltersRejectOrderByMinNotional)
     EXPECT_FALSE(reject.has_value());
 }
 
+TEST(OrderEntryServiceTest, InstrumentFiltersPerpMarketNotionalUsesFirstBarMarkOpenPrice)
+{
+    BinanceExchangeRuntimeState runtime_state{};
+    StepKernelState step_state = make_step_state_with_perp_symbol();
+    auto& spec = step_state.symbol_spec_by_id[0];
+    spec.min_notional = 150.0;
+    Account account(MakeLegacyCtorInitConfig(10000.0));
+    std::optional<OrderRejectInfo> reject{};
+
+    const auto trade_csv = write_single_kline_csv(
+        "order_entry_trade_mark_open",
+        100.0,
+        100.0,
+        100.0,
+        100.0,
+        10.0);
+    const auto mark_csv = write_single_kline_csv(
+        "order_entry_mark_open",
+        100.0,
+        200.0,
+        100.0,
+        200.0,
+        10.0);
+    step_state.market_data.emplace_back("BTCUSDT", trade_csv.string());
+    step_state.mark_data_pool.emplace_back("BTCUSDT", mark_csv.string());
+    step_state.mark_data_id_by_symbol.push_back(0);
+    step_state.mark_cursor_by_symbol.push_back(0);
+    step_state.replay_cursor.push_back(0);
+
+    EXPECT_FALSE(OrderEntryService::Execute(
+        runtime_state,
+        account,
+        step_state,
+        make_perp_market_request(1.0),
+        reject));
+    ASSERT_TRUE(reject.has_value());
+    EXPECT_EQ(reject->code, OrderRejectInfo::Code::NotionalBelowMin);
+
+    std::filesystem::remove(trade_csv);
+    std::filesystem::remove(mark_csv);
+}
+
 TEST(OrderEntryServiceTest, InstrumentFiltersPerpMarketNotionalUsesMarkPrice)
 {
     BinanceExchangeRuntimeState runtime_state{};
@@ -327,6 +387,39 @@ TEST(OrderEntryServiceTest, InstrumentFiltersPercentPriceRejectsOutsideBounds)
         make_perp_limit_request(1.0, 100.0),
         reject));
     EXPECT_FALSE(reject.has_value());
+
+    std::filesystem::remove(trade_csv);
+}
+
+TEST(OrderEntryServiceTest, InstrumentFiltersPercentPriceUsesFirstBarTradeOpenPrice)
+{
+    BinanceExchangeRuntimeState runtime_state{};
+    StepKernelState step_state = make_step_state_with_perp_symbol();
+    auto& spec = step_state.symbol_spec_by_id[0];
+    spec.percent_price_by_side = false;
+    spec.percent_price_multiplier_up = 1.05;
+    spec.percent_price_multiplier_down = 0.95;
+    Account account(MakeLegacyCtorInitConfig(10000.0));
+    std::optional<OrderRejectInfo> reject{};
+
+    const auto trade_csv = write_single_kline_csv(
+        "order_entry_percent_price_open",
+        100.0,
+        200.0,
+        100.0,
+        200.0,
+        10.0);
+    step_state.market_data.emplace_back("BTCUSDT", trade_csv.string());
+    step_state.replay_cursor.push_back(0);
+
+    EXPECT_FALSE(OrderEntryService::Execute(
+        runtime_state,
+        account,
+        step_state,
+        make_perp_limit_request(150.0 / 100.0, 106.0),
+        reject));
+    ASSERT_TRUE(reject.has_value());
+    EXPECT_EQ(reject->code, OrderRejectInfo::Code::PercentPriceAboveBound);
 
     std::filesystem::remove(trade_csv);
 }
@@ -438,6 +531,58 @@ TEST(OrderEntryServiceTest, PerpTriggerProtectRejectsMarketOrderWhenMarkIndexGap
         reject));
     ASSERT_TRUE(reject.has_value());
     EXPECT_EQ(reject->code, OrderRejectInfo::Code::TriggerProtectExceeded);
+}
+
+TEST(OrderEntryServiceTest, PerpTriggerProtectUsesFirstBarMarkAndIndexOpenPrices)
+{
+    BinanceExchangeRuntimeState runtime_state{};
+    StepKernelState step_state = make_step_state_with_perp_symbol();
+    auto& spec = step_state.symbol_spec_by_id[0];
+    spec.trigger_protect = 0.03; // 3%
+    Account account(MakeLegacyCtorInitConfig(10000.0));
+    std::optional<OrderRejectInfo> reject{};
+
+    const auto trade_csv = write_single_kline_csv(
+        "order_entry_trigger_trade_open",
+        100.0,
+        100.0,
+        100.0,
+        100.0,
+        10.0);
+    const auto mark_csv = write_single_kline_csv(
+        "order_entry_trigger_mark_open",
+        100.0,
+        105.0,
+        100.0,
+        105.0,
+        10.0);
+    const auto index_csv = write_single_kline_csv(
+        "order_entry_trigger_index_open",
+        100.0,
+        100.0,
+        100.0,
+        100.0,
+        10.0);
+    step_state.market_data.emplace_back("BTCUSDT", trade_csv.string());
+    step_state.mark_data_pool.emplace_back("BTCUSDT", mark_csv.string());
+    step_state.index_data_pool.emplace_back("BTCUSDT", index_csv.string());
+    step_state.mark_data_id_by_symbol.push_back(0);
+    step_state.index_data_id_by_symbol.push_back(0);
+    step_state.mark_cursor_by_symbol.push_back(0);
+    step_state.index_cursor_by_symbol.push_back(0);
+    step_state.replay_cursor.push_back(0);
+
+    EXPECT_TRUE(OrderEntryService::Execute(
+        runtime_state,
+        account,
+        step_state,
+        make_perp_market_request(1.0),
+        reject));
+    EXPECT_FALSE(reject.has_value());
+
+    std::filesystem::remove(trade_csv);
+    std::filesystem::remove(mark_csv);
+    std::filesystem::remove(index_csv);
 }
 
 TEST(OrderEntryServiceTest, ImmediatelyExecutableLimitIsTakerFee)

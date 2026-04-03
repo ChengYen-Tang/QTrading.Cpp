@@ -63,6 +63,29 @@ double current_index_price(
     const State::StepKernelState& step_state,
     const std::string& symbol);
 
+bool is_immediately_marketable_post_only(
+    const State::StepKernelState& step_state,
+    const Contracts::OrderCommandRequest& request)
+{
+    if (request.price <= 0.0) {
+        return false;
+    }
+
+    double reference = current_reference_price(step_state, request.symbol);
+    if (reference <= 0.0 &&
+        request.instrument_type == QTrading::Dto::Trading::InstrumentType::Perp) {
+        reference = current_mark_price(step_state, request.symbol);
+    }
+    if (reference <= 0.0) {
+        return false;
+    }
+
+    if (request.side == QTrading::Dto::Trading::OrderSide::Buy) {
+        return request.price + kEpsilon >= reference;
+    }
+    return request.price <= reference + kEpsilon;
+}
+
 bool is_multiple_of_step(double value, double step_size)
 {
     if (step_size <= 0.0) {
@@ -237,7 +260,11 @@ double current_reference_price(
     const size_t cursor = symbol_index < step_state.replay_cursor.size()
         ? step_state.replay_cursor[symbol_index]
         : 0;
-    const size_t idx = cursor == 0 ? 0 : std::min(cursor - 1, count - 1);
+    if (cursor == 0) {
+        return market_data.get_kline(0).OpenPrice;
+    }
+
+    const size_t idx = std::min(cursor - 1, count - 1);
     return market_data.get_kline(idx).ClosePrice;
 }
 
@@ -265,7 +292,11 @@ double current_mark_price(
     }
 
     const size_t cursor = step_state.mark_cursor_by_symbol[symbol_index];
-    const size_t idx = cursor == 0 ? 0 : std::min(cursor - 1, count - 1);
+    if (cursor == 0) {
+        return mark_data.get_kline(0).OpenPrice;
+    }
+
+    const size_t idx = std::min(cursor - 1, count - 1);
     return mark_data.get_kline(idx).ClosePrice;
 }
 
@@ -293,7 +324,11 @@ double current_index_price(
     }
 
     const size_t cursor = step_state.index_cursor_by_symbol[symbol_index];
-    const size_t idx = cursor == 0 ? 0 : std::min(cursor - 1, count - 1);
+    if (cursor == 0) {
+        return index_data.get_kline(0).OpenPrice;
+    }
+
+    const size_t idx = std::min(cursor - 1, count - 1);
     return index_data.get_kline(idx).ClosePrice;
 }
 
@@ -1066,6 +1101,15 @@ bool OrderEntryService::Execute(
         !validate_filters(step_state, request, quantity, reject)) {
         return false;
     }
+    if ((request.kind == Contracts::OrderCommandKind::SpotLimit ||
+            request.kind == Contracts::OrderCommandKind::PerpLimit) &&
+        request.time_in_force == QTrading::Dto::Trading::TimeInForce::GTX &&
+        is_immediately_marketable_post_only(step_state, request)) {
+        reject = Contracts::OrderRejectInfo{
+            Contracts::OrderRejectInfo::Code::PostOnlyWouldTake,
+            "post-only order would take liquidity" };
+        return false;
+    }
     if (!validate_perp_protection_constraints(runtime_state, step_state, request, reject)) {
         return false;
     }
@@ -1075,6 +1119,12 @@ bool OrderEntryService::Execute(
     }
 
     if (request.instrument_type == QTrading::Dto::Trading::InstrumentType::Spot) {
+        if (request.reduce_only) {
+            reject = Contracts::OrderRejectInfo{
+                Contracts::OrderRejectInfo::Code::SpotReduceOnlyUnsupported,
+                "spot reduce_only is unsupported" };
+            return false;
+        }
         if (request.side == QTrading::Dto::Trading::OrderSide::Sell) {
             const double inventory = sum_spot_inventory(runtime_state, request.symbol);
             const double reserved_sell = sum_spot_sell_reservations(runtime_state, request.symbol);
@@ -1089,12 +1139,6 @@ bool OrderEntryService::Execute(
                 reject = Contracts::OrderRejectInfo{
                     Contracts::OrderRejectInfo::Code::SpotQuantityExceedsInventory,
                     "spot sell quantity exceeds inventory" };
-                return false;
-            }
-            if (request.reduce_only && inventory <= kEpsilon) {
-                reject = Contracts::OrderRejectInfo{
-                    Contracts::OrderRejectInfo::Code::ReduceOnlyNoReduciblePosition,
-                    "no reducible spot position" };
                 return false;
             }
         }
@@ -1294,6 +1338,8 @@ bool OrderEntryService::Execute(
     order.position_side = request.position_side;
     order.reduce_only = request.reduce_only;
     order.instrument_type = request.instrument_type;
+    order.time_in_force = request.time_in_force;
+    order.first_matching_step = request.first_matching_step;
     order.client_order_id = request.client_order_id;
     order.stp_mode = static_cast<int>(effective_stp_mode);
     order.close_position = request.close_position;

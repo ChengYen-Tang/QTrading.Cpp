@@ -21,6 +21,11 @@ public:
     bool place_order(const std::string& symbol, double quantity, double price,
         QTrading::Dto::Trading::OrderSide side, bool reduce_only = false,
         const std::string& client_order_id = {},
+        Account::SelfTradePreventionMode stp_mode = Account::SelfTradePreventionMode::None,
+        QTrading::Dto::Trading::TimeInForce time_in_force = QTrading::Dto::Trading::TimeInForce::GTC);
+    bool place_limit_maker(const std::string& symbol, double quantity, double price,
+        QTrading::Dto::Trading::OrderSide side, bool reduce_only = false,
+        const std::string& client_order_id = {},
         Account::SelfTradePreventionMode stp_mode = Account::SelfTradePreventionMode::None);
     /// Spot market order by base quantity (contract preserved; implementation pending).
     bool place_order(const std::string& symbol, double quantity,

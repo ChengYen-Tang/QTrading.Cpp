@@ -39,6 +39,8 @@ struct OrderRejectInfo {
         MarketTakeBoundExceeded = 30,
         InvalidStpMode = 31,
         StpModeNotAllowed = 32,
+        PostOnlyWouldTake = 33,
+        SpotReduceOnlyUnsupported = 34,
     };
 
     /// Machine-readable reject category.

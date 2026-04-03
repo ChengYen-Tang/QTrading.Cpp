@@ -36,6 +36,8 @@ struct OrderCommandRequest {
     QTrading::Dto::Trading::OrderSide side{ QTrading::Dto::Trading::OrderSide::Buy };
     /// Requested hedge-mode position side.
     QTrading::Dto::Trading::PositionSide position_side{ QTrading::Dto::Trading::PositionSide::Both };
+    /// Limit-order time in force; defaults to GTC for backward compatibility.
+    QTrading::Dto::Trading::TimeInForce time_in_force{ QTrading::Dto::Trading::TimeInForce::GTC };
     /// True when the command must not increase exposure.
     bool reduce_only{ false };
     /// True when the command represents close-position semantics.
@@ -44,6 +46,8 @@ struct OrderCommandRequest {
     std::string client_order_id;
     /// Encoded self-trade-prevention mode.
     int stp_mode{ 0 };
+    /// First replay step when matching is allowed for this request.
+    uint64_t first_matching_step{ 0 };
 };
 
 /// Scheduler-owned deferred command record for async order latency simulation.

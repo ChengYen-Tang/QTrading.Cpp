@@ -100,6 +100,19 @@ bool is_marketable_at_open(const QTrading::dto::Order& order, const QTrading::Dt
     return kline.OpenPrice + kEpsilon >= order.price;
 }
 
+bool is_first_matching_step(
+    const QTrading::dto::Order& order,
+    const State::StepKernelState& step_state) noexcept
+{
+    return order.first_matching_step == 0 || order.first_matching_step == step_state.step_seq;
+}
+
+bool is_one_step_limit_tif(QTrading::Dto::Trading::TimeInForce tif) noexcept
+{
+    return tif == QTrading::Dto::Trading::TimeInForce::IOC ||
+        tif == QTrading::Dto::Trading::TimeInForce::FOK;
+}
+
 double compute_fill_price(const QTrading::dto::Order& order, const QTrading::Dto::Market::Binance::TradeKlineDto& kline)
 {
     if (order.price <= 0.0) {
@@ -435,7 +448,7 @@ void MatchingEngine::RunStep(
         kline.Volume = step_state.replay_trade_volume_by_symbol[i];
         kline.TakerBuyBaseVolume = step_state.replay_trade_taker_buy_base_volume_by_symbol[i];
         const double raw = kline.Volume;
-        const double base_liquidity = raw > 0.0 ? raw : std::numeric_limits<double>::infinity();
+        const double base_liquidity = raw > 0.0 ? raw : 0.0;
         const double taker_buy_ratio = resolve_taker_buy_ratio(
             kline,
             runtime_state.simulation_config,
@@ -540,6 +553,10 @@ void MatchingEngine::RunStep(
                     continue;
                 }
                 const auto& order = orders[order_idx];
+                if (is_one_step_limit_tif(order.time_in_force) &&
+                    !is_first_matching_step(order, step_state)) {
+                    continue;
+                }
                 if (!is_marketable(order, kline)) {
                     continue;
                 }
@@ -584,6 +601,13 @@ void MatchingEngine::RunStep(
                     runtime_state.simulation_config,
                     std::max(available_liquidity, kEpsilon),
                     taker_buy_ratio);
+                if (order.time_in_force == QTrading::Dto::Trading::TimeInForce::FOK &&
+                    is_first_matching_step(order, step_state)) {
+                    if (max_fill_qty + kEpsilon < request_qty ||
+                        fill_probability + 1e-6 < 1.0) {
+                        continue;
+                    }
+                }
                 const double fill_qty = max_fill_qty * fill_probability;
                 if (fill_qty <= kEpsilon) {
                     continue;
@@ -664,6 +688,16 @@ void MatchingEngine::RunStep(
             runtime_state.order_symbol_id_by_order_id.erase(orders[i].id);
             continue;
         }
+        if (orders[i].price <= 0.0) {
+            runtime_state.order_symbol_id_by_order_id.erase(orders[i].id);
+            continue;
+        }
+        if (is_one_step_limit_tif(orders[i].time_in_force) &&
+            (orders[i].first_matching_step == 0 ||
+                step_state.step_seq >= orders[i].first_matching_step)) {
+            runtime_state.order_symbol_id_by_order_id.erase(orders[i].id);
+            continue;
+        }
         auto order = std::move(orders[i]);
         order.quantity = remaining_qty[i];
         next_orders.emplace_back(std::move(order));
@@ -671,7 +705,7 @@ void MatchingEngine::RunStep(
                 ? order_symbol_ids_by_slot[i]
                 : std::numeric_limits<size_t>::max());
     }
-    const bool order_book_mutated = !out_fills.empty();
+    const bool order_book_mutated = !out_fills.empty() || next_orders.size() != orders.size();
     orders.swap(next_orders);
     order_symbol_ids_by_slot.swap(next_order_symbol_ids);
     if (order_book_mutated) {

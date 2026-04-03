@@ -5,10 +5,26 @@ namespace QTrading::Infra::Exchanges::BinanceSim::Api {
 
 bool SpotApi::place_order(const std::string& symbol, double quantity, double price,
     QTrading::Dto::Trading::OrderSide side, bool reduce_only,
-    const std::string& client_order_id, Account::SelfTradePreventionMode stp_mode)
+    const std::string& client_order_id, Account::SelfTradePreventionMode stp_mode,
+    QTrading::Dto::Trading::TimeInForce time_in_force)
 {
     return Application::OrderCommandKernel(owner_).PlaceSpotLimit(
-        symbol, quantity, price, side, reduce_only, client_order_id, stp_mode);
+        symbol, quantity, price, side, reduce_only, client_order_id, stp_mode, time_in_force);
+}
+
+bool SpotApi::place_limit_maker(const std::string& symbol, double quantity, double price,
+    QTrading::Dto::Trading::OrderSide side, bool reduce_only,
+    const std::string& client_order_id, Account::SelfTradePreventionMode stp_mode)
+{
+    return place_order(
+        symbol,
+        quantity,
+        price,
+        side,
+        reduce_only,
+        client_order_id,
+        stp_mode,
+        QTrading::Dto::Trading::TimeInForce::GTX);
 }
 
 bool SpotApi::place_order(const std::string& symbol, double quantity,

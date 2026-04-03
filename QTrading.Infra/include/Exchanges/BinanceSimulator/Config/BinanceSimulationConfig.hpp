@@ -56,9 +56,9 @@ struct SimulationConfig {
     double basis_stress_bps{ 1000.0 };
     double basis_warning_cap{ 0.0 };
     double basis_stress_cap{ 0.0 };
-    bool simulator_risk_overlay_enabled{ true };
+    bool simulator_risk_overlay_enabled{ false };
     bool basis_risk_guard_enabled{ false };
-    bool basis_stress_blocks_opening_orders{ true };
+    bool basis_stress_blocks_opening_orders{ false };
     // Binance-aligned default: no pre-liquidation warning-stage reduction.
     // Set >1.0 to enable simulator-specific warning-zone overlay.
     double liquidation_warning_maintenance_multiplier{ 1.0 };

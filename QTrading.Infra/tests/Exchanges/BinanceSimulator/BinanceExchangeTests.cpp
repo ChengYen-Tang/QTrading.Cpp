@@ -129,6 +129,13 @@ public:
         impl_.apply_simulation_config(cfg);
     }
 
+    void set_basis_stress_blocks_opening_orders(bool enabled)
+    {
+        auto cfg = impl_.simulation_config();
+        cfg.basis_stress_blocks_opening_orders = enabled;
+        impl_.apply_simulation_config(cfg);
+    }
+
     void set_basis_risk_leverage_caps(double warning_cap, double stress_cap)
     {
         auto cfg = impl_.simulation_config();
@@ -1895,6 +1902,8 @@ TEST_F(BinanceExchangeFixture, MarkIndexStressBlocksNewPerpOpeningOrders)
             (tmpDir / "btc_index.csv").string()} },
         logger,
         /*balance*/ 1000.0);
+    ex.set_simulator_risk_overlay_enabled(true);
+    ex.set_basis_stress_blocks_opening_orders(true);
     ASSERT_TRUE(ex.step());
 
     using QTrading::Dto::Trading::OrderSide;
@@ -1906,7 +1915,7 @@ TEST_F(BinanceExchangeFixture, MarkIndexStressBlocksNewPerpOpeningOrders)
     EXPECT_EQ(snap.basis_stress_blocked_orders, 1u);
 }
 
-TEST_F(BinanceExchangeFixture, DisabledSimulatorRiskOverlayKeepsDiagnosticsButDoesNotBlockOrders)
+TEST_F(BinanceExchangeFixture, DefaultSimulatorRiskOverlayDoesNotBlockOpeningOrders)
 {
     writeCsv("btc.csv", {
         {      0, 100,100,100,100,1000, 30000,100,1,0,0 }
@@ -1927,7 +1936,6 @@ TEST_F(BinanceExchangeFixture, DisabledSimulatorRiskOverlayKeepsDiagnosticsButDo
             (tmpDir / "btc_index.csv").string()} },
         logger,
         /*balance*/ 1000.0);
-    ex.set_simulator_risk_overlay_enabled(false);
     ASSERT_TRUE(ex.step());
 
     using QTrading::Dto::Trading::OrderSide;
@@ -2009,6 +2017,7 @@ TEST_F(BinanceExchangeFixture, MarkIndexWarningAutoDeleveragesPerpLeverage)
         /*balance*/ 1000.0);
 
     ex.set_symbol_leverage("BTCUSDT", 20.0);
+    ex.set_simulator_risk_overlay_enabled(true);
     ex.set_basis_risk_leverage_caps(/*warning*/7.0, /*stress*/3.0);
     ASSERT_TRUE(ex.step());
 

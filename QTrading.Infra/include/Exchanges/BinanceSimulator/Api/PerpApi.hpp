@@ -22,6 +22,12 @@ public:
         QTrading::Dto::Trading::OrderSide side,
         QTrading::Dto::Trading::PositionSide position_side = QTrading::Dto::Trading::PositionSide::Both,
         bool reduce_only = false, const std::string& client_order_id = {},
+        Account::SelfTradePreventionMode stp_mode = Account::SelfTradePreventionMode::None,
+        QTrading::Dto::Trading::TimeInForce time_in_force = QTrading::Dto::Trading::TimeInForce::GTC);
+    bool place_limit_maker(const std::string& symbol, double quantity, double price,
+        QTrading::Dto::Trading::OrderSide side,
+        QTrading::Dto::Trading::PositionSide position_side = QTrading::Dto::Trading::PositionSide::Both,
+        bool reduce_only = false, const std::string& client_order_id = {},
         Account::SelfTradePreventionMode stp_mode = Account::SelfTradePreventionMode::None);
     /// Perp market order entrypoint.
     bool place_order(const std::string& symbol, double quantity,

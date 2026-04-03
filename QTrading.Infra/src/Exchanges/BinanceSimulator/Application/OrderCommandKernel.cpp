@@ -19,7 +19,8 @@ OrderCommandKernel::OrderCommandKernel(BinanceExchange& exchange) noexcept
 
 bool OrderCommandKernel::PlaceSpotLimit(const std::string& symbol, double quantity, double price,
     QTrading::Dto::Trading::OrderSide side, bool reduce_only, const std::string& client_order_id,
-    Account::SelfTradePreventionMode stp_mode) const
+    Account::SelfTradePreventionMode stp_mode,
+    QTrading::Dto::Trading::TimeInForce time_in_force) const
 {
     Contracts::OrderCommandRequest request{};
     request.kind = Contracts::OrderCommandKind::SpotLimit;
@@ -28,6 +29,7 @@ bool OrderCommandKernel::PlaceSpotLimit(const std::string& symbol, double quanti
     request.quantity = quantity;
     request.price = price;
     request.side = side;
+    request.time_in_force = time_in_force;
     request.reduce_only = reduce_only;
     request.client_order_id = client_order_id;
     request.stp_mode = static_cast<int>(stp_mode);
@@ -72,7 +74,8 @@ bool OrderCommandKernel::PlaceSpotMarketQuote(const std::string& symbol, double 
 bool OrderCommandKernel::PlacePerpLimit(const std::string& symbol, double quantity, double price,
     QTrading::Dto::Trading::OrderSide side, QTrading::Dto::Trading::PositionSide position_side,
     bool reduce_only, const std::string& client_order_id,
-    Account::SelfTradePreventionMode stp_mode) const
+    Account::SelfTradePreventionMode stp_mode,
+    QTrading::Dto::Trading::TimeInForce time_in_force) const
 {
     Contracts::OrderCommandRequest request{};
     request.kind = Contracts::OrderCommandKind::PerpLimit;
@@ -82,6 +85,7 @@ bool OrderCommandKernel::PlacePerpLimit(const std::string& symbol, double quanti
     request.price = price;
     request.side = side;
     request.position_side = position_side;
+    request.time_in_force = time_in_force;
     request.reduce_only = reduce_only;
     request.client_order_id = client_order_id;
     request.stp_mode = static_cast<int>(stp_mode);
@@ -182,6 +186,8 @@ bool OrderCommandKernel::submit_(const Contracts::OrderCommandRequest& request) 
 {
     auto& runtime_state = *exchange_.runtime_state_;
     const uint64_t submitted_step = exchange_.step_kernel_state_->step_seq;
+    Contracts::OrderCommandRequest request_with_schedule = request;
+    request_with_schedule.first_matching_step = submitted_step + 1;
     auto maybe_ticket = Domain::AsyncOrderLatencyScheduler::TrySchedule(
         runtime_state.order_latency_bars,
         submitted_step,
@@ -196,7 +202,8 @@ bool OrderCommandKernel::submit_(const Contracts::OrderCommandRequest& request) 
             deferred.request_id = ticket.request_id;
             deferred.submitted_step = ticket.submitted_step;
             deferred.due_step = ticket.due_step;
-            deferred.request = request;
+            deferred.request = request_with_schedule;
+            deferred.request.first_matching_step = ticket.due_step;
             runtime_state.deferred_order_commands.emplace_back(std::move(deferred));
         });
     if (maybe_ticket.has_value()) {
@@ -208,7 +215,7 @@ bool OrderCommandKernel::submit_(const Contracts::OrderCommandRequest& request) 
         *exchange_.runtime_state_,
         exchange_.account_state(),
         *exchange_.step_kernel_state_,
-        request,
+        request_with_schedule,
         reject);
 }
 

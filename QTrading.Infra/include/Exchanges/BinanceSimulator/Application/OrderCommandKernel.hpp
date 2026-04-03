@@ -22,7 +22,8 @@ public:
 
     bool PlaceSpotLimit(const std::string& symbol, double quantity, double price,
         QTrading::Dto::Trading::OrderSide side, bool reduce_only, const std::string& client_order_id,
-        Account::SelfTradePreventionMode stp_mode) const;
+        Account::SelfTradePreventionMode stp_mode,
+        QTrading::Dto::Trading::TimeInForce time_in_force = QTrading::Dto::Trading::TimeInForce::GTC) const;
     bool PlaceSpotMarket(const std::string& symbol, double quantity,
         QTrading::Dto::Trading::OrderSide side, bool reduce_only, const std::string& client_order_id,
         Account::SelfTradePreventionMode stp_mode) const;
@@ -33,7 +34,8 @@ public:
     bool PlacePerpLimit(const std::string& symbol, double quantity, double price,
         QTrading::Dto::Trading::OrderSide side, QTrading::Dto::Trading::PositionSide position_side,
         bool reduce_only, const std::string& client_order_id,
-        Account::SelfTradePreventionMode stp_mode) const;
+        Account::SelfTradePreventionMode stp_mode,
+        QTrading::Dto::Trading::TimeInForce time_in_force = QTrading::Dto::Trading::TimeInForce::GTC) const;
     bool PlacePerpMarket(const std::string& symbol, double quantity,
         QTrading::Dto::Trading::OrderSide side, QTrading::Dto::Trading::PositionSide position_side,
         bool reduce_only, const std::string& client_order_id,

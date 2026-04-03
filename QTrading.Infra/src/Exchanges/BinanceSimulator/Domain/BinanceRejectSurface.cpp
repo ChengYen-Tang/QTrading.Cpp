@@ -48,6 +48,10 @@ std::pair<int, std::string> BinanceRejectSurface::MapToBinanceError(
         return { -2021, "Order would immediately trigger." };
     case Code::MarketTakeBoundExceeded:
         return { -4131, "The counterparty's best price does not meet the PERCENT_PRICE filter limit." };
+    case Code::PostOnlyWouldTake:
+        return { -2010, "Order would immediately match and take." };
+    case Code::SpotReduceOnlyUnsupported:
+        return { -1106, "Parameter sent when not required." };
     case Code::SpotInsufficientCash:
     case Code::PerpInsufficientMargin:
         return { -2019, "Margin is insufficient." };

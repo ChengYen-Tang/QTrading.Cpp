@@ -1,5 +1,6 @@
 ﻿#pragma once
 
+#include <cstdint>
 #include <string>
 #include "Dto/Trading/Side.hpp"
 #include "Dto/Trading/InstrumentSpec.hpp"
@@ -51,6 +52,12 @@ namespace QTrading::dto {
 
         /// @brief Internal flag for one-way overshoot reverse orders pending close->open transition.
         bool one_way_reverse{ false };
+
+        /// @brief Limit-order time in force; market-style orders ignore this field.
+        QTrading::Dto::Trading::TimeInForce time_in_force{ QTrading::Dto::Trading::TimeInForce::GTC };
+
+        /// @brief First replay step when this order is eligible to match.
+        uint64_t first_matching_step{ 0 };
     };
 
 }  // namespace QTrading::dto
