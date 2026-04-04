@@ -55,6 +55,7 @@ TEST(BasisArbitrageIntentBuilderTests, UsesBasisStrategyMetadata)
     const auto intent = builder.build(signal, MakeMarket(1234));
 
     EXPECT_EQ(intent.strategy, "basis_arbitrage");
+    EXPECT_EQ(intent.structure, "delta_neutral_basis");
     EXPECT_EQ(intent.reason, "basis_arbitrage");
     EXPECT_EQ(intent.legs.size(), 2u);
     EXPECT_EQ(intent.intent_id.rfind("basis_arbitrage:", 0), 0u);

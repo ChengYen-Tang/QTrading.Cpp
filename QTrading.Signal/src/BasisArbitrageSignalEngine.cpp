@@ -6,6 +6,60 @@
 
 namespace QTrading::Signal {
 
+namespace {
+
+constexpr double kHoursPerYear = 365.0 * 24.0;
+
+struct RollingStats {
+    double mean{ 0.0 };
+    double stddev{ 0.0 };
+    double z{ 0.0 };
+    double abs_z{ 0.0 };
+};
+
+std::optional<RollingStats> ComputeRollingStats(
+    const std::deque<double>& window,
+    double current,
+    double std_floor)
+{
+    if (window.empty()) {
+        return std::nullopt;
+    }
+
+    const double n = static_cast<double>(window.size());
+    const double mean = std::accumulate(window.begin(), window.end(), 0.0) / n;
+    double var = 0.0;
+    for (const double v : window) {
+        const double d = v - mean;
+        var += d * d;
+    }
+    var /= n;
+
+    RollingStats out;
+    out.mean = mean;
+    out.stddev = std::max(std::sqrt(std::max(var, 0.0)), std_floor);
+    out.z = (current - out.mean) / out.stddev;
+    out.abs_z = std::fabs(out.z);
+    return out;
+}
+
+double EmaAlphaFromPeriod(std::size_t period)
+{
+    const double p = static_cast<double>(std::max<std::size_t>(period, 1));
+    return 2.0 / (p + 1.0);
+}
+
+void UpdateEma(double value, double alpha, bool& initialized, double& ema)
+{
+    if (!initialized) {
+        ema = value;
+        return;
+    }
+    ema = ema * (1.0 - alpha) + value * alpha;
+}
+
+} // namespace
+
 BasisArbitrageSignalEngine::BasisArbitrageSignalEngine(Config cfg)
     : FundingCarrySignalEngine(cfg)
     , cfg_(std::move(cfg))
@@ -58,16 +112,116 @@ BasisArbitrageSignalEngine::BasisArbitrageSignalEngine(Config cfg)
     }
     cfg_.basis_regime_min_confidence_scale =
         std::clamp(cfg_.basis_regime_min_confidence_scale, 0.0, 1.0);
+    if (!std::isfinite(cfg_.basis_stop_alpha_z) || cfg_.basis_stop_alpha_z < 0.0) {
+        cfg_.basis_stop_alpha_z = 0.0;
+    }
+    if (!std::isfinite(cfg_.basis_stop_risk_z) || cfg_.basis_stop_risk_z < 0.0) {
+        cfg_.basis_stop_risk_z = 0.0;
+    }
+    if (!std::isfinite(cfg_.basis_cost_edge_threshold_pct) || cfg_.basis_cost_edge_threshold_pct < 0.0) {
+        cfg_.basis_cost_edge_threshold_pct = 0.0;
+    }
+    if (!std::isfinite(cfg_.basis_cost_expected_hold_hours) || cfg_.basis_cost_expected_hold_hours < 0.0) {
+        cfg_.basis_cost_expected_hold_hours = 0.0;
+    }
+    if (!std::isfinite(cfg_.basis_cost_expected_funding_settlements) ||
+        cfg_.basis_cost_expected_funding_settlements < 0.0)
+    {
+        cfg_.basis_cost_expected_funding_settlements = 0.0;
+    }
+    if (!std::isfinite(cfg_.basis_cost_borrow_apr) || cfg_.basis_cost_borrow_apr < 0.0) {
+        cfg_.basis_cost_borrow_apr = 0.0;
+    }
+    if (!std::isfinite(cfg_.basis_cost_trading_cost_rate_per_leg) ||
+        cfg_.basis_cost_trading_cost_rate_per_leg < 0.0)
+    {
+        cfg_.basis_cost_trading_cost_rate_per_leg = 0.0;
+    }
+    if (!std::isfinite(cfg_.basis_cost_risk_penalty_weight) || cfg_.basis_cost_risk_penalty_weight < 0.0) {
+        cfg_.basis_cost_risk_penalty_weight = 0.0;
+    }
+    if (!std::isfinite(cfg_.basis_cost_trend_penalty_weight) || cfg_.basis_cost_trend_penalty_weight < 0.0) {
+        cfg_.basis_cost_trend_penalty_weight = 0.0;
+    }
 }
 
 SignalDecision BasisArbitrageSignalEngine::on_market(
     const std::shared_ptr<QTrading::Dto::Market::Binance::MultiKlineDto>& market)
 {
-    SignalDecision out = FundingCarrySignalEngine::on_market(market);
+    SignalDecision out{};
     out.strategy = "basis_arbitrage";
-    std::optional<double> mr_basis_pct_opt = std::nullopt;
+    if (!market) {
+        return out;
+    }
+
+    out.ts_ms = market->Timestamp;
+    out.symbol = cfg_.perp_symbol;
+
+    if (!ResolveSymbolIds(market)) {
+        out.status = SignalStatus::Inactive;
+        return out;
+    }
+
+    const auto trade_basis_pct_opt = ComputeBasisPct(market, false);
+    if (!trade_basis_pct_opt.has_value() || !std::isfinite(*trade_basis_pct_opt)) {
+        out.status = SignalStatus::Inactive;
+        return out;
+    }
+    const double trade_basis_pct = *trade_basis_pct_opt;
+
+    const std::size_t ema_long_period = std::max<std::size_t>(cfg_.basis_mr_window_bars, 3);
+    const std::size_t ema_mid_period = std::max<std::size_t>(ema_long_period / 3, 2);
+    const std::size_t ema_short_period = std::max<std::size_t>(ema_long_period / 8, 2);
+    UpdateEma(
+        trade_basis_pct,
+        EmaAlphaFromPeriod(ema_short_period),
+        alpha_ema_initialized_,
+        basis_alpha_ema_short_);
+    UpdateEma(
+        trade_basis_pct,
+        EmaAlphaFromPeriod(ema_mid_period),
+        alpha_ema_initialized_,
+        basis_alpha_ema_mid_);
+    UpdateEma(
+        trade_basis_pct,
+        EmaAlphaFromPeriod(ema_long_period),
+        alpha_ema_initialized_,
+        basis_alpha_ema_long_);
+    alpha_ema_initialized_ = true;
+
+    const auto risk_basis_pct_opt = ComputeBasisPct(market, true);
+    const auto regime_basis_pct_opt = ComputeBasisPct(market, cfg_.basis_regime_use_mark_index);
+    std::optional<double> mark_index_bps = std::nullopt;
+    if (risk_basis_pct_opt.has_value() && std::isfinite(*risk_basis_pct_opt)) {
+        mark_index_bps = *risk_basis_pct_opt * 10000.0;
+    }
+    if (regime_basis_pct_opt.has_value() && std::isfinite(*regime_basis_pct_opt)) {
+        basis_regime_window_.push_back(*regime_basis_pct_opt);
+        while (basis_regime_window_.size() > cfg_.basis_regime_window_bars) {
+            basis_regime_window_.pop_front();
+        }
+    }
+
+    std::optional<RollingStats> alpha_stats = std::nullopt;
+    const auto risk_stats =
+        (regime_basis_pct_opt.has_value() && std::isfinite(*regime_basis_pct_opt))
+        ? ComputeRollingStats(basis_regime_window_, *regime_basis_pct_opt, cfg_.basis_mr_std_floor)
+        : std::nullopt;
+    const double risk_basis =
+        (regime_basis_pct_opt.has_value() && risk_stats.has_value() && risk_stats->stddev > 0.0)
+        ? std::fabs(*regime_basis_pct_opt) / risk_stats->stddev
+        : 0.0;
+
+    const bool mark_index_hard_breached =
+        (cfg_.mark_index_hard_exit_bps > 0.0) &&
+        mark_index_bps.has_value() &&
+        (std::abs(*mark_index_bps) >= cfg_.mark_index_hard_exit_bps);
+
+    out.status = SignalStatus::Active;
+    out.confidence = 1.0;
+    out.strategy = "basis_arbitrage";
     if (cfg_.basis_mr_enabled) {
-        mr_basis_pct_opt = ComputeBasisPct(market, cfg_.basis_mr_use_mark_index);
+        auto mr_basis_pct_opt = ComputeBasisPct(market, cfg_.basis_mr_use_mark_index);
         if (!mr_basis_pct_opt.has_value() || !std::isfinite(*mr_basis_pct_opt)) {
             mr_active_ = false;
             mr_entry_streak_ = 0;
@@ -81,6 +235,7 @@ SignalDecision BasisArbitrageSignalEngine::on_market(
         while (basis_window_.size() > cfg_.basis_mr_window_bars) {
             basis_window_.pop_front();
         }
+        alpha_stats = ComputeRollingStats(basis_window_, *mr_basis_pct_opt, cfg_.basis_mr_std_floor);
 
         if (basis_window_.size() < cfg_.basis_mr_min_samples) {
             mr_active_ = false;
@@ -91,17 +246,15 @@ SignalDecision BasisArbitrageSignalEngine::on_market(
             return out;
         }
 
-        const double n = static_cast<double>(basis_window_.size());
-        const double mean = std::accumulate(basis_window_.begin(), basis_window_.end(), 0.0) / n;
-        double var = 0.0;
-        for (const double v : basis_window_) {
-            const double d = v - mean;
-            var += d * d;
+        const auto mr_stats =
+            ComputeRollingStats(basis_window_, *mr_basis_pct_opt, cfg_.basis_mr_std_floor);
+        if (!mr_stats.has_value()) {
+            out.status = SignalStatus::Inactive;
+            out.confidence = 0.0;
+            return out;
         }
-        var /= n;
-        const double stdv = std::max(std::sqrt(std::max(var, 0.0)), cfg_.basis_mr_std_floor);
-        const double z = (*mr_basis_pct_opt - mean) / stdv;
-        const double abs_z = std::fabs(z);
+        const double z = mr_stats->z;
+        const double abs_z = mr_stats->abs_z;
 
         const bool entry_candidate =
             (abs_z >= cfg_.basis_mr_entry_z && abs_z <= cfg_.basis_mr_max_abs_z);
@@ -158,46 +311,171 @@ SignalDecision BasisArbitrageSignalEngine::on_market(
         }
     }
 
+    const bool alpha_stop_breached =
+        (cfg_.basis_stop_alpha_z > 0.0) &&
+        alpha_stats.has_value() &&
+        (basis_window_.size() >= cfg_.basis_mr_min_samples) &&
+        (alpha_stats->abs_z >= cfg_.basis_stop_alpha_z);
+    const bool risk_stop_breached =
+        (cfg_.basis_stop_risk_z > 0.0) &&
+        risk_stats.has_value() &&
+        (basis_regime_window_.size() >= cfg_.basis_regime_min_samples) &&
+        (risk_stats->abs_z >= cfg_.basis_stop_risk_z);
+
+    if (alpha_stop_breached || risk_stop_breached) {
+        mr_active_ = false;
+        mr_entry_streak_ = 0;
+        mr_exit_streak_ = 0;
+        mr_last_exit_ts_ = out.ts_ms;
+        out.status = SignalStatus::Inactive;
+        out.confidence = 0.0;
+        return out;
+    }
+
+    if (mark_index_hard_breached) {
+        out.status = SignalStatus::Inactive;
+        out.confidence = 0.0;
+        return out;
+    }
+
     if (cfg_.basis_regime_confidence_enabled &&
         out.status == SignalStatus::Active &&
         out.confidence > 0.0)
     {
-        auto regime_basis_pct_opt = ComputeBasisPct(market, cfg_.basis_regime_use_mark_index);
-        if (regime_basis_pct_opt.has_value() && std::isfinite(*regime_basis_pct_opt)) {
-            basis_regime_window_.push_back(*regime_basis_pct_opt);
-            while (basis_regime_window_.size() > cfg_.basis_regime_window_bars) {
-                basis_regime_window_.pop_front();
+        if (!alpha_stats.has_value()) {
+            alpha_stats = ComputeRollingStats(basis_window_, trade_basis_pct, cfg_.basis_mr_std_floor);
+        }
+        if (risk_stats.has_value() &&
+            basis_regime_window_.size() >= cfg_.basis_regime_min_samples)
+        {
+            const double alpha_abs_z = alpha_stats.has_value() ? alpha_stats->abs_z : 0.0;
+            const double risk_abs_z = risk_stats->abs_z;
+            const bool stress_regime =
+                (risk_abs_z >= cfg_.basis_regime_stress_z) ||
+                (risk_basis >= cfg_.basis_regime_stress_z);
+            const bool calm_regime =
+                (alpha_abs_z <= cfg_.basis_regime_calm_z) &&
+                (risk_abs_z <= cfg_.basis_regime_calm_z) &&
+                (risk_basis <= cfg_.basis_regime_calm_z);
+
+            double confidence_scale = 1.0;
+            if (!calm_regime) {
+                const double z_denom =
+                    std::max(cfg_.basis_regime_stress_z - cfg_.basis_regime_calm_z, 1e-12);
+                const double z_progress =
+                    std::clamp((risk_abs_z - cfg_.basis_regime_calm_z) / z_denom, 0.0, 1.0);
+                const double risk_progress =
+                    std::clamp((risk_basis - cfg_.basis_regime_calm_z) / z_denom, 0.0, 1.0);
+                const double progress = stress_regime
+                    ? std::max(z_progress, risk_progress)
+                    : 0.5 * std::max(z_progress, risk_progress);
+                confidence_scale =
+                    1.0 - (1.0 - cfg_.basis_regime_min_confidence_scale) * progress;
             }
 
-            if (basis_regime_window_.size() >= cfg_.basis_regime_min_samples) {
-                const double n = static_cast<double>(basis_regime_window_.size());
-                const double mean =
-                    std::accumulate(basis_regime_window_.begin(), basis_regime_window_.end(), 0.0) /
-                    n;
-                double var = 0.0;
-                for (const double v : basis_regime_window_) {
-                    const double d = v - mean;
-                    var += d * d;
-                }
-                var /= n;
-                const double stdv = std::max(std::sqrt(std::max(var, 0.0)), cfg_.basis_mr_std_floor);
-                const double z = (*regime_basis_pct_opt - mean) / stdv;
-                const double abs_z = std::fabs(z);
-
-                double confidence_scale = 1.0;
-                if (abs_z > cfg_.basis_regime_calm_z) {
-                    const double denom =
-                        std::max(cfg_.basis_regime_stress_z - cfg_.basis_regime_calm_z, 1e-12);
-                    const double progress =
-                        std::clamp((abs_z - cfg_.basis_regime_calm_z) / denom, 0.0, 1.0);
-                    confidence_scale =
-                        1.0 -
-                        (1.0 - cfg_.basis_regime_min_confidence_scale) * progress;
-                }
-                out.confidence = std::clamp(out.confidence * confidence_scale, 0.0, 1.0);
+            const double ema_dispersion =
+                std::fabs(basis_alpha_ema_short_ - basis_alpha_ema_mid_) +
+                std::fabs(basis_alpha_ema_mid_ - basis_alpha_ema_long_);
+            if (alpha_stats.has_value() &&
+                alpha_stats->stddev > 0.0 &&
+                std::signbit(trade_basis_pct) == std::signbit(basis_alpha_ema_short_ - basis_alpha_ema_long_))
+            {
+                const double trend_pressure =
+                    std::clamp(ema_dispersion / alpha_stats->stddev, 0.0, 1.0);
+                confidence_scale *= (1.0 - 0.15 * trend_pressure);
             }
+
+            out.confidence = std::clamp(out.confidence * confidence_scale, 0.0, 1.0);
         }
     }
+
+    if (cfg_.basis_cost_gate_enabled &&
+        out.status == SignalStatus::Active &&
+        out.confidence > 0.0 &&
+        alpha_stats.has_value())
+    {
+        const double expected_reversion_gain =
+            std::max(0.0, std::fabs(trade_basis_pct - alpha_stats->mean));
+        const double borrow_cost =
+            cfg_.basis_cost_borrow_apr * (cfg_.basis_cost_expected_hold_hours / kHoursPerYear);
+        const double trading_cost =
+            2.0 * cfg_.basis_cost_trading_cost_rate_per_leg;
+        const double ema_dispersion =
+            std::fabs(basis_alpha_ema_short_ - basis_alpha_ema_mid_) +
+            std::fabs(basis_alpha_ema_mid_ - basis_alpha_ema_long_);
+        const double normalized_trend_pressure =
+            (alpha_stats->stddev > 0.0)
+            ? std::clamp(ema_dispersion / alpha_stats->stddev, 0.0, 1.0)
+            : 0.0;
+        const double risk_penalty =
+            cfg_.basis_cost_risk_penalty_weight * risk_basis +
+            cfg_.basis_cost_trend_penalty_weight * normalized_trend_pressure;
+
+        double funding_edge = 0.0;
+        if (cfg_.basis_cost_include_funding &&
+            perp_id_ < market->funding_by_id.size())
+        {
+            const auto& funding_opt = market->funding_by_id[perp_id_];
+            if (funding_opt.has_value() && std::isfinite(funding_opt->Rate)) {
+                const double direction = (trade_basis_pct >= 0.0) ? 1.0 : -1.0;
+                funding_edge =
+                    direction *
+                    funding_opt->Rate *
+                    cfg_.basis_cost_expected_funding_settlements;
+            }
+        }
+
+        const double net_edge =
+            expected_reversion_gain +
+            funding_edge -
+            borrow_cost -
+            trading_cost -
+            risk_penalty;
+
+        if (net_edge <= cfg_.basis_cost_edge_threshold_pct) {
+            mr_active_ = false;
+            mr_entry_streak_ = 0;
+            mr_exit_streak_ = 0;
+            mr_last_exit_ts_ = out.ts_ms;
+            out.status = SignalStatus::Inactive;
+            out.confidence = 0.0;
+            return out;
+        }
+
+        const double gross_edge =
+            std::max(
+                expected_reversion_gain + std::max(0.0, funding_edge),
+                cfg_.basis_cost_edge_threshold_pct + 1e-12);
+        const double edge_scale = std::clamp(net_edge / gross_edge, 0.0, 1.0);
+        out.confidence = std::clamp(out.confidence * edge_scale, 0.0, 1.0);
+    }
+
+    if (out.status == SignalStatus::Active &&
+        out.confidence > 0.0 &&
+        mark_index_bps.has_value() &&
+        cfg_.mark_index_soft_derisk_start_bps > 0.0 &&
+        cfg_.mark_index_soft_derisk_full_bps >= cfg_.mark_index_soft_derisk_start_bps)
+    {
+        const double abs_bps = std::abs(*mark_index_bps);
+        double derisk_scale = 1.0;
+        if (abs_bps > cfg_.mark_index_soft_derisk_start_bps) {
+            if (cfg_.mark_index_soft_derisk_full_bps <= cfg_.mark_index_soft_derisk_start_bps + 1e-12) {
+                derisk_scale = cfg_.mark_index_soft_derisk_min_confidence_scale;
+            }
+            else {
+                const double progress = std::clamp(
+                    (abs_bps - cfg_.mark_index_soft_derisk_start_bps) /
+                    (cfg_.mark_index_soft_derisk_full_bps - cfg_.mark_index_soft_derisk_start_bps),
+                    0.0,
+                    1.0);
+                derisk_scale =
+                    1.0 - progress * (1.0 - cfg_.mark_index_soft_derisk_min_confidence_scale);
+            }
+        }
+        out.confidence = std::clamp(out.confidence * derisk_scale, 0.0, 1.0);
+    }
+
+    out.urgency = SignalUrgency::Low;
 
     return out;
 }

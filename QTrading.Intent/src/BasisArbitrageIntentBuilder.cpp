@@ -31,6 +31,7 @@ TradeIntent BasisArbitrageIntentBuilder::build(
 {
     TradeIntent out = FundingCarryIntentBuilder::build(signal, market);
     out.strategy = "basis_arbitrage";
+    out.structure = "delta_neutral_basis";
     out.reason = "basis_arbitrage";
     if (!out.intent_id.empty()) {
         constexpr std::string_view old_prefix = "funding_carry:";

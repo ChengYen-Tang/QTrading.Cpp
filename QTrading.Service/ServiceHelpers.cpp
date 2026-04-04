@@ -225,6 +225,17 @@ void ApplyBasisArbitrageSpecificConfigSections(
     ApplyNumber(signal, "basis_regime_calm_z", signal_cfg.basis_regime_calm_z);
     ApplyNumber(signal, "basis_regime_stress_z", signal_cfg.basis_regime_stress_z);
     ApplyNumber(signal, "basis_regime_min_confidence_scale", signal_cfg.basis_regime_min_confidence_scale);
+    ApplyNumber(signal, "basis_stop_alpha_z", signal_cfg.basis_stop_alpha_z);
+    ApplyNumber(signal, "basis_stop_risk_z", signal_cfg.basis_stop_risk_z);
+    ApplyBool(signal, "basis_cost_gate_enabled", signal_cfg.basis_cost_gate_enabled);
+    ApplyNumber(signal, "basis_cost_edge_threshold_pct", signal_cfg.basis_cost_edge_threshold_pct);
+    ApplyNumber(signal, "basis_cost_expected_hold_hours", signal_cfg.basis_cost_expected_hold_hours);
+    ApplyNumber(signal, "basis_cost_expected_funding_settlements", signal_cfg.basis_cost_expected_funding_settlements);
+    ApplyNumber(signal, "basis_cost_borrow_apr", signal_cfg.basis_cost_borrow_apr);
+    ApplyNumber(signal, "basis_cost_trading_cost_rate_per_leg", signal_cfg.basis_cost_trading_cost_rate_per_leg);
+    ApplyNumber(signal, "basis_cost_risk_penalty_weight", signal_cfg.basis_cost_risk_penalty_weight);
+    ApplyNumber(signal, "basis_cost_trend_penalty_weight", signal_cfg.basis_cost_trend_penalty_weight);
+    ApplyBool(signal, "basis_cost_include_funding", signal_cfg.basis_cost_include_funding);
 
     const rapidjson::Value* intent = FindObject(doc, "intent");
     ApplyBool(intent, "basis_directional_enabled", intent_cfg.basis_directional_enabled);

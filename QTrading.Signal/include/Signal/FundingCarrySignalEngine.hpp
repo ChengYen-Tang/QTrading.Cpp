@@ -222,6 +222,28 @@ public:
         double basis_regime_stress_z = 2.5;
         /// @brief Minimum confidence multiplier under stress regime.
         double basis_regime_min_confidence_scale = 0.5;
+        /// @brief Explicit alpha stop on trade-basis |z|. <= 0 disables.
+        double basis_stop_alpha_z = 0.0;
+        /// @brief Explicit risk stop on risk-basis |z|. <= 0 disables.
+        double basis_stop_risk_z = 0.0;
+        /// @brief Enable basis standalone cost-aware net-edge gate.
+        bool basis_cost_gate_enabled = false;
+        /// @brief Minimum required net edge after costs/penalties (basis pct units).
+        double basis_cost_edge_threshold_pct = 0.0;
+        /// @brief Expected holding horizon used to convert borrow APR into holding cost.
+        double basis_cost_expected_hold_hours = 8.0;
+        /// @brief Expected future funding settlements accrued during holding horizon.
+        double basis_cost_expected_funding_settlements = 1.0;
+        /// @brief Borrow APR used for cost-aware gate (annualized decimal, e.g. 0.12 = 12%).
+        double basis_cost_borrow_apr = 0.0;
+        /// @brief One-way execution cost rate per leg (decimal); round-trip pair ~= 2 legs.
+        double basis_cost_trading_cost_rate_per_leg = 0.0;
+        /// @brief Penalty weight applied to risk_basis when computing net edge.
+        double basis_cost_risk_penalty_weight = 0.0;
+        /// @brief Additional penalty weight for persistent trend pressure in basis alpha EMA structure.
+        double basis_cost_trend_penalty_weight = 0.0;
+        /// @brief If true, observed perp funding contributes to net edge as carry side-effect.
+        bool basis_cost_include_funding = true;
     };
 
     explicit FundingCarrySignalEngine(Config cfg);

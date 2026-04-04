@@ -197,7 +197,7 @@ TEST(SimpleRiskEngineTests, UsesExplicitInstrumentTypesWithoutSuffixNames)
     EXPECT_EQ(out.leverage["BTCUSDT_SWAP"], 2.0);
 }
 
-TEST(SimpleRiskEngineTests, BasisArbitrageEnforcesTwoLegNotionalParity)
+TEST(SimpleRiskEngineTests, BasisArbitrageUsesLinearDeltaNeutralSizing)
 {
     QTrading::Risk::SimpleRiskEngine::Config cfg;
     cfg.notional_usdt = 1000.0;
@@ -208,7 +208,7 @@ TEST(SimpleRiskEngineTests, BasisArbitrageEnforcesTwoLegNotionalParity)
 
     QTrading::Intent::TradeIntent intent;
     intent.strategy = "basis_arbitrage";
-    intent.structure = "delta_neutral_carry";
+    intent.structure = "delta_neutral_basis";
     intent.ts_ms = 1;
     intent.legs.push_back({ "BTCUSDT_SPOT", QTrading::Intent::TradeSide::Long });
     intent.legs.push_back({ "BTCUSDT_PERP", QTrading::Intent::TradeSide::Short });
@@ -218,7 +218,7 @@ TEST(SimpleRiskEngineTests, BasisArbitrageEnforcesTwoLegNotionalParity)
     auto out = engine.position(intent, account, market);
 
     EXPECT_NEAR(out.target_positions["BTCUSDT_SPOT"], 1000.0, 1e-9);
-    EXPECT_NEAR(out.target_positions["BTCUSDT_PERP"], -1000.0, 1e-9);
+    EXPECT_NEAR(out.target_positions["BTCUSDT_PERP"], -1010.0, 1e-9);
     EXPECT_EQ(out.leverage["BTCUSDT_SPOT"], 1.0);
     EXPECT_EQ(out.leverage["BTCUSDT_PERP"], 2.0);
 }
@@ -237,7 +237,7 @@ TEST(SimpleRiskEngineTests, MarkIndexSoftDeriskScalesCarryTargetNotional)
 
     QTrading::Intent::TradeIntent intent;
     intent.strategy = "basis_arbitrage";
-    intent.structure = "delta_neutral_carry";
+    intent.structure = "delta_neutral_basis";
     intent.ts_ms = 1;
     intent.legs.push_back({ "BTCUSDT_SPOT", QTrading::Intent::TradeSide::Long });
     intent.legs.push_back({ "BTCUSDT_PERP", QTrading::Intent::TradeSide::Short });
@@ -252,7 +252,7 @@ TEST(SimpleRiskEngineTests, MarkIndexSoftDeriskScalesCarryTargetNotional)
 
     EXPECT_NEAR(calm.target_positions.at("BTCUSDT_SPOT"), 1000.0, 1e-9);
     EXPECT_NEAR(stressed.target_positions.at("BTCUSDT_SPOT"), 400.0, 1e-9);
-    EXPECT_NEAR(stressed.target_positions.at("BTCUSDT_PERP"), -400.0, 1e-9);
+    EXPECT_NEAR(stressed.target_positions.at("BTCUSDT_PERP"), -404.0, 1e-9);
 }
 
 TEST(SimpleRiskEngineTests, MarkIndexHardGuardFlattensCarryTargets)
@@ -267,7 +267,7 @@ TEST(SimpleRiskEngineTests, MarkIndexHardGuardFlattensCarryTargets)
 
     QTrading::Intent::TradeIntent intent;
     intent.strategy = "basis_arbitrage";
-    intent.structure = "delta_neutral_carry";
+    intent.structure = "delta_neutral_basis";
     intent.ts_ms = 1;
     intent.legs.push_back({ "BTCUSDT_SPOT", QTrading::Intent::TradeSide::Long });
     intent.legs.push_back({ "BTCUSDT_PERP", QTrading::Intent::TradeSide::Short });
@@ -307,14 +307,74 @@ TEST(SimpleRiskEngineTests, BasisAlphaOverlayScalesBasisArbitrageNotionalByDirec
     auto positive_basis = MakeTwoLegMarket(1, 100.0, 101.0);
     const auto out_pos = engine.position(intent, account, positive_basis);
     EXPECT_NEAR(out_pos.target_positions.at("BTCUSDT_SPOT"), 1200.0, 1e-9);
-    EXPECT_NEAR(out_pos.target_positions.at("BTCUSDT_PERP"), -1200.0, 1e-9);
+    EXPECT_NEAR(out_pos.target_positions.at("BTCUSDT_PERP"), -1212.0, 1e-9);
 
     // Negative basis (-1%) => adverse direction -> downscale to floor.
     intent.ts_ms = 2;
     auto negative_basis = MakeTwoLegMarket(2, 100.0, 99.0);
     const auto out_neg = engine.position(intent, account, negative_basis);
     EXPECT_NEAR(out_neg.target_positions.at("BTCUSDT_SPOT"), 800.0, 1e-9);
-    EXPECT_NEAR(out_neg.target_positions.at("BTCUSDT_PERP"), -800.0, 1e-9);
+    EXPECT_NEAR(out_neg.target_positions.at("BTCUSDT_PERP"), -792.0, 1e-9);
+}
+
+TEST(SimpleRiskEngineTests, BasisArbitrageIgnoresCarryConfidenceSizing)
+{
+    QTrading::Risk::SimpleRiskEngine::Config cfg;
+    cfg.notional_usdt = 1000.0;
+    cfg.max_leg_notional_usdt = 1000.0;
+    cfg.leverage = 2.0;
+    cfg.max_leverage = 3.0;
+    cfg.carry_confidence_min_scale = 0.2;
+    cfg.carry_confidence_power = 1.0;
+    ApplyDefaultSpotPerpTypes(cfg);
+    QTrading::Risk::SimpleRiskEngine engine(cfg);
+
+    QTrading::Intent::TradeIntent intent;
+    intent.strategy = "basis_arbitrage";
+    intent.structure = "delta_neutral_basis";
+    intent.ts_ms = 1;
+    intent.confidence = 0.25;
+    intent.legs.push_back({ "BTCUSDT_SPOT", QTrading::Intent::TradeSide::Long });
+    intent.legs.push_back({ "BTCUSDT_PERP", QTrading::Intent::TradeSide::Short });
+
+    QTrading::Risk::AccountState account;
+    auto market = MakeTwoLegMarket(1, 100.0, 101.0);
+    auto out = engine.position(intent, account, market);
+
+    EXPECT_NEAR(out.target_positions["BTCUSDT_SPOT"], 1000.0, 1e-9);
+    EXPECT_NEAR(out.target_positions["BTCUSDT_PERP"], -1010.0, 1e-9);
+    EXPECT_NEAR(out.leverage["BTCUSDT_PERP"], 2.0, 1e-9);
+}
+
+TEST(SimpleRiskEngineTests, BasisArbitrageIgnoresCarryFundingEconomicsGate)
+{
+    QTrading::Risk::SimpleRiskEngine::Config cfg;
+    cfg.notional_usdt = 1000.0;
+    cfg.max_leg_notional_usdt = 1000.0;
+    cfg.leverage = 2.0;
+    cfg.max_leverage = 3.0;
+    cfg.carry_size_cost_rate_per_leg = 0.0003;
+    cfg.carry_size_expected_hold_settlements = 2.0;
+    cfg.carry_size_min_gain_to_cost_low_confidence = 2.5;
+    cfg.carry_size_min_gain_to_cost_high_confidence = 1.2;
+    cfg.carry_size_gain_to_cost_confidence_power = 1.0;
+    ApplyDefaultSpotPerpTypes(cfg);
+    QTrading::Risk::SimpleRiskEngine engine(cfg);
+
+    QTrading::Intent::TradeIntent intent;
+    intent.strategy = "basis_arbitrage";
+    intent.structure = "delta_neutral_basis";
+    intent.ts_ms = 1;
+    intent.confidence = 0.10;
+    intent.legs.push_back({ "BTCUSDT_SPOT", QTrading::Intent::TradeSide::Long });
+    intent.legs.push_back({ "BTCUSDT_PERP", QTrading::Intent::TradeSide::Short });
+
+    QTrading::Risk::AccountState account;
+    auto market = MakeTwoLegMarketWithPerpFunding(1, 100.0, 101.0, 1, 0.0003);
+    auto out = engine.position(intent, account, market);
+
+    EXPECT_NEAR(out.target_positions["BTCUSDT_SPOT"], 1000.0, 1e-9);
+    EXPECT_NEAR(out.target_positions["BTCUSDT_PERP"], -1010.0, 1e-9);
 }
 
 TEST(SimpleRiskEngineTests, CapsPerLegNotionalByConfig)
