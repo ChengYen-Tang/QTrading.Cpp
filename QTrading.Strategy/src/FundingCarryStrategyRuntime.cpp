@@ -1,10 +1,10 @@
-#include "Execution/FundingCarryStrategy.hpp"
+#include "Strategy/FundingCarryStrategyRuntime.hpp"
 
 #include "Exchanges/BinanceSimulator/BinanceExchange.hpp"
 
-namespace QTrading::Execution {
+namespace QTrading::Strategy {
 
-FundingCarryStrategy::FundingCarryStrategy(
+FundingCarryStrategyRuntime::FundingCarryStrategyRuntime(
     std::shared_ptr<QTrading::Infra::Exchanges::BinanceSim::BinanceExchange> exchange,
     QTrading::Universe::FixedUniverseSelector& universe_selector,
     QTrading::Signal::FundingCarrySignalEngine& signal_engine,
@@ -22,15 +22,12 @@ FundingCarryStrategy::FundingCarryStrategy(
     , monitoring_(monitoring)
     , execution_scheduler_()
     , execution_policy_()
-    , execution_orchestrator_(
-        execution_engine_,
-        execution_scheduler_,
-        execution_policy_)
+    , execution_orchestrator_(execution_engine_, execution_scheduler_, execution_policy_)
     , exchange_gateway_(exchange_, std::move(instrument_types))
 {
 }
 
-void FundingCarryStrategy::wait_for_done()
+void FundingCarryStrategyRuntime::RunOneCycle()
 {
     auto market_opt = exchange_->get_market_channel()->Receive();
     if (!market_opt.has_value()) {
@@ -48,4 +45,4 @@ void FundingCarryStrategy::wait_for_done()
     exchange_gateway_.ApplyMonitoringAlerts(monitoring_.check(account));
 }
 
-} // namespace QTrading::Execution
+} // namespace QTrading::Strategy

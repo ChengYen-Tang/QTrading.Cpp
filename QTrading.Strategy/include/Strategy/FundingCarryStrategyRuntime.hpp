@@ -2,7 +2,6 @@
 
 #include "Dto/Market/Binance/MultiKline.hpp"
 #include "Execution/FundingCarryExecutionOrchestrator.hpp"
-#include "Execution/FundingCarryExchangeGateway.hpp"
 #include "Execution/IExecutionEngine.hpp"
 #include "Execution/IExecutionPolicy.hpp"
 #include "Execution/IExecutionScheduler.hpp"
@@ -11,25 +10,24 @@
 #include "Monitoring/SimpleMonitoring.hpp"
 #include "Risk/SimpleRiskEngine.hpp"
 #include "Signal/FundingCarrySignalEngine.hpp"
+#include "Strategy/FundingCarryStrategyGateway.hpp"
+#include "Strategy/IStrategyRuntime.hpp"
 #include "Universe/FixedUniverseSelector.hpp"
 
 #include <memory>
-#include <string>
 #include <unordered_map>
 
 namespace QTrading::Infra::Exchanges::BinanceSim {
 class BinanceExchange;
 }
 
-namespace QTrading::Execution {
+namespace QTrading::Strategy {
 
-/// @brief Funding-carry strategy entrypoint used by Service loop.
-/// Service drives exchange->step(), then waits strategy to consume that tick.
-class FundingCarryStrategy {
+class FundingCarryStrategyRuntime : public IStrategyRuntime {
 public:
     using MarketPtr = std::shared_ptr<QTrading::Dto::Market::Binance::MultiKlineDto>;
 
-    FundingCarryStrategy(
+    FundingCarryStrategyRuntime(
         std::shared_ptr<QTrading::Infra::Exchanges::BinanceSim::BinanceExchange> exchange,
         QTrading::Universe::FixedUniverseSelector& universe_selector,
         QTrading::Signal::FundingCarrySignalEngine& signal_engine,
@@ -39,7 +37,7 @@ public:
         QTrading::Monitoring::SimpleMonitoring& monitoring,
         std::unordered_map<std::string, QTrading::Dto::Trading::InstrumentType> instrument_types);
 
-    virtual void wait_for_done();
+    void RunOneCycle() override;
 
 private:
     std::shared_ptr<QTrading::Infra::Exchanges::BinanceSim::BinanceExchange> exchange_;
@@ -52,7 +50,7 @@ private:
     QTrading::Execution::LiquidityAwareExecutionScheduler execution_scheduler_;
     QTrading::Execution::TargetNotionalExecutionPolicy execution_policy_;
     QTrading::Execution::FundingCarryExecutionOrchestrator execution_orchestrator_;
-    QTrading::Execution::FundingCarryExchangeGateway exchange_gateway_;
+    FundingCarryStrategyGateway exchange_gateway_;
 };
 
-} // namespace QTrading::Execution
+} // namespace QTrading::Strategy

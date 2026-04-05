@@ -1,9 +1,9 @@
 #pragma once
 
+#include "Dto/Trading/InstrumentSpec.hpp"
 #include "Execution/ExecutionOrder.hpp"
 #include "Monitoring/MonitoringAlert.hpp"
 #include "Risk/AccountState.hpp"
-#include "Dto/Trading/InstrumentSpec.hpp"
 
 #include <memory>
 #include <string>
@@ -14,24 +14,21 @@ namespace QTrading::Infra::Exchanges::BinanceSim {
 class BinanceExchange;
 }
 
-namespace QTrading::Execution {
+namespace QTrading::Strategy {
 
-/// @brief Exchange-facing adapter for funding-carry strategy.
-/// Encapsulates account snapshot + order/alert side effects.
-class FundingCarryExchangeGateway {
+class FundingCarryStrategyGateway {
 public:
-    FundingCarryExchangeGateway(
+    FundingCarryStrategyGateway(
         std::shared_ptr<QTrading::Infra::Exchanges::BinanceSim::BinanceExchange> exchange,
         std::unordered_map<std::string, QTrading::Dto::Trading::InstrumentType> instrument_types);
 
-    virtual QTrading::Risk::AccountState BuildAccountState() const;
-    virtual void SubmitOrders(const std::vector<QTrading::Execution::ExecutionOrder>& orders);
-    virtual void ApplyMonitoringAlerts(const std::vector<QTrading::Monitoring::MonitoringAlert>& alerts);
+    QTrading::Risk::AccountState BuildAccountState() const;
+    void SubmitOrders(const std::vector<QTrading::Execution::ExecutionOrder>& orders);
+    void ApplyMonitoringAlerts(const std::vector<QTrading::Monitoring::MonitoringAlert>& alerts);
 
 private:
     std::shared_ptr<QTrading::Infra::Exchanges::BinanceSim::BinanceExchange> exchange_;
     std::unordered_map<std::string, QTrading::Dto::Trading::InstrumentType> instrument_types_;
 };
 
-} // namespace QTrading::Execution
-
+} // namespace QTrading::Strategy
