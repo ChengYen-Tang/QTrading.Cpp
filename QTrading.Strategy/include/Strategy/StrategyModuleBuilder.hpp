@@ -9,7 +9,7 @@
 #include "Signal/ISignalEngine.hpp"
 #include "Strategy/IStrategyRuntime.hpp"
 #include "Strategy/StrategyConfigLoader.hpp"
-#include "Universe/FixedUniverseSelector.hpp"
+#include "Universe/IUniverseSelector.hpp"
 
 #include <filesystem>
 #include <memory>
@@ -30,7 +30,7 @@ struct StrategyMetadata {
 };
 
 struct StrategyModuleBundle {
-    std::unique_ptr<QTrading::Universe::FixedUniverseSelector> universe_selector;
+    std::unique_ptr<QTrading::Universe::IUniverseSelector> universe_selector;
     std::shared_ptr<QTrading::Signal::ISignalEngine<std::shared_ptr<QTrading::Dto::Market::Binance::MultiKlineDto>>> signal_engine;
     std::shared_ptr<QTrading::Intent::IIntentBuilder<std::shared_ptr<QTrading::Dto::Market::Binance::MultiKlineDto>>> intent_builder;
     std::unique_ptr<QTrading::Risk::SimpleRiskEngine> risk_engine;

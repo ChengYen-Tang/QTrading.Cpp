@@ -4,15 +4,8 @@
 
 namespace QTrading::Universe {
 
-namespace {
-std::vector<std::string> DefaultFundingCarryUniverse()
-{
-    return { "BTCUSDT_SPOT", "BTCUSDT_PERP" };
-}
-} // namespace
-
 FixedUniverseSelector::FixedUniverseSelector(std::vector<std::string> symbols)
-    : symbols_(symbols.empty() ? DefaultFundingCarryUniverse() : std::move(symbols))
+    : symbols_(std::move(symbols))
 {
 }
 

@@ -3,6 +3,7 @@
 #include "Intent/BasisArbitrageIntentBuilder.hpp"
 #include "Signal/BasisArbitrageSignalEngine.hpp"
 #include "Strategy/FundingCarryStrategyRuntime.hpp"
+#include "Universe/IUniverseSelector.hpp"
 
 #include <stdexcept>
 #include <utility>
@@ -19,7 +20,7 @@ StrategyModuleBundle BuildFundingCarryModules(
     configs.risk_cfg.instrument_types = instrument_types;
 
     StrategyModuleBundle bundle;
-    bundle.universe_selector = std::make_unique<QTrading::Universe::FixedUniverseSelector>();
+    bundle.universe_selector = std::make_unique<QTrading::Universe::NullUniverseSelector>();
     bundle.signal_engine = std::make_shared<QTrading::Signal::FundingCarrySignalEngine>(configs.signal_cfg);
     bundle.intent_builder = std::make_shared<QTrading::Intent::FundingCarryIntentBuilder>(configs.intent_cfg);
     bundle.risk_engine = std::make_unique<QTrading::Risk::SimpleRiskEngine>(configs.risk_cfg);
@@ -47,7 +48,7 @@ StrategyModuleBundle BuildBasisArbitrageModules(
     configs.execution_cfg.carry_balance_two_sided_rebalance = true;
 
     StrategyModuleBundle bundle;
-    bundle.universe_selector = std::make_unique<QTrading::Universe::FixedUniverseSelector>();
+    bundle.universe_selector = std::make_unique<QTrading::Universe::NullUniverseSelector>();
     bundle.signal_engine = std::make_shared<QTrading::Signal::BasisArbitrageSignalEngine>(configs.signal_cfg);
     bundle.intent_builder = std::make_shared<QTrading::Intent::BasisArbitrageIntentBuilder>(configs.intent_cfg);
     bundle.risk_engine = std::make_unique<QTrading::Risk::SimpleRiskEngine>(configs.risk_cfg);

@@ -11,11 +11,16 @@ TEST(FixedUniverseSelectorTests, ReturnsFixedSymbols)
     EXPECT_EQ(sel.universe[1], "BTCUSDT_PERP");
 }
 
-TEST(FixedUniverseSelectorTests, UsesFundingCarryDefaultsWhenSymbolsOmitted)
+TEST(FixedUniverseSelectorTests, ReturnsEmptyUniverseWhenSymbolsOmitted)
 {
-    QTrading::Universe::FixedUniverseSelector selector;
+    QTrading::Universe::FixedUniverseSelector selector({});
     auto sel = selector.select();
-    ASSERT_EQ(sel.universe.size(), 2u);
-    EXPECT_EQ(sel.universe[0], "BTCUSDT_SPOT");
-    EXPECT_EQ(sel.universe[1], "BTCUSDT_PERP");
+    EXPECT_TRUE(sel.universe.empty());
+}
+
+TEST(NullUniverseSelectorTests, ReturnsEmptyUniverse)
+{
+    QTrading::Universe::NullUniverseSelector selector;
+    auto sel = selector.select();
+    EXPECT_TRUE(sel.universe.empty());
 }

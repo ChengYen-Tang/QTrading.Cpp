@@ -12,7 +12,7 @@
 #include "Signal/ISignalEngine.hpp"
 #include "Strategy/FundingCarryStrategyGateway.hpp"
 #include "Strategy/IStrategyRuntime.hpp"
-#include "Universe/FixedUniverseSelector.hpp"
+#include "Universe/IUniverseSelector.hpp"
 
 #include <memory>
 #include <unordered_map>
@@ -29,7 +29,7 @@ public:
 
     FundingCarryStrategyRuntime(
         std::shared_ptr<QTrading::Infra::Exchanges::BinanceSim::BinanceExchange> exchange,
-        QTrading::Universe::FixedUniverseSelector& universe_selector,
+        QTrading::Universe::IUniverseSelector& universe_selector,
         QTrading::Signal::ISignalEngine<MarketPtr>& signal_engine,
         QTrading::Intent::IIntentBuilder<MarketPtr>& intent_builder,
         QTrading::Risk::SimpleRiskEngine& risk_engine,
@@ -41,7 +41,7 @@ public:
 
 private:
     std::shared_ptr<QTrading::Infra::Exchanges::BinanceSim::BinanceExchange> exchange_;
-    QTrading::Universe::FixedUniverseSelector& universe_selector_;
+    QTrading::Universe::IUniverseSelector& universe_selector_;
     QTrading::Signal::ISignalEngine<MarketPtr>& signal_engine_;
     QTrading::Intent::IIntentBuilder<MarketPtr>& intent_builder_;
     QTrading::Risk::SimpleRiskEngine& risk_engine_;
