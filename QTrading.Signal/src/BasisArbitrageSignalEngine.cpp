@@ -149,6 +149,7 @@ SignalDecision BasisArbitrageSignalEngine::on_market(
 {
     SignalDecision out{};
     out.strategy = "basis_arbitrage";
+    out.strategy_kind = QTrading::Contracts::StrategyKind::BasisArbitrage;
     if (!market) {
         return out;
     }

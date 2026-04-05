@@ -45,6 +45,8 @@ TradeIntent BasisArbitrageIntentBuilder::build(
         "basis_arbitrage",
         "delta_neutral_basis",
         "basis_arbitrage");
+    out.strategy_kind = QTrading::Contracts::StrategyKind::BasisArbitrage;
+    out.structure_kind = QTrading::Contracts::TradeStructureKind::DeltaNeutralBasis;
 
     if (signal.status != QTrading::Signal::SignalStatus::Active) {
         return out;

@@ -17,6 +17,8 @@ TradeIntent FundingCarryIntentBuilder::build(const QTrading::Signal::SignalDecis
         signal.strategy,
         "delta_neutral_carry",
         "funding_carry");
+    out.strategy_kind = QTrading::Contracts::ResolveStrategyKind(signal.strategy_kind, signal.strategy);
+    out.structure_kind = QTrading::Contracts::TradeStructureKind::DeltaNeutralCarry;
 
     if (signal.status != QTrading::Signal::SignalStatus::Active) {
         return out;

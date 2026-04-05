@@ -1,5 +1,7 @@
 #include "Risk/SimpleRiskEngine.hpp"
 
+#include "Contracts/StrategyIdentity.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -335,11 +337,16 @@ RiskTarget SimpleRiskEngine::position(const QTrading::Intent::TradeIntent& inten
         return out;
     }
 
-    const bool is_basis_arbitrage = (intent.strategy == "basis_arbitrage") ||
-        (intent.structure == "delta_neutral_basis");
+    const auto strategy_kind =
+        QTrading::Contracts::ResolveStrategyKind(intent.strategy_kind, intent.strategy);
+    const auto structure_kind =
+        QTrading::Contracts::ResolveTradeStructureKind(intent.structure_kind, intent.structure);
+    const bool is_basis_arbitrage =
+        (strategy_kind == QTrading::Contracts::StrategyKind::BasisArbitrage) ||
+        (structure_kind == QTrading::Contracts::TradeStructureKind::DeltaNeutralBasis);
     const bool is_carry = !is_basis_arbitrage &&
-        ((intent.strategy == "funding_carry") ||
-            (intent.structure == "delta_neutral_carry"));
+        ((strategy_kind == QTrading::Contracts::StrategyKind::FundingCarry) ||
+            (structure_kind == QTrading::Contracts::TradeStructureKind::DeltaNeutralCarry));
     const bool is_pair_trade = is_carry || is_basis_arbitrage;
     const double configured_leg_notional = EffectiveLegNotional(cfg_);
     const double carry_confidence = Clamp01(intent.confidence);

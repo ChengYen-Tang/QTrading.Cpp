@@ -40,6 +40,7 @@ QTrading::Execution::ExecutionSignal ToExecutionSignal(
         signal.ts_ms,
         signal.symbol,
         signal.strategy,
+        signal.strategy_kind,
         ToExecutionStatus(signal.status),
         signal.confidence,
         ToExecutionUrgency(signal.urgency)

@@ -362,6 +362,7 @@ SignalDecision FundingCarrySignalEngine::on_market(
     out.ts_ms = market->Timestamp;
     out.symbol = cfg_.perp_symbol;
     out.strategy = "funding_carry";
+    out.strategy_kind = QTrading::Contracts::StrategyKind::FundingCarry;
 
     if (!market_has_symbols(market)) {
         out.status = SignalStatus::Inactive;

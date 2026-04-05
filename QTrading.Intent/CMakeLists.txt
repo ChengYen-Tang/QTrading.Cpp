@@ -12,6 +12,7 @@ target_include_directories(QTrading.Intent.Library PUBLIC
 )
 
 target_link_libraries(QTrading.Intent.Library PUBLIC
+  QTrading.Contracts.Library
   QTrading.Signal.Library
   QTrading.Infra.Library
 )

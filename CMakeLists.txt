@@ -48,6 +48,7 @@ include(CTest)
 # 所有子项目
 add_subdirectory(QTrading.Logging)
 add_subdirectory(QTrading.Infra)
+add_subdirectory(QTrading.Contracts)
 add_subdirectory(QTrading.Utils)
 add_subdirectory(QTrading.Universe)
 add_subdirectory(QTrading.Signal)

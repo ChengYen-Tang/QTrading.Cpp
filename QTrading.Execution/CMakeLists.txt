@@ -12,6 +12,7 @@ target_include_directories(QTrading.Execution.Library PUBLIC
 )
 
 target_link_libraries(QTrading.Execution.Library PUBLIC
+  QTrading.Contracts.Library
   QTrading.Risk.Library
   QTrading.Infra.Library
 )
