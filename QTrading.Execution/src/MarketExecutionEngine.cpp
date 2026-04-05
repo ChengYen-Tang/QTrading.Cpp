@@ -116,7 +116,7 @@ MarketExecutionEngine::MarketExecutionEngine(
 
 std::vector<ExecutionOrder> MarketExecutionEngine::plan(
     const QTrading::Risk::RiskTarget& target,
-    const QTrading::Signal::SignalDecision& signal,
+    const ExecutionSignal& signal,
     const std::shared_ptr<QTrading::Dto::Market::Binance::MultiKlineDto>& market)
 {
     std::vector<ExecutionOrder> orders;
@@ -290,7 +290,7 @@ std::vector<ExecutionOrder> MarketExecutionEngine::plan(
 
     double effective_min_notional = cfg_.min_notional;
     if (IsCarryLikeStrategy(signal.strategy) &&
-        signal.urgency == QTrading::Signal::SignalUrgency::Low) {
+        signal.urgency == ExecutionUrgency::Low) {
         // Funding carry is slow by nature; ignore micro re-hedges to reduce churn/fees.
         effective_min_notional = std::max(effective_min_notional, carry_min_rebalance_notional_);
     }
@@ -398,7 +398,7 @@ std::vector<ExecutionOrder> MarketExecutionEngine::plan(
             bool reduce_only =
                 (cur_notional != 0.0) && (cur_notional * raw_delta_notional < 0.0);
             const bool is_carry_rebalance = IsCarryLikeStrategy(signal.strategy) &&
-                (signal.urgency == QTrading::Signal::SignalUrgency::Low) &&
+                (signal.urgency == ExecutionUrgency::Low) &&
                 !reduce_only;
             double planned_target_notional = target_notional;
             double delta_notional = raw_delta_notional;
@@ -516,9 +516,9 @@ std::vector<ExecutionOrder> MarketExecutionEngine::plan(
                 ord.price = 0.0;
             }
             ord.reduce_only = reduce_only;
-            ord.urgency = (signal.urgency == QTrading::Signal::SignalUrgency::High)
+            ord.urgency = (signal.urgency == ExecutionUrgency::High)
                 ? OrderUrgency::High
-                : (signal.urgency == QTrading::Signal::SignalUrgency::Medium)
+                : (signal.urgency == ExecutionUrgency::Medium)
                 ? OrderUrgency::Medium
                 : OrderUrgency::Low;
             orders.push_back(std::move(ord));
@@ -538,3 +538,4 @@ std::vector<ExecutionOrder> MarketExecutionEngine::plan(
 }
 
 } // namespace QTrading::Execution
+

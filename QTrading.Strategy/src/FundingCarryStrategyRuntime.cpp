@@ -1,6 +1,52 @@
 #include "Strategy/FundingCarryStrategyRuntime.hpp"
 
 #include "Exchanges/BinanceSimulator/BinanceExchange.hpp"
+#include "Signal/SignalDecision.hpp"
+
+namespace {
+
+QTrading::Execution::ExecutionSignalStatus ToExecutionStatus(
+    QTrading::Signal::SignalStatus status)
+{
+    switch (status) {
+    case QTrading::Signal::SignalStatus::Active:
+        return QTrading::Execution::ExecutionSignalStatus::Active;
+    case QTrading::Signal::SignalStatus::Cooldown:
+        return QTrading::Execution::ExecutionSignalStatus::Cooldown;
+    case QTrading::Signal::SignalStatus::Inactive:
+    default:
+        return QTrading::Execution::ExecutionSignalStatus::Inactive;
+    }
+}
+
+QTrading::Execution::ExecutionUrgency ToExecutionUrgency(
+    QTrading::Signal::SignalUrgency urgency)
+{
+    switch (urgency) {
+    case QTrading::Signal::SignalUrgency::High:
+        return QTrading::Execution::ExecutionUrgency::High;
+    case QTrading::Signal::SignalUrgency::Medium:
+        return QTrading::Execution::ExecutionUrgency::Medium;
+    case QTrading::Signal::SignalUrgency::Low:
+    default:
+        return QTrading::Execution::ExecutionUrgency::Low;
+    }
+}
+
+QTrading::Execution::ExecutionSignal ToExecutionSignal(
+    const QTrading::Signal::SignalDecision& signal)
+{
+    return QTrading::Execution::ExecutionSignal{
+        signal.ts_ms,
+        signal.symbol,
+        signal.strategy,
+        ToExecutionStatus(signal.status),
+        signal.confidence,
+        ToExecutionUrgency(signal.urgency)
+    };
+}
+
+} // namespace
 
 namespace QTrading::Strategy {
 
@@ -37,10 +83,11 @@ void FundingCarryStrategyRuntime::RunOneCycle()
 
     (void)universe_selector_.select();
     const auto signal = signal_engine_.on_market(market);
+    const auto execution_signal = ToExecutionSignal(signal);
     const auto intent = intent_builder_.build(signal, market);
     const auto account = exchange_gateway_.BuildAccountState();
     const auto risk = risk_engine_.position(intent, account, market);
-    const auto orders = execution_orchestrator_.Execute(risk, account, signal, market);
+    const auto orders = execution_orchestrator_.Execute(risk, account, execution_signal, market);
     exchange_gateway_.SubmitOrders(orders);
     exchange_gateway_.ApplyMonitoringAlerts(monitoring_.check(account));
 }

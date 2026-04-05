@@ -117,7 +117,7 @@ LiquidityAwareExecutionScheduler::LiquidityAwareExecutionScheduler(Config cfg)
 std::vector<ExecutionSlice> LiquidityAwareExecutionScheduler::BuildSlices(
     const std::vector<ExecutionParentOrder>& parent_orders,
     const QTrading::Risk::AccountState& account,
-    const QTrading::Signal::SignalDecision& signal,
+    const ExecutionSignal& signal,
     const std::shared_ptr<QTrading::Dto::Market::Binance::MultiKlineDto>& market)
 {
     std::vector<ExecutionSlice> slices;
@@ -141,17 +141,17 @@ std::vector<ExecutionSlice> LiquidityAwareExecutionScheduler::BuildSlices(
         (cfg_.carry_delta_participation_rate > 0.0) &&
         IsCarryLikeStrategy(signal.strategy) &&
         (!cfg_.carry_apply_only_low_urgency ||
-         signal.urgency == QTrading::Signal::SignalUrgency::Low);
+         signal.urgency == ExecutionUrgency::Low);
     const bool apply_window_budget =
         cfg_.carry_window_budget_enabled &&
         IsCarryLikeStrategy(signal.strategy) &&
         (!cfg_.carry_apply_only_low_urgency ||
-         signal.urgency == QTrading::Signal::SignalUrgency::Low);
+         signal.urgency == ExecutionUrgency::Low);
     const bool apply_increase_batching =
         cfg_.carry_increase_batching_enabled &&
         IsCarryLikeStrategy(signal.strategy) &&
         (!cfg_.carry_apply_only_low_urgency ||
-         signal.urgency == QTrading::Signal::SignalUrgency::Low);
+         signal.urgency == ExecutionUrgency::Low);
 
     if ((!apply_participation_cap && !apply_window_budget && !apply_increase_batching) ||
         !has_symbol_index_ ||

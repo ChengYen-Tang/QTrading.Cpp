@@ -1,8 +1,8 @@
-#include "Execution/FundingCarryExecutionOrchestrator.hpp"
+#include "Execution/ExecutionOrchestrator.hpp"
 
 namespace QTrading::Execution {
 
-FundingCarryExecutionOrchestrator::FundingCarryExecutionOrchestrator(
+ExecutionOrchestrator::ExecutionOrchestrator(
     IExecutionEngine<MarketPtr>& execution_engine,
     IExecutionScheduler& scheduler,
     IExecutionPolicy& policy)
@@ -12,10 +12,10 @@ FundingCarryExecutionOrchestrator::FundingCarryExecutionOrchestrator(
 {
 }
 
-std::vector<ExecutionOrder> FundingCarryExecutionOrchestrator::Execute(
+std::vector<ExecutionOrder> ExecutionOrchestrator::Execute(
     const QTrading::Risk::RiskTarget& strategy_target,
     const QTrading::Risk::AccountState& account,
-    const QTrading::Signal::SignalDecision& signal,
+    const ExecutionSignal& signal,
     const MarketPtr& market)
 {
     if (!market) {
@@ -28,7 +28,7 @@ std::vector<ExecutionOrder> FundingCarryExecutionOrchestrator::Execute(
     return execution_engine_.plan(execution_target, signal, market);
 }
 
-std::vector<ExecutionParentOrder> FundingCarryExecutionOrchestrator::BuildParentOrders(
+std::vector<ExecutionParentOrder> ExecutionOrchestrator::BuildParentOrders(
     const QTrading::Risk::RiskTarget& strategy_target)
 {
     std::vector<ExecutionParentOrder> parent_orders;

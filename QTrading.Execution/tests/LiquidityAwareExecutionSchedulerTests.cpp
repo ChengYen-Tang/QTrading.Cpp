@@ -59,9 +59,9 @@ TEST(LiquidityAwareExecutionSchedulerTests, CapsCarryDeltaByQuoteVolumeParticipa
 
     QTrading::Risk::AccountState account;
 
-    QTrading::Signal::SignalDecision signal;
+    QTrading::Execution::ExecutionSignal signal;
     signal.strategy = "funding_carry";
-    signal.urgency = QTrading::Signal::SignalUrgency::Low;
+    signal.urgency = QTrading::Execution::ExecutionUrgency::Low;
 
     auto market = MakeMarketWithSymbol(1, "BTCUSDT_PERP", 10'000.0, 500.0);
     // max delta notional = 500 * 0.1 = 50 => target should become 50, not 1000.
@@ -91,9 +91,9 @@ TEST(LiquidityAwareExecutionSchedulerTests, BasisArbitrageAlsoUsesParticipationC
     };
 
     QTrading::Risk::AccountState account;
-    QTrading::Signal::SignalDecision signal;
+    QTrading::Execution::ExecutionSignal signal;
     signal.strategy = "basis_arbitrage";
-    signal.urgency = QTrading::Signal::SignalUrgency::Low;
+    signal.urgency = QTrading::Execution::ExecutionUrgency::Low;
 
     const auto slices = scheduler.BuildSlices(
         parent_orders,
@@ -131,9 +131,9 @@ TEST(LiquidityAwareExecutionSchedulerTests, UsesCurrentNotionalFromPositionWhenC
     position.is_long = true;
     account.positions.push_back(position);
 
-    QTrading::Signal::SignalDecision signal;
+    QTrading::Execution::ExecutionSignal signal;
     signal.strategy = "funding_carry";
-    signal.urgency = QTrading::Signal::SignalUrgency::Low;
+    signal.urgency = QTrading::Execution::ExecutionUrgency::Low;
 
     auto market = MakeMarketWithSymbol(1, "BTCUSDT_PERP", 10'000.0, 500.0);
     // raw delta = 1200 - 1000 = 200; clipped to 50 => slice target should be 1050.
@@ -168,12 +168,12 @@ TEST(LiquidityAwareExecutionSchedulerTests, ConfidenceAdaptiveRateScalesClippedD
     QTrading::Risk::AccountState account;
     auto market = MakeMarketWithSymbol(1, "BTCUSDT_PERP", 10'000.0, 1'000.0);
 
-    QTrading::Signal::SignalDecision low_signal;
+    QTrading::Execution::ExecutionSignal low_signal;
     low_signal.strategy = "funding_carry";
-    low_signal.urgency = QTrading::Signal::SignalUrgency::Low;
+    low_signal.urgency = QTrading::Execution::ExecutionUrgency::Low;
     low_signal.confidence = 0.0;
 
-    QTrading::Signal::SignalDecision high_signal = low_signal;
+    QTrading::Execution::ExecutionSignal high_signal = low_signal;
     high_signal.confidence = 1.0;
 
     const auto low_slices = low_scheduler.BuildSlices(parent_orders, account, low_signal, market);
@@ -207,9 +207,9 @@ TEST(LiquidityAwareExecutionSchedulerTests, WindowBudgetCapsCumulativeDeltaAndRe
         },
     };
     QTrading::Risk::AccountState account;
-    QTrading::Signal::SignalDecision signal;
+    QTrading::Execution::ExecutionSignal signal;
     signal.strategy = "funding_carry";
-    signal.urgency = QTrading::Signal::SignalUrgency::Low;
+    signal.urgency = QTrading::Execution::ExecutionUrgency::Low;
 
     const auto s1 = scheduler.BuildSlices(
         parent_orders,
@@ -257,9 +257,9 @@ TEST(LiquidityAwareExecutionSchedulerTests, WindowBudgetUsesCumulativeQuoteVolum
         },
     };
     QTrading::Risk::AccountState account;
-    QTrading::Signal::SignalDecision signal;
+    QTrading::Execution::ExecutionSignal signal;
     signal.strategy = "funding_carry";
-    signal.urgency = QTrading::Signal::SignalUrgency::Low;
+    signal.urgency = QTrading::Execution::ExecutionUrgency::Low;
 
     const auto s1 = scheduler.BuildSlices(
         parent_orders,
@@ -297,9 +297,9 @@ TEST(LiquidityAwareExecutionSchedulerTests, IncreaseBatchingHoldsTargetWithinBat
         },
     };
     QTrading::Risk::AccountState account;
-    QTrading::Signal::SignalDecision signal;
+    QTrading::Execution::ExecutionSignal signal;
     signal.strategy = "funding_carry";
-    signal.urgency = QTrading::Signal::SignalUrgency::Low;
+    signal.urgency = QTrading::Execution::ExecutionUrgency::Low;
 
     const auto s1 = scheduler.BuildSlices(
         parent_orders,
@@ -350,9 +350,9 @@ TEST(LiquidityAwareExecutionSchedulerTests, IncreaseBatchingDoesNotDelayTargetRe
     position.quantity = 0.1; // current notional = 1000 at close 10,000
     position.is_long = true;
     account.positions.push_back(position);
-    QTrading::Signal::SignalDecision signal;
+    QTrading::Execution::ExecutionSignal signal;
     signal.strategy = "funding_carry";
-    signal.urgency = QTrading::Signal::SignalUrgency::Low;
+    signal.urgency = QTrading::Execution::ExecutionUrgency::Low;
 
     const auto s1 = scheduler.BuildSlices(
         parent_orders,
@@ -391,9 +391,9 @@ TEST(LiquidityAwareExecutionSchedulerTests, IncreaseBatchingIgnoresTinyTargetCha
         },
     };
     QTrading::Risk::AccountState account;
-    QTrading::Signal::SignalDecision signal;
+    QTrading::Execution::ExecutionSignal signal;
     signal.strategy = "funding_carry";
-    signal.urgency = QTrading::Signal::SignalUrgency::Low;
+    signal.urgency = QTrading::Execution::ExecutionUrgency::Low;
 
     const auto s1 = scheduler.BuildSlices(
         parent_orders,
@@ -436,9 +436,9 @@ TEST(LiquidityAwareExecutionSchedulerTests, IncreaseBatchTimerIsNotResetByTarget
     position.quantity = 0.1; // current notional = 1000 at close 10,000
     position.is_long = true;
     account.positions.push_back(position);
-    QTrading::Signal::SignalDecision signal;
+    QTrading::Execution::ExecutionSignal signal;
     signal.strategy = "funding_carry";
-    signal.urgency = QTrading::Signal::SignalUrgency::Low;
+    signal.urgency = QTrading::Execution::ExecutionUrgency::Low;
 
     const auto s1 = scheduler.BuildSlices(
         parent_orders,
@@ -487,3 +487,4 @@ TEST(LiquidityAwareExecutionSchedulerTests, IncreaseBatchTimerIsNotResetByTarget
     ASSERT_EQ(s5.size(), 1u);
     EXPECT_DOUBLE_EQ(s5[0].target_notional, 1100.0);
 }
+
