@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Intent/FundingCarryIntentBuilder.hpp"
+#include "Intent/IIntentBuilder.hpp"
 
 #include <cstdint>
 #include <cstddef>
@@ -10,7 +11,8 @@ namespace QTrading::Intent {
 
 /// @brief Basis-arbitrage intent builder.
 /// Reuses the proven two-leg carry structure while using basis-specific labels.
-class BasisArbitrageIntentBuilder : public FundingCarryIntentBuilder {
+class BasisArbitrageIntentBuilder : public IIntentBuilder<
+    std::shared_ptr<QTrading::Dto::Market::Binance::MultiKlineDto>> {
 public:
     using Config = FundingCarryIntentBuilder::Config;
 

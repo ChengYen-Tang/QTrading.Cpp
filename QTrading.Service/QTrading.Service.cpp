@@ -1,8 +1,8 @@
 #include "Exchanges/BinanceSimulator/BinanceExchange.hpp"
 #include "LoggerBootstrap.hpp"
 #include "ServiceHelpers.hpp"
-#include "Builder/StrategyModuleBuilder.hpp"
 #include "Diagnostics/Trace.hpp"
+#include "Strategy/StrategyModuleBuilder.hpp"
 
 #include <chrono>
 #include <cstdlib>
@@ -78,8 +78,8 @@ int main()
         account_init.vip_level = kVipLevel;
 
         // Change this one line to switch assembled strategy modules.
-        constexpr auto kStrategyProfile = QTrading::Service::Builder::StrategyProfile::BasisArbitrage;
-        const auto strategy_meta = QTrading::Service::Builder::GetStrategyMetadata(kStrategyProfile);
+        constexpr auto kStrategyProfile = QTrading::Strategy::StrategyProfile::BasisArbitrage;
+        const auto strategy_meta = QTrading::Strategy::GetStrategyMetadata(kStrategyProfile);
         const std::string strategy_name = strategy_meta.strategy_name;
         const std::filesystem::path strategy_config_path =
             QTrading::Service::Helpers::ResolveRepoRelativePath(
@@ -141,14 +141,13 @@ int main()
         std::cerr << "[Service] exchange constructed" << std::endl;
         std::cerr.flush();
 
-        QTrading::Service::Builder::StrategyModuleConfigs module_configs;
-        QTrading::Service::Builder::LoadStrategyModuleConfigs(
+        QTrading::Strategy::StrategyModuleConfigs module_configs;
+        QTrading::Strategy::LoadStrategyModuleConfigs(
             kStrategyProfile,
             strategy_config_path,
             module_configs);
 
-        // @brief Assemble selected strategy modules in one composition step.
-        auto modules = QTrading::Service::Builder::BuildStrategyModules(
+        auto modules = QTrading::Strategy::BuildStrategyModules(
             kStrategyProfile,
             exchange,
             std::move(module_configs),
@@ -189,7 +188,7 @@ int main()
                 Shutdown("stop requested, shutting down modules...");
                 break;
             }
-            modules.strategy->wait_for_done();
+            modules.strategy->RunOneCycle();
 
             ++steps;
 

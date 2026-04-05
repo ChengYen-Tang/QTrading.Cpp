@@ -1,5 +1,7 @@
 #include "Execution/LiquidityAwareExecutionScheduler.hpp"
 
+#include "Contracts/StrategyIdentity.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -61,9 +63,11 @@ double QuoteVolumeFromId(
     return std::max(0.0, opt->QuoteVolume);
 }
 
-bool IsCarryLikeStrategy(const std::string& strategy)
+bool IsCarryLikeStrategy(const QTrading::Execution::ExecutionSignal& signal)
 {
-    return strategy == "funding_carry" || strategy == "basis_arbitrage";
+    const auto kind =
+        QTrading::Contracts::ResolveStrategyKind(signal.strategy_kind, signal.strategy);
+    return QTrading::Contracts::IsCarryLikeStrategy(kind);
 }
 
 } // namespace
@@ -117,7 +121,7 @@ LiquidityAwareExecutionScheduler::LiquidityAwareExecutionScheduler(Config cfg)
 std::vector<ExecutionSlice> LiquidityAwareExecutionScheduler::BuildSlices(
     const std::vector<ExecutionParentOrder>& parent_orders,
     const QTrading::Risk::AccountState& account,
-    const QTrading::Signal::SignalDecision& signal,
+    const ExecutionSignal& signal,
     const std::shared_ptr<QTrading::Dto::Market::Binance::MultiKlineDto>& market)
 {
     std::vector<ExecutionSlice> slices;
@@ -139,19 +143,19 @@ std::vector<ExecutionSlice> LiquidityAwareExecutionScheduler::BuildSlices(
     const bool apply_participation_cap =
         cfg_.carry_delta_participation_cap_enabled &&
         (cfg_.carry_delta_participation_rate > 0.0) &&
-        IsCarryLikeStrategy(signal.strategy) &&
+        IsCarryLikeStrategy(signal) &&
         (!cfg_.carry_apply_only_low_urgency ||
-         signal.urgency == QTrading::Signal::SignalUrgency::Low);
+         signal.urgency == ExecutionUrgency::Low);
     const bool apply_window_budget =
         cfg_.carry_window_budget_enabled &&
-        IsCarryLikeStrategy(signal.strategy) &&
+        IsCarryLikeStrategy(signal) &&
         (!cfg_.carry_apply_only_low_urgency ||
-         signal.urgency == QTrading::Signal::SignalUrgency::Low);
+         signal.urgency == ExecutionUrgency::Low);
     const bool apply_increase_batching =
         cfg_.carry_increase_batching_enabled &&
-        IsCarryLikeStrategy(signal.strategy) &&
+        IsCarryLikeStrategy(signal) &&
         (!cfg_.carry_apply_only_low_urgency ||
-         signal.urgency == QTrading::Signal::SignalUrgency::Low);
+         signal.urgency == ExecutionUrgency::Low);
 
     if ((!apply_participation_cap && !apply_window_budget && !apply_increase_batching) ||
         !has_symbol_index_ ||

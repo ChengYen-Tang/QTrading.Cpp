@@ -1,21 +1,10 @@
-#include "Universe/FixedUniverseSelector.hpp"
+#include "Universe/IUniverseSelector.hpp"
 
 #include <gtest/gtest.h>
 
-TEST(FixedUniverseSelectorTests, ReturnsFixedSymbols)
+TEST(NullUniverseSelectorTests, ReturnsEmptyUniverse)
 {
-    QTrading::Universe::FixedUniverseSelector selector({ "BTCUSDT_SPOT", "BTCUSDT_PERP" });
+    QTrading::Universe::NullUniverseSelector selector;
     auto sel = selector.select();
-    ASSERT_EQ(sel.universe.size(), 2u);
-    EXPECT_EQ(sel.universe[0], "BTCUSDT_SPOT");
-    EXPECT_EQ(sel.universe[1], "BTCUSDT_PERP");
-}
-
-TEST(FixedUniverseSelectorTests, UsesFundingCarryDefaultsWhenSymbolsOmitted)
-{
-    QTrading::Universe::FixedUniverseSelector selector;
-    auto sel = selector.select();
-    ASSERT_EQ(sel.universe.size(), 2u);
-    EXPECT_EQ(sel.universe[0], "BTCUSDT_SPOT");
-    EXPECT_EQ(sel.universe[1], "BTCUSDT_PERP");
+    EXPECT_TRUE(sel.universe.empty());
 }

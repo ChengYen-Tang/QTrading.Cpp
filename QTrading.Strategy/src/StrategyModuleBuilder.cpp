@@ -1,13 +1,14 @@
-#include "StrategyModuleBuilder.hpp"
+#include "Strategy/StrategyModuleBuilder.hpp"
 
 #include "Intent/BasisArbitrageIntentBuilder.hpp"
 #include "Signal/BasisArbitrageSignalEngine.hpp"
-#include "../ServiceHelpers.hpp"
+#include "Strategy/FundingCarryStrategyRuntime.hpp"
+#include "Universe/IUniverseSelector.hpp"
 
 #include <stdexcept>
 #include <utility>
 
-namespace QTrading::Service::Builder {
+namespace QTrading::Strategy {
 
 namespace {
 
@@ -16,17 +17,16 @@ StrategyModuleBundle BuildFundingCarryModules(
     StrategyModuleConfigs configs,
     const std::unordered_map<std::string, QTrading::Dto::Trading::InstrumentType>& instrument_types)
 {
-    // Keep FundingCarry wiring aligned with master branch composition.
     configs.risk_cfg.instrument_types = instrument_types;
 
     StrategyModuleBundle bundle;
-    bundle.universe_selector = std::make_unique<QTrading::Universe::FixedUniverseSelector>();
+    bundle.universe_selector = std::make_unique<QTrading::Universe::NullUniverseSelector>();
     bundle.signal_engine = std::make_shared<QTrading::Signal::FundingCarrySignalEngine>(configs.signal_cfg);
     bundle.intent_builder = std::make_shared<QTrading::Intent::FundingCarryIntentBuilder>(configs.intent_cfg);
     bundle.risk_engine = std::make_unique<QTrading::Risk::SimpleRiskEngine>(configs.risk_cfg);
     bundle.execution_engine = std::make_unique<QTrading::Execution::MarketExecutionEngine>(exchange, configs.execution_cfg);
     bundle.monitoring = std::make_unique<QTrading::Monitoring::SimpleMonitoring>(configs.monitoring_cfg);
-    bundle.strategy = std::make_shared<QTrading::Execution::FundingCarryStrategy>(
+    bundle.strategy = std::make_shared<QTrading::Strategy::FundingCarryStrategyRuntime>(
         exchange,
         *bundle.universe_selector,
         *bundle.signal_engine,
@@ -48,13 +48,13 @@ StrategyModuleBundle BuildBasisArbitrageModules(
     configs.execution_cfg.carry_balance_two_sided_rebalance = true;
 
     StrategyModuleBundle bundle;
-    bundle.universe_selector = std::make_unique<QTrading::Universe::FixedUniverseSelector>();
+    bundle.universe_selector = std::make_unique<QTrading::Universe::NullUniverseSelector>();
     bundle.signal_engine = std::make_shared<QTrading::Signal::BasisArbitrageSignalEngine>(configs.signal_cfg);
     bundle.intent_builder = std::make_shared<QTrading::Intent::BasisArbitrageIntentBuilder>(configs.intent_cfg);
     bundle.risk_engine = std::make_unique<QTrading::Risk::SimpleRiskEngine>(configs.risk_cfg);
     bundle.execution_engine = std::make_unique<QTrading::Execution::MarketExecutionEngine>(exchange, configs.execution_cfg);
     bundle.monitoring = std::make_unique<QTrading::Monitoring::SimpleMonitoring>(configs.monitoring_cfg);
-    bundle.strategy = std::make_shared<QTrading::Execution::FundingCarryStrategy>(
+    bundle.strategy = std::make_shared<QTrading::Strategy::FundingCarryStrategyRuntime>(
         exchange,
         *bundle.universe_selector,
         *bundle.signal_engine,
@@ -94,22 +94,10 @@ void LoadStrategyModuleConfigs(
 {
     switch (profile) {
     case StrategyProfile::FundingCarry:
-        QTrading::Service::Helpers::LoadFundingCarryConfig(
-            config_path,
-            configs.signal_cfg,
-            configs.intent_cfg,
-            configs.risk_cfg,
-            configs.execution_cfg,
-            configs.monitoring_cfg);
+        LoadFundingCarryConfig(config_path, configs);
         return;
     case StrategyProfile::BasisArbitrage:
-        QTrading::Service::Helpers::LoadBasisArbitrageConfig(
-            config_path,
-            configs.signal_cfg,
-            configs.intent_cfg,
-            configs.risk_cfg,
-            configs.execution_cfg,
-            configs.monitoring_cfg);
+        LoadBasisArbitrageConfig(config_path, configs);
         return;
     }
     throw std::invalid_argument("Unsupported strategy profile");
@@ -130,4 +118,4 @@ StrategyModuleBundle BuildStrategyModules(
     throw std::invalid_argument("Unsupported strategy profile");
 }
 
-} // namespace QTrading::Service::Builder
+} // namespace QTrading::Strategy

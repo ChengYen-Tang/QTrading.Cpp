@@ -1,4 +1,4 @@
-#include "Execution/FundingCarryExchangeGateway.hpp"
+#include "Strategy/FundingCarryStrategyGateway.hpp"
 
 #include "Dto/Trading/Side.hpp"
 #include "Exchanges/BinanceSimulator/BinanceExchange.hpp"
@@ -27,9 +27,9 @@ std::optional<QTrading::Dto::Trading::InstrumentType> ResolveInstrumentType(
 
 } // namespace
 
-namespace QTrading::Execution {
+namespace QTrading::Strategy {
 
-FundingCarryExchangeGateway::FundingCarryExchangeGateway(
+FundingCarryStrategyGateway::FundingCarryStrategyGateway(
     std::shared_ptr<QTrading::Infra::Exchanges::BinanceSim::BinanceExchange> exchange,
     std::unordered_map<std::string, QTrading::Dto::Trading::InstrumentType> instrument_types)
     : exchange_(std::move(exchange))
@@ -37,7 +37,7 @@ FundingCarryExchangeGateway::FundingCarryExchangeGateway(
 {
 }
 
-QTrading::Risk::AccountState FundingCarryExchangeGateway::BuildAccountState() const
+QTrading::Risk::AccountState FundingCarryStrategyGateway::BuildAccountState() const
 {
     QTrading::Risk::AccountState account{};
     account.positions = exchange_->get_all_positions();
@@ -48,7 +48,7 @@ QTrading::Risk::AccountState FundingCarryExchangeGateway::BuildAccountState() co
     return account;
 }
 
-void FundingCarryExchangeGateway::SubmitOrders(
+void FundingCarryStrategyGateway::SubmitOrders(
     const std::vector<QTrading::Execution::ExecutionOrder>& orders)
 {
     for (const auto& order : orders) {
@@ -62,7 +62,7 @@ void FundingCarryExchangeGateway::SubmitOrders(
                 order.qty,
                 price,
                 ToOrderSide(order.action),
-                order.reduce_only);
+                false);
             continue;
         }
 
@@ -76,7 +76,7 @@ void FundingCarryExchangeGateway::SubmitOrders(
     }
 }
 
-void FundingCarryExchangeGateway::ApplyMonitoringAlerts(
+void FundingCarryStrategyGateway::ApplyMonitoringAlerts(
     const std::vector<QTrading::Monitoring::MonitoringAlert>& alerts)
 {
     for (const auto& alert : alerts) {
@@ -93,5 +93,4 @@ void FundingCarryExchangeGateway::ApplyMonitoringAlerts(
     }
 }
 
-} // namespace QTrading::Execution
-
+} // namespace QTrading::Strategy

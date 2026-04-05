@@ -66,7 +66,7 @@ public:
     std::vector<ExecutionSlice> BuildSlices(
         const std::vector<ExecutionParentOrder>& parent_orders,
         const QTrading::Risk::AccountState& account,
-        const QTrading::Signal::SignalDecision& signal,
+        const ExecutionSignal& signal,
         const std::shared_ptr<QTrading::Dto::Market::Binance::MultiKlineDto>& market) override;
 
 private:

@@ -1,5 +1,7 @@
 #include "Execution/MarketExecutionEngine.hpp"
 
+#include "Contracts/StrategyIdentity.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -56,19 +58,20 @@ double QuoteVolumeFromId(
     return std::max(0.0, opt->QuoteVolume);
 }
 
-bool IsCarryLikeStrategy(const std::string& strategy)
+QTrading::Contracts::StrategyKind ResolveStrategyKind(
+    const QTrading::Execution::ExecutionSignal& signal)
 {
-    return strategy == "funding_carry" || strategy == "basis_arbitrage";
+    return QTrading::Contracts::ResolveStrategyKind(signal.strategy_kind, signal.strategy);
 }
 
 bool ShouldSkipDueToExistingOpenOrder(
     const std::unordered_map<std::string, bool>& has_open_order_by_symbol,
     const std::string& symbol,
-    const std::string& strategy)
+    QTrading::Contracts::StrategyKind strategy_kind)
 {
     // Basis arbitrage should keep converging even if one stale leg order exists.
     // Funding carry keeps the old conservative behavior (one active order per symbol).
-    if (strategy == "basis_arbitrage") {
+    if (strategy_kind == QTrading::Contracts::StrategyKind::BasisArbitrage) {
         return false;
     }
     return has_open_order_by_symbol.find(symbol) != has_open_order_by_symbol.end();
@@ -116,7 +119,7 @@ MarketExecutionEngine::MarketExecutionEngine(
 
 std::vector<ExecutionOrder> MarketExecutionEngine::plan(
     const QTrading::Risk::RiskTarget& target,
-    const QTrading::Signal::SignalDecision& signal,
+    const ExecutionSignal& signal,
     const std::shared_ptr<QTrading::Dto::Market::Binance::MultiKlineDto>& market)
 {
     std::vector<ExecutionOrder> orders;
@@ -288,9 +291,10 @@ std::vector<ExecutionOrder> MarketExecutionEngine::plan(
         }
     };
 
+    const auto strategy_kind = ResolveStrategyKind(signal);
     double effective_min_notional = cfg_.min_notional;
-    if (IsCarryLikeStrategy(signal.strategy) &&
-        signal.urgency == QTrading::Signal::SignalUrgency::Low) {
+    if (QTrading::Contracts::IsCarryLikeStrategy(strategy_kind) &&
+        signal.urgency == ExecutionUrgency::Low) {
         // Funding carry is slow by nature; ignore micro re-hedges to reduce churn/fees.
         effective_min_notional = std::max(effective_min_notional, carry_min_rebalance_notional_);
     }
@@ -380,7 +384,7 @@ std::vector<ExecutionOrder> MarketExecutionEngine::plan(
 
         for (const auto& kv : target.target_positions) {
             const auto& symbol = kv.first;
-            if (ShouldSkipDueToExistingOpenOrder(has_open_order_by_symbol, symbol, signal.strategy)) {
+            if (ShouldSkipDueToExistingOpenOrder(has_open_order_by_symbol, symbol, strategy_kind)) {
                 continue;
             }
             auto it = symbol_to_id_.find(symbol);
@@ -397,8 +401,8 @@ std::vector<ExecutionOrder> MarketExecutionEngine::plan(
             const double raw_delta_notional = target_notional - cur_notional;
             bool reduce_only =
                 (cur_notional != 0.0) && (cur_notional * raw_delta_notional < 0.0);
-            const bool is_carry_rebalance = IsCarryLikeStrategy(signal.strategy) &&
-                (signal.urgency == QTrading::Signal::SignalUrgency::Low) &&
+            const bool is_carry_rebalance = QTrading::Contracts::IsCarryLikeStrategy(strategy_kind) &&
+                (signal.urgency == ExecutionUrgency::Low) &&
                 !reduce_only;
             double planned_target_notional = target_notional;
             double delta_notional = raw_delta_notional;
@@ -516,9 +520,9 @@ std::vector<ExecutionOrder> MarketExecutionEngine::plan(
                 ord.price = 0.0;
             }
             ord.reduce_only = reduce_only;
-            ord.urgency = (signal.urgency == QTrading::Signal::SignalUrgency::High)
+            ord.urgency = (signal.urgency == ExecutionUrgency::High)
                 ? OrderUrgency::High
-                : (signal.urgency == QTrading::Signal::SignalUrgency::Medium)
+                : (signal.urgency == ExecutionUrgency::Medium)
                 ? OrderUrgency::Medium
                 : OrderUrgency::Low;
             orders.push_back(std::move(ord));
@@ -538,3 +542,4 @@ std::vector<ExecutionOrder> MarketExecutionEngine::plan(
 }
 
 } // namespace QTrading::Execution
+

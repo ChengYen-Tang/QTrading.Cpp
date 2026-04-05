@@ -1,4 +1,5 @@
 #include "Signal/FundingCarrySignalEngine.hpp"
+#include "Signal/PairMarketSignalSupport.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -336,28 +337,16 @@ bool FundingCarrySignalEngine::market_has_symbols(
         return false;
     }
 
-    if (!has_symbol_ids_ && market->symbols) {
-        const auto& symbols = *market->symbols;
-        for (std::size_t i = 0; i < symbols.size(); ++i) {
-            if (symbols[i] == cfg_.spot_symbol) {
-                spot_id_ = i;
-            }
-            if (symbols[i] == cfg_.perp_symbol) {
-                perp_id_ = i;
-            }
-        }
-        has_symbol_ids_ = (spot_id_ < symbols.size() && perp_id_ < symbols.size());
-    }
+    QTrading::Signal::Support::PairSymbolIds ids{ has_symbol_ids_, spot_id_, perp_id_ };
+    has_symbol_ids_ = QTrading::Signal::Support::ResolvePairSymbolIds(
+        market,
+        cfg_.spot_symbol,
+        cfg_.perp_symbol,
+        ids);
+    spot_id_ = ids.spot_id;
+    perp_id_ = ids.perp_id;
 
-    if (has_symbol_ids_ &&
-        spot_id_ < market->trade_klines_by_id.size() &&
-        perp_id_ < market->trade_klines_by_id.size())
-    {
-        return market->trade_klines_by_id[spot_id_].has_value() &&
-            market->trade_klines_by_id[perp_id_].has_value();
-    }
-
-    return false;
+    return QTrading::Signal::Support::MarketHasTradePair(market, ids);
 }
 
 SignalDecision FundingCarrySignalEngine::on_market(
@@ -373,6 +362,7 @@ SignalDecision FundingCarrySignalEngine::on_market(
     out.ts_ms = market->Timestamp;
     out.symbol = cfg_.perp_symbol;
     out.strategy = "funding_carry";
+    out.strategy_kind = QTrading::Contracts::StrategyKind::FundingCarry;
 
     if (!market_has_symbols(market)) {
         out.status = SignalStatus::Inactive;

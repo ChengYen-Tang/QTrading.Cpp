@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Contracts/StrategyIdentity.hpp"
+
 #include <cstdint>
 #include <string>
 
@@ -27,6 +29,8 @@ struct SignalDecision {
     std::string symbol;
     /// @brief Strategy identifier.
     std::string strategy;
+    /// @brief Typed strategy identity for downstream policy routing.
+    QTrading::Contracts::StrategyKind strategy_kind = QTrading::Contracts::StrategyKind::Unknown;
     /// @brief Activation state.
     SignalStatus status = SignalStatus::Inactive;
     /// @brief Confidence score (0..1).

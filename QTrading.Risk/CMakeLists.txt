@@ -10,6 +10,7 @@ target_include_directories(QTrading.Risk.Library PUBLIC
 )
 
 target_link_libraries(QTrading.Risk.Library PUBLIC
+  QTrading.Contracts.Library
   QTrading.Infra.Library
   QTrading.Intent.Library
 )

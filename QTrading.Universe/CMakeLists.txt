@@ -2,7 +2,6 @@ project(QTrading.Universe LANGUAGES CXX)
 
 add_library(QTrading.Universe.Library
   src/UniverseModule.cpp
-  src/FixedUniverseSelector.cpp
 )
 
 target_include_directories(QTrading.Universe.Library PUBLIC

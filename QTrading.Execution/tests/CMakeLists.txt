@@ -1,7 +1,7 @@
 find_package(GTest CONFIG REQUIRED)
 
 add_executable(QTrading.Execution.Tests
-  FundingCarryExecutionOrchestratorTests.cpp
+  ExecutionOrchestratorTests.cpp
   LiquidityAwareExecutionSchedulerTests.cpp
   MarketExecutionEngineTests.cpp
 )
@@ -16,7 +16,6 @@ target_link_libraries(QTrading.Execution.Tests
   PRIVATE
     QTrading.Execution.Library
     QTrading.Risk.Library
-    QTrading.Signal.Library
     QTrading.Infra.Library
     GTest::gtest
     GTest::gtest_main

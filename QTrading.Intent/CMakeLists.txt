@@ -4,6 +4,7 @@ add_library(QTrading.Intent.Library
   src/IntentModule.cpp
   src/BasisArbitrageIntentBuilder.cpp
   src/FundingCarryIntentBuilder.cpp
+  src/PairTradeIntentSupport.cpp
 )
 
 target_include_directories(QTrading.Intent.Library PUBLIC
@@ -11,6 +12,7 @@ target_include_directories(QTrading.Intent.Library PUBLIC
 )
 
 target_link_libraries(QTrading.Intent.Library PUBLIC
+  QTrading.Contracts.Library
   QTrading.Signal.Library
   QTrading.Infra.Library
 )

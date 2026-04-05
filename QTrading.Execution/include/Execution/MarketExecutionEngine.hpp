@@ -83,7 +83,7 @@ public:
 
     std::vector<ExecutionOrder> plan(
         const QTrading::Risk::RiskTarget& target,
-        const QTrading::Signal::SignalDecision& signal,
+        const ExecutionSignal& signal,
         const std::shared_ptr<QTrading::Dto::Market::Binance::MultiKlineDto>& market) override;
 
 private:

@@ -3,15 +3,9 @@
 #include "Dto/Trading/InstrumentSpec.hpp"
 #include "Exchanges/BinanceSimulator/BinanceExchange.hpp"
 #include "LoggerBootstrap.hpp"
-#include "Signal/FundingCarrySignalEngine.hpp"
-#include "Intent/FundingCarryIntentBuilder.hpp"
-#include "Risk/SimpleRiskEngine.hpp"
-#include "Execution/MarketExecutionEngine.hpp"
-#include "Monitoring/SimpleMonitoring.hpp"
-
 #include <filesystem>
-#include <optional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -34,20 +28,6 @@ QTrading::Log::LoggerBootstrapConfig BuildLoggerBootstrapConfig(
     const std::string& strategy_name,
     const std::string& strategy_version,
     const std::string& strategy_params);
-void LoadFundingCarryConfig(
-    const std::filesystem::path& config_path,
-    QTrading::Signal::FundingCarrySignalEngine::Config& signal_cfg,
-    QTrading::Intent::FundingCarryIntentBuilder::Config& intent_cfg,
-    QTrading::Risk::SimpleRiskEngine::Config& risk_cfg,
-    QTrading::Execution::MarketExecutionEngine::Config& execution_cfg,
-    QTrading::Monitoring::SimpleMonitoring::Config& monitoring_cfg);
-void LoadBasisArbitrageConfig(
-    const std::filesystem::path& config_path,
-    QTrading::Signal::FundingCarrySignalEngine::Config& signal_cfg,
-    QTrading::Intent::FundingCarryIntentBuilder::Config& intent_cfg,
-    QTrading::Risk::SimpleRiskEngine::Config& risk_cfg,
-    QTrading::Execution::MarketExecutionEngine::Config& execution_cfg,
-    QTrading::Monitoring::SimpleMonitoring::Config& monitoring_cfg);
 void EmitExchangeStatusLine(
     const std::shared_ptr<QTrading::Infra::Exchanges::BinanceSim::BinanceExchange>& exchange);
 
