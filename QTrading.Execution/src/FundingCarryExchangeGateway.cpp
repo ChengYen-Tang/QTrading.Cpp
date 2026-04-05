@@ -57,12 +57,14 @@ void FundingCarryExchangeGateway::SubmitOrders(
         const auto type = ResolveInstrumentType(instrument_types_, order.symbol);
 
         if (type.has_value() && *type == QTrading::Dto::Trading::InstrumentType::Spot) {
+            // Spot inventory reduction is expressed as a normal sell in the current simulator.
+            // Passing reduce_only to spot causes the order to be rejected instead of flattening.
             (void)exchange_->spot.place_order(
                 order.symbol,
                 order.qty,
                 price,
                 ToOrderSide(order.action),
-                order.reduce_only);
+                false);
             continue;
         }
 

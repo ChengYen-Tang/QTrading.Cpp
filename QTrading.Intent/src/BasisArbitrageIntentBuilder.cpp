@@ -5,6 +5,17 @@
 #include <string_view>
 
 namespace QTrading::Intent {
+namespace {
+
+bool IsExecutableBasisDirection(bool receive_funding)
+{
+    // Current basis replay/execution stack supports delta-neutral spot-long/perp-short.
+    // The opposite side requires borrowable spot short inventory, which the simulator
+    // does not provide. Suppress that direction to avoid degrading into a naked perp leg.
+    return receive_funding;
+}
+
+} // namespace
 
 BasisArbitrageIntentBuilder::BasisArbitrageIntentBuilder(Config cfg)
     : FundingCarryIntentBuilder(cfg)
@@ -57,7 +68,10 @@ TradeIntent BasisArbitrageIntentBuilder::build(
 
             if (abs_basis >= cfg_.basis_direction_switch_entry_abs_pct && can_switch) {
                 const bool desired_receive = basis_pct >= 0.0;
-                if (desired_receive != current_receive_funding_) {
+                if (!IsExecutableBasisDirection(desired_receive)) {
+                    use_receive_funding_side = current_receive_funding_;
+                }
+                else if (desired_receive != current_receive_funding_) {
                     current_receive_funding_ = desired_receive;
                     last_direction_switch_ts_ = signal.ts_ms;
                 }

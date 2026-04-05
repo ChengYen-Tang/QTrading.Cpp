@@ -505,8 +505,8 @@ RiskTarget SimpleRiskEngine::position(const QTrading::Intent::TradeIntent& inten
                 effective_boost_max_scale *= Clamp01(regime_scale);
             }
         }
-        if (is_carry && spot_price.has_value() && *spot_price > 0.0) {
-            // Build the same carry target that execution sizing will use later.
+        if ((is_carry || is_basis_arbitrage) && spot_price.has_value() && *spot_price > 0.0) {
+            // Build the same dynamic pair target that execution sizing will use later.
             // This avoids net-neutral early-return freezing rebalances when
             // auto-notional has grown far beyond the static configured notional.
             double target_leg_notional = configured_leg_notional;
@@ -669,7 +669,7 @@ RiskTarget SimpleRiskEngine::position(const QTrading::Intent::TradeIntent& inten
         const double gross_reference_leg_notional =
             has_dynamic_target_leg_notional ? dynamic_target_leg_notional : configured_leg_notional;
         double effective_gross_deviation_trigger_ratio = cfg_.gross_deviation_trigger_ratio;
-        if (is_carry &&
+        if (is_pair_trade &&
             !std::isfinite(effective_gross_deviation_trigger_ratio) &&
             (cfg_.dual_ledger_auto_notional_ratio > 0.0 ||
              cfg_.carry_allocator_leverage_model_enabled))
@@ -696,7 +696,7 @@ RiskTarget SimpleRiskEngine::position(const QTrading::Intent::TradeIntent& inten
                 for (const auto& leg : intent.legs) {
                     out.target_positions[leg.instrument] = current_notional[leg.instrument];
                     if (is_perp_instrument_(leg.instrument)) {
-                        out.leverage[leg.instrument] = is_carry
+                        out.leverage[leg.instrument] = is_pair_trade
                             ? leverage_for_instrument_scaled_(leg.instrument, confidence_leverage_scale)
                             : leverage_for_instrument_(leg.instrument);
                     }
@@ -827,7 +827,7 @@ RiskTarget SimpleRiskEngine::position(const QTrading::Intent::TradeIntent& inten
                     out.target_positions[leg.instrument] = base_qty * price * sign;
                 }
                 if (is_perp_instrument_(leg.instrument)) {
-                    out.leverage[leg.instrument] = is_carry
+                    out.leverage[leg.instrument] = is_pair_trade
                         ? leverage_for_instrument_scaled_(leg.instrument, confidence_leverage_scale)
                         : leverage_for_instrument_(leg.instrument);
                 }

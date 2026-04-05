@@ -85,10 +85,11 @@ TEST(BasisArbitrageIntentBuilderTests, DirectionalModeSwitchesLegsByBasisSignWit
     EXPECT_EQ(pos.legs[1].instrument, "BTCUSDT_PERP");
     EXPECT_EQ(pos.legs[1].side, QTrading::Intent::TradeSide::Short);
 
-    // Negative basis below switch threshold: flip direction.
+    // Negative basis would request spot-short/perp-long, which is intentionally
+    // suppressed in the current executable basis stack.
     signal.ts_ms = 2000;
     auto neg = builder.build(signal, MakeMarketWithBasis(2000, 99.0));
     ASSERT_EQ(neg.legs.size(), 2u);
-    EXPECT_EQ(neg.legs[0].side, QTrading::Intent::TradeSide::Short);
-    EXPECT_EQ(neg.legs[1].side, QTrading::Intent::TradeSide::Long);
+    EXPECT_EQ(neg.legs[0].side, QTrading::Intent::TradeSide::Long);
+    EXPECT_EQ(neg.legs[1].side, QTrading::Intent::TradeSide::Short);
 }
