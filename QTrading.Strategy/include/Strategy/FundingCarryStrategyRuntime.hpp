@@ -6,10 +6,10 @@
 #include "Execution/IExecutionPolicy.hpp"
 #include "Execution/IExecutionScheduler.hpp"
 #include "Execution/LiquidityAwareExecutionScheduler.hpp"
-#include "Intent/FundingCarryIntentBuilder.hpp"
+#include "Intent/IIntentBuilder.hpp"
 #include "Monitoring/SimpleMonitoring.hpp"
 #include "Risk/SimpleRiskEngine.hpp"
-#include "Signal/FundingCarrySignalEngine.hpp"
+#include "Signal/ISignalEngine.hpp"
 #include "Strategy/FundingCarryStrategyGateway.hpp"
 #include "Strategy/IStrategyRuntime.hpp"
 #include "Universe/FixedUniverseSelector.hpp"
@@ -30,8 +30,8 @@ public:
     FundingCarryStrategyRuntime(
         std::shared_ptr<QTrading::Infra::Exchanges::BinanceSim::BinanceExchange> exchange,
         QTrading::Universe::FixedUniverseSelector& universe_selector,
-        QTrading::Signal::FundingCarrySignalEngine& signal_engine,
-        QTrading::Intent::FundingCarryIntentBuilder& intent_builder,
+        QTrading::Signal::ISignalEngine<MarketPtr>& signal_engine,
+        QTrading::Intent::IIntentBuilder<MarketPtr>& intent_builder,
         QTrading::Risk::SimpleRiskEngine& risk_engine,
         QTrading::Execution::IExecutionEngine<MarketPtr>& execution_engine,
         QTrading::Monitoring::SimpleMonitoring& monitoring,
@@ -42,8 +42,8 @@ public:
 private:
     std::shared_ptr<QTrading::Infra::Exchanges::BinanceSim::BinanceExchange> exchange_;
     QTrading::Universe::FixedUniverseSelector& universe_selector_;
-    QTrading::Signal::FundingCarrySignalEngine& signal_engine_;
-    QTrading::Intent::FundingCarryIntentBuilder& intent_builder_;
+    QTrading::Signal::ISignalEngine<MarketPtr>& signal_engine_;
+    QTrading::Intent::IIntentBuilder<MarketPtr>& intent_builder_;
     QTrading::Risk::SimpleRiskEngine& risk_engine_;
     QTrading::Execution::IExecutionEngine<MarketPtr>& execution_engine_;
     QTrading::Monitoring::SimpleMonitoring& monitoring_;

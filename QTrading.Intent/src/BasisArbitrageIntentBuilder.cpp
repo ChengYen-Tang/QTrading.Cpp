@@ -1,4 +1,5 @@
 #include "Intent/BasisArbitrageIntentBuilder.hpp"
+#include "Intent/PairTradeIntentSupport.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -18,8 +19,7 @@ bool IsExecutableBasisDirection(bool receive_funding)
 } // namespace
 
 BasisArbitrageIntentBuilder::BasisArbitrageIntentBuilder(Config cfg)
-    : FundingCarryIntentBuilder(cfg)
-    , cfg_(std::move(cfg))
+    : cfg_(std::move(cfg))
     , current_receive_funding_(cfg_.receive_funding)
 {
     if (!std::isfinite(cfg_.basis_direction_switch_entry_abs_pct) ||
@@ -40,18 +40,13 @@ TradeIntent BasisArbitrageIntentBuilder::build(
     const QTrading::Signal::SignalDecision& signal,
     const std::shared_ptr<QTrading::Dto::Market::Binance::MultiKlineDto>& market)
 {
-    TradeIntent out = FundingCarryIntentBuilder::build(signal, market);
-    out.strategy = "basis_arbitrage";
-    out.structure = "delta_neutral_basis";
-    out.reason = "basis_arbitrage";
-    if (!out.intent_id.empty()) {
-        constexpr std::string_view old_prefix = "funding_carry:";
-        if (out.intent_id.rfind(old_prefix, 0) == 0) {
-            out.intent_id.replace(0, old_prefix.size(), "basis_arbitrage:");
-        }
-    }
+    TradeIntent out = QTrading::Intent::Support::BuildPairTradeIntentBase(
+        signal,
+        "basis_arbitrage",
+        "delta_neutral_basis",
+        "basis_arbitrage");
 
-    if (signal.status != QTrading::Signal::SignalStatus::Active || out.legs.size() != 2) {
+    if (signal.status != QTrading::Signal::SignalStatus::Active) {
         return out;
     }
 
@@ -83,14 +78,12 @@ TradeIntent BasisArbitrageIntentBuilder::build(
         use_receive_funding_side = current_receive_funding_;
     }
 
+    out.intent_id = QTrading::Intent::Support::BuildPairIntentId(
+        "basis_arbitrage",
+        cfg_.spot_symbol,
+        cfg_.perp_symbol,
+        use_receive_funding_side);
     ApplyLegDirection(out, use_receive_funding_side);
-    if (!out.intent_id.empty()) {
-        const std::string suffix = use_receive_funding_side ? ":receive" : ":pay";
-        const auto pos = out.intent_id.rfind(':');
-        if (pos != std::string::npos) {
-            out.intent_id = out.intent_id.substr(0, pos) + suffix;
-        }
-    }
     return out;
 }
 
@@ -156,15 +149,11 @@ std::optional<double> BasisArbitrageIntentBuilder::ComputeBasisPct(
 
 void BasisArbitrageIntentBuilder::ApplyLegDirection(TradeIntent& intent, bool receive_funding) const
 {
-    intent.legs.clear();
-    if (receive_funding) {
-        intent.legs.push_back(TradeLeg{ cfg_.spot_symbol, TradeSide::Long });
-        intent.legs.push_back(TradeLeg{ cfg_.perp_symbol, TradeSide::Short });
-    }
-    else {
-        intent.legs.push_back(TradeLeg{ cfg_.spot_symbol, TradeSide::Short });
-        intent.legs.push_back(TradeLeg{ cfg_.perp_symbol, TradeSide::Long });
-    }
+    QTrading::Intent::Support::ApplyPairLegDirection(
+        intent,
+        cfg_.spot_symbol,
+        cfg_.perp_symbol,
+        receive_funding);
 }
 
 } // namespace QTrading::Intent

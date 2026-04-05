@@ -61,8 +61,7 @@ void UpdateEma(double value, double alpha, bool& initialized, double& ema)
 } // namespace
 
 BasisArbitrageSignalEngine::BasisArbitrageSignalEngine(Config cfg)
-    : FundingCarrySignalEngine(cfg)
-    , cfg_(std::move(cfg))
+    : cfg_(std::move(cfg))
 {
     cfg_.basis_mr_window_bars = std::max<std::size_t>(cfg_.basis_mr_window_bars, 10);
     cfg_.basis_mr_min_samples = std::max<std::size_t>(cfg_.basis_mr_min_samples, 10);
@@ -413,9 +412,9 @@ SignalDecision BasisArbitrageSignalEngine::on_market(
 
         double funding_edge = 0.0;
         if (cfg_.basis_cost_include_funding &&
-            perp_id_ < market->funding_by_id.size())
+            symbol_ids_.perp_id < market->funding_by_id.size())
         {
-            const auto& funding_opt = market->funding_by_id[perp_id_];
+            const auto& funding_opt = market->funding_by_id[symbol_ids_.perp_id];
             if (funding_opt.has_value() && std::isfinite(funding_opt->Rate)) {
                 const double direction = (trade_basis_pct >= 0.0) ? 1.0 : -1.0;
                 funding_edge =
@@ -483,27 +482,11 @@ SignalDecision BasisArbitrageSignalEngine::on_market(
 bool BasisArbitrageSignalEngine::ResolveSymbolIds(
     const std::shared_ptr<QTrading::Dto::Market::Binance::MultiKlineDto>& market)
 {
-    if (has_symbol_ids_) {
-        return true;
-    }
-    if (!market || !market->symbols) {
-        return false;
-    }
-
-    const auto& symbols = *market->symbols;
-    for (std::size_t i = 0; i < symbols.size(); ++i) {
-        if (symbols[i] == cfg_.spot_symbol) {
-            spot_id_ = i;
-        }
-        if (symbols[i] == cfg_.perp_symbol) {
-            perp_id_ = i;
-        }
-    }
-
-    const bool spot_ok = (spot_id_ < symbols.size() && symbols[spot_id_] == cfg_.spot_symbol);
-    const bool perp_ok = (perp_id_ < symbols.size() && symbols[perp_id_] == cfg_.perp_symbol);
-    has_symbol_ids_ = spot_ok && perp_ok;
-    return has_symbol_ids_;
+    return QTrading::Signal::Support::ResolvePairSymbolIds(
+        market,
+        cfg_.spot_symbol,
+        cfg_.perp_symbol,
+        symbol_ids_);
 }
 
 std::optional<double> BasisArbitrageSignalEngine::ComputeBasisPct(
@@ -513,31 +496,7 @@ std::optional<double> BasisArbitrageSignalEngine::ComputeBasisPct(
     if (!ResolveSymbolIds(market)) {
         return std::nullopt;
     }
-    if (!market) {
-        return std::nullopt;
-    }
-
-    if (use_mark_index &&
-        perp_id_ < market->mark_klines_by_id.size() &&
-        perp_id_ < market->index_klines_by_id.size())
-    {
-        const auto& mark_opt = market->mark_klines_by_id[perp_id_];
-        const auto& index_opt = market->index_klines_by_id[perp_id_];
-        if (mark_opt.has_value() && index_opt.has_value() && index_opt->ClosePrice > 0.0) {
-            return (mark_opt->ClosePrice - index_opt->ClosePrice) / index_opt->ClosePrice;
-        }
-    }
-
-    if (spot_id_ >= market->trade_klines_by_id.size() || perp_id_ >= market->trade_klines_by_id.size()) {
-        return std::nullopt;
-    }
-
-    const auto& spot_opt = market->trade_klines_by_id[spot_id_];
-    const auto& perp_opt = market->trade_klines_by_id[perp_id_];
-    if (!spot_opt.has_value() || !perp_opt.has_value() || spot_opt->ClosePrice <= 0.0) {
-        return std::nullopt;
-    }
-    return (perp_opt->ClosePrice - spot_opt->ClosePrice) / spot_opt->ClosePrice;
+    return QTrading::Signal::Support::ComputeBasisPct(market, symbol_ids_, use_mark_index);
 }
 
 } // namespace QTrading::Signal

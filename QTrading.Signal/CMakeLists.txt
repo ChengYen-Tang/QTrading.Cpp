@@ -4,6 +4,7 @@ add_library(QTrading.Signal.Library
   src/SignalModule.cpp
   src/BasisArbitrageSignalEngine.cpp
   src/FundingCarrySignalEngine.cpp
+  src/PairMarketSignalSupport.cpp
 )
 
 target_include_directories(QTrading.Signal.Library PUBLIC

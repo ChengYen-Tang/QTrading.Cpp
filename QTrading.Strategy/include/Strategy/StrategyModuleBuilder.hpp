@@ -3,10 +3,10 @@
 #include "Dto/Trading/InstrumentSpec.hpp"
 #include "Exchanges/BinanceSimulator/BinanceExchange.hpp"
 #include "Execution/MarketExecutionEngine.hpp"
-#include "Intent/FundingCarryIntentBuilder.hpp"
+#include "Intent/IIntentBuilder.hpp"
 #include "Monitoring/SimpleMonitoring.hpp"
 #include "Risk/SimpleRiskEngine.hpp"
-#include "Signal/FundingCarrySignalEngine.hpp"
+#include "Signal/ISignalEngine.hpp"
 #include "Strategy/IStrategyRuntime.hpp"
 #include "Strategy/StrategyConfigLoader.hpp"
 #include "Universe/FixedUniverseSelector.hpp"
@@ -31,8 +31,8 @@ struct StrategyMetadata {
 
 struct StrategyModuleBundle {
     std::unique_ptr<QTrading::Universe::FixedUniverseSelector> universe_selector;
-    std::shared_ptr<QTrading::Signal::FundingCarrySignalEngine> signal_engine;
-    std::shared_ptr<QTrading::Intent::FundingCarryIntentBuilder> intent_builder;
+    std::shared_ptr<QTrading::Signal::ISignalEngine<std::shared_ptr<QTrading::Dto::Market::Binance::MultiKlineDto>>> signal_engine;
+    std::shared_ptr<QTrading::Intent::IIntentBuilder<std::shared_ptr<QTrading::Dto::Market::Binance::MultiKlineDto>>> intent_builder;
     std::unique_ptr<QTrading::Risk::SimpleRiskEngine> risk_engine;
     std::unique_ptr<QTrading::Execution::MarketExecutionEngine> execution_engine;
     std::unique_ptr<QTrading::Monitoring::SimpleMonitoring> monitoring;

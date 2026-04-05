@@ -53,8 +53,8 @@ namespace QTrading::Strategy {
 FundingCarryStrategyRuntime::FundingCarryStrategyRuntime(
     std::shared_ptr<QTrading::Infra::Exchanges::BinanceSim::BinanceExchange> exchange,
     QTrading::Universe::FixedUniverseSelector& universe_selector,
-    QTrading::Signal::FundingCarrySignalEngine& signal_engine,
-    QTrading::Intent::FundingCarryIntentBuilder& intent_builder,
+    QTrading::Signal::ISignalEngine<MarketPtr>& signal_engine,
+    QTrading::Intent::IIntentBuilder<MarketPtr>& intent_builder,
     QTrading::Risk::SimpleRiskEngine& risk_engine,
     QTrading::Execution::IExecutionEngine<MarketPtr>& execution_engine,
     QTrading::Monitoring::SimpleMonitoring& monitoring,
