@@ -58,6 +58,7 @@ StrategyModuleBundle BuildBasisArbitrageModules(
         *bundle.universe_selector,
         configs.signal_cfg,
         configs.intent_cfg,
+        configs.runtime_cfg,
         *bundle.risk_engine,
         *bundle.execution_engine,
         *bundle.monitoring,

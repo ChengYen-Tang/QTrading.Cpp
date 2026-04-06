@@ -173,6 +173,11 @@ void ApplySharedStrategyConfigSections(
 
     const rapidjson::Value* monitoring = FindObject(doc, "monitoring");
     ApplyNumber(monitoring, "max_open_orders_per_symbol", configs.monitoring_cfg.max_open_orders_per_symbol);
+
+    const rapidjson::Value* runtime = FindObject(doc, "runtime");
+    ApplyNumber(runtime, "basis_multi_top_n", configs.runtime_cfg.basis_multi_top_n);
+    ApplyNumber(runtime, "basis_multi_shard_size", configs.runtime_cfg.basis_multi_shard_size);
+    ApplyNumber(runtime, "basis_multi_worker_count", configs.runtime_cfg.basis_multi_worker_count);
 }
 
 void ApplyBasisArbitrageSpecificConfigSections(

@@ -99,5 +99,10 @@
   },
   "monitoring": {
     "max_open_orders_per_symbol": 5
+  },
+  "runtime": {
+    "basis_multi_top_n": 3,
+    "basis_multi_shard_size": 16,
+    "basis_multi_worker_count": 0
   }
 }
