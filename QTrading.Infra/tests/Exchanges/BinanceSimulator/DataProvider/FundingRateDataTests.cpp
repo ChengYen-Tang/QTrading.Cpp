@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
 #include <boost/filesystem.hpp>
 #include <boost/filesystem/fstream.hpp>
-#include <Exchanges/BinanceSimulator/DataProvider/FundingRateData.hpp>
+#include <Data/Binance/FundingRateData.hpp>
 
 static const char* test_csv_filename = "test_funding_rate_data.csv";
 
