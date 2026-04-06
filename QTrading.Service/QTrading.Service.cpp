@@ -1,5 +1,6 @@
 #include "Exchanges/BinanceSimulator/BinanceExchange.hpp"
 #include "LoggerBootstrap.hpp"
+#include "DatasetUniverseConfig.hpp"
 #include "ServiceHelpers.hpp"
 #include "Diagnostics/Trace.hpp"
 #include "Strategy/StrategyModuleBuilder.hpp"
@@ -85,12 +86,19 @@ int main()
             QTrading::Service::Helpers::ResolveRepoRelativePath(
                 std::filesystem::path(__FILE__),
                 strategy_meta.config_relative_path);
+        const std::filesystem::path simulator_config_path =
+            QTrading::Service::Helpers::ResolveRepoRelativePath(
+                std::filesystem::path(__FILE__),
+                R"(research/config/simulator.json)");
+        const auto simulator_config =
+            QTrading::Service::LoadSimulatorConfig(simulator_config_path);
 
         std::ostringstream strategy_params_builder;
         strategy_params_builder << "strategy_profile=" << strategy_meta.strategy_profile_param
                                 << ";initial_spot_cash=" << kInitialSpotCash
                                 << ";initial_perp_wallet=" << kInitialPerpWallet;
         strategy_params_builder << ";strategy_config=" << strategy_config_path.string();
+        strategy_params_builder << ";simulator_config=" << simulator_config_path.string();
         if (!sim_start_date.empty()) {
             strategy_params_builder << ";sim_start_date=" << sim_start_date;
         }
@@ -99,21 +107,8 @@ int main()
         }
         const std::string strategy_params = strategy_params_builder.str();
 
-        /// @brief Mapping from symbol string to CSV file path.
-        std::vector<BinanceExchange::SymbolDataset> symbolCsv = {
-            {"BTCUSDT_SPOT",
-                QTrading::Service::Helpers::Utf8Path(u8R"(\\synology\MarketData\General\MarketData\Kline\Spot\BTCUSDT.csv)"),
-                std::nullopt,
-                std::nullopt,
-                std::nullopt,
-                QTrading::Dto::Trading::InstrumentType::Spot},
-            {"BTCUSDT_PERP",
-                QTrading::Service::Helpers::Utf8Path(u8R"(\\synology\MarketData\General\MarketData\Kline\UsdFutures\BTCUSDT.csv)"),
-                QTrading::Service::Helpers::Utf8Path(u8R"(\\synology\MarketData\General\MarketData\FundingRate\UsdFutures\BTCUSDT.csv)"),
-                QTrading::Service::Helpers::Utf8Path(u8R"(\\synology\MarketData\General\MarketData\MarkPriceKline\UsdFutures\BTCUSDT.csv)"),
-                QTrading::Service::Helpers::Utf8Path(u8R"(\\synology\MarketData\General\MarketData\IndexPriceKline\UsdFutures\BTCUSDT.csv)"),
-                QTrading::Dto::Trading::InstrumentType::Perp}
-        };
+        std::vector<BinanceExchange::SymbolDataset> symbolCsv =
+            QTrading::Service::BuildSymbolDatasets(simulator_config.symbols);
         std::unordered_map<std::string, QTrading::Dto::Trading::InstrumentType> instrument_types;
         instrument_types.reserve(symbolCsv.size());
         for (const auto& ds : symbolCsv) {

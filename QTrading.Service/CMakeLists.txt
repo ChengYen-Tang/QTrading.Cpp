@@ -3,6 +3,8 @@
 find_package(Boost CONFIG REQUIRED COMPONENTS thread)
 
 add_executable(QTrading.Service
+  DatasetUniverseConfig.cpp
+  DatasetUniverseConfig.hpp
   QTrading.Service.cpp
   ServiceHelpers.cpp
   QTrading.Service.h

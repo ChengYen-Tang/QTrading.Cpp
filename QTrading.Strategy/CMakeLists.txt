@@ -1,6 +1,7 @@
 project(QTrading.Strategy LANGUAGES CXX)
 
 add_library(QTrading.Strategy.Library
+  src/BasisArbitrageMultiPairRuntime.cpp
   src/FundingCarryStrategyGateway.cpp
   src/FundingCarryStrategyRuntime.cpp
   src/StrategyConfigLoader.cpp

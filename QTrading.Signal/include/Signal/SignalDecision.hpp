@@ -35,6 +35,9 @@ struct SignalDecision {
     SignalStatus status = SignalStatus::Inactive;
     /// @brief Confidence score (0..1).
     double confidence = 0.0;
+    /// @brief Strategy-specific allocation score for cross-sectional ranking.
+    ///        Basis allocator uses net edge; other strategies may leave this at zero.
+    double allocator_score = 0.0;
     /// @brief Execution urgency.
     SignalUrgency urgency = SignalUrgency::Low;
 };

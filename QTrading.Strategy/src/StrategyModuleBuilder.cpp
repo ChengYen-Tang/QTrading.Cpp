@@ -2,6 +2,7 @@
 
 #include "Intent/BasisArbitrageIntentBuilder.hpp"
 #include "Signal/BasisArbitrageSignalEngine.hpp"
+#include "Strategy/BasisArbitrageMultiPairRuntime.hpp"
 #include "Strategy/FundingCarryStrategyRuntime.hpp"
 #include "Universe/IUniverseSelector.hpp"
 
@@ -49,16 +50,14 @@ StrategyModuleBundle BuildBasisArbitrageModules(
 
     StrategyModuleBundle bundle;
     bundle.universe_selector = std::make_unique<QTrading::Universe::NullUniverseSelector>();
-    bundle.signal_engine = std::make_shared<QTrading::Signal::BasisArbitrageSignalEngine>(configs.signal_cfg);
-    bundle.intent_builder = std::make_shared<QTrading::Intent::BasisArbitrageIntentBuilder>(configs.intent_cfg);
     bundle.risk_engine = std::make_unique<QTrading::Risk::SimpleRiskEngine>(configs.risk_cfg);
     bundle.execution_engine = std::make_unique<QTrading::Execution::MarketExecutionEngine>(exchange, configs.execution_cfg);
     bundle.monitoring = std::make_unique<QTrading::Monitoring::SimpleMonitoring>(configs.monitoring_cfg);
-    bundle.strategy = std::make_shared<QTrading::Strategy::FundingCarryStrategyRuntime>(
+    bundle.strategy = std::make_shared<QTrading::Strategy::BasisArbitrageMultiPairRuntime>(
         exchange,
         *bundle.universe_selector,
-        *bundle.signal_engine,
-        *bundle.intent_builder,
+        configs.signal_cfg,
+        configs.intent_cfg,
         *bundle.risk_engine,
         *bundle.execution_engine,
         *bundle.monitoring,

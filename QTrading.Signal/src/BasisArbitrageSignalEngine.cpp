@@ -156,6 +156,7 @@ SignalDecision BasisArbitrageSignalEngine::on_market(
 
     out.ts_ms = market->Timestamp;
     out.symbol = cfg_.perp_symbol;
+    out.allocator_score = 0.0;
 
     if (!ResolveSymbolIds(market)) {
         out.status = SignalStatus::Inactive;
@@ -431,6 +432,7 @@ SignalDecision BasisArbitrageSignalEngine::on_market(
             borrow_cost -
             trading_cost -
             risk_penalty;
+        out.allocator_score = net_edge;
 
         if (net_edge <= cfg_.basis_cost_edge_threshold_pct) {
             mr_active_ = false;
@@ -449,6 +451,12 @@ SignalDecision BasisArbitrageSignalEngine::on_market(
         const double edge_scale = std::clamp(net_edge / gross_edge, 0.0, 1.0);
         out.confidence = std::clamp(out.confidence * edge_scale, 0.0, 1.0);
     }
+    else if (alpha_stats.has_value()) {
+        out.allocator_score =
+            std::max(0.0, std::fabs(trade_basis_pct - alpha_stats->mean)) * out.confidence;
+    }
+
+    out.allocator_score = std::max(0.0, out.allocator_score);
 
     if (out.status == SignalStatus::Active &&
         out.confidence > 0.0 &&
