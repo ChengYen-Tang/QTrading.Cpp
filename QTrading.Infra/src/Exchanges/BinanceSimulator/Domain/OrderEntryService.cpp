@@ -331,8 +331,17 @@ double current_index_price(
     return index_data.get_kline(idx).ClosePrice;
 }
 
-double sum_spot_inventory(const State::BinanceExchangeRuntimeState& runtime_state, const std::string& symbol)
+double sum_spot_inventory(
+    const State::BinanceExchangeRuntimeState& runtime_state,
+    const State::StepKernelState& step_state,
+    const std::string& symbol)
 {
+    const auto it = step_state.symbol_to_id.find(symbol);
+    if (it != step_state.symbol_to_id.end() &&
+        it->second < runtime_state.spot_inventory_qty_by_symbol.size()) {
+        return runtime_state.spot_inventory_qty_by_symbol[it->second];
+    }
+
     double inventory = 0.0;
     for (const auto& position : runtime_state.positions) {
         if (position.instrument_type == QTrading::Dto::Trading::InstrumentType::Spot &&
@@ -1125,7 +1134,7 @@ bool OrderEntryService::Execute(
             return false;
         }
         if (request.side == QTrading::Dto::Trading::OrderSide::Sell) {
-            const double inventory = sum_spot_inventory(runtime_state, request.symbol);
+            const double inventory = sum_spot_inventory(runtime_state, step_state, request.symbol);
             const double reserved_sell = sum_spot_sell_reservations(runtime_state, request.symbol);
             const double sellable = std::max(0.0, inventory - reserved_sell);
             if (sellable <= kEpsilon) {

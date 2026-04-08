@@ -15,6 +15,56 @@
 namespace QTrading::Infra::Exchanges::BinanceSim {
 namespace {
 constexpr size_t kReplayPayloadPrewarmPoolSize = 3;
+
+constexpr double kEpsilon = 1e-12;
+
+void rebuild_visible_positions_cache(
+    const State::BinanceExchangeRuntimeState& runtime_state,
+    const State::StepKernelState& step_state)
+{
+    auto& cache = runtime_state.visible_positions_cache;
+    cache = runtime_state.positions;
+    cache.reserve(runtime_state.positions.size() + runtime_state.spot_inventory_qty_by_symbol.size());
+
+    const size_t symbol_count = std::min(
+        step_state.symbols.size(),
+        runtime_state.spot_inventory_qty_by_symbol.size());
+    for (size_t symbol_id = 0; symbol_id < symbol_count; ++symbol_id) {
+        const double qty = runtime_state.spot_inventory_qty_by_symbol[symbol_id];
+        if (!(qty > kEpsilon)) {
+            continue;
+        }
+
+        QTrading::dto::Position synthetic{};
+        synthetic.id =
+            symbol_id < runtime_state.spot_inventory_position_id_by_symbol.size()
+                ? runtime_state.spot_inventory_position_id_by_symbol[symbol_id]
+                : 0;
+        synthetic.order_id = 0;
+        synthetic.symbol = step_state.symbols[symbol_id];
+        synthetic.quantity = qty;
+        synthetic.entry_price =
+            symbol_id < runtime_state.spot_inventory_entry_price_by_symbol.size()
+                ? runtime_state.spot_inventory_entry_price_by_symbol[symbol_id]
+                : 0.0;
+        synthetic.is_long = true;
+        synthetic.notional = synthetic.quantity * synthetic.entry_price;
+        synthetic.instrument_type = QTrading::Dto::Trading::InstrumentType::Spot;
+        cache.emplace_back(std::move(synthetic));
+    }
+
+    runtime_state.visible_positions_cache_version = runtime_state.positions_version;
+}
+
+const std::vector<QTrading::dto::Position>& ensure_visible_positions_cache(
+    const State::BinanceExchangeRuntimeState& runtime_state,
+    const State::StepKernelState& step_state)
+{
+    if (runtime_state.visible_positions_cache_version != runtime_state.positions_version) {
+        rebuild_visible_positions_cache(runtime_state, step_state);
+    }
+    return runtime_state.visible_positions_cache;
+}
 }
 
 BinanceExchange::BinanceExchange(const std::vector<SymbolDataset>& datasets,
@@ -49,7 +99,7 @@ bool BinanceExchange::step()
 
 const std::vector<QTrading::dto::Position>& BinanceExchange::get_all_positions() const
 {
-    return runtime_state_->positions;
+    return ensure_visible_positions_cache(*runtime_state_, *step_kernel_state_);
 }
 
 const std::vector<QTrading::dto::Order>& BinanceExchange::get_all_open_orders() const

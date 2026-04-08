@@ -1,9 +1,11 @@
 #include "Exchanges/BinanceSimulator/Domain/FillSettlementEngine.hpp"
 
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <limits>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <utility>
 
@@ -17,6 +19,12 @@ namespace QTrading::Infra::Exchanges::BinanceSim::Domain {
 namespace {
 
 constexpr double kEpsilon = 1e-12;
+constexpr size_t kInvalidSymbolId = std::numeric_limits<size_t>::max();
+
+[[noreturn]] void throw_invariant_breach(const std::string& message)
+{
+    throw std::logic_error("FillSettlementEngine invariant breach: " + message);
+}
 
 bool spot_buy_fee_paid_in_base(const State::BinanceExchangeRuntimeState& runtime_state)
 {
@@ -115,38 +123,161 @@ int allocate_next_position_id(State::BinanceExchangeRuntimeState& runtime_state)
     return static_cast<int>(raw_id);
 }
 
-size_t ensure_symbol_id(
-    State::BinanceExchangeRuntimeState& runtime_state,
-    const std::string& symbol)
+bool is_valid_authoritative_symbol_id(
+    const State::StepKernelState* step_state,
+    size_t symbol_id) noexcept
 {
-    const auto it = runtime_state.position_symbol_to_id.find(symbol);
-    if (it != runtime_state.position_symbol_to_id.end()) {
-        return it->second;
+    if (symbol_id == kInvalidSymbolId) {
+        return false;
     }
-    const size_t id = runtime_state.position_symbol_to_id.size();
-    runtime_state.position_symbol_to_id.emplace(symbol, id);
-    return id;
+    if (step_state == nullptr) {
+        return true;
+    }
+    return symbol_id < step_state->symbols.size();
 }
 
-std::optional<size_t> try_get_symbol_id(
-    const State::BinanceExchangeRuntimeState& runtime_state,
+std::optional<size_t> try_step_symbol_id(
+    const State::StepKernelState* step_state,
     const std::string& symbol)
 {
-    const auto it = runtime_state.position_symbol_to_id.find(symbol);
-    if (it == runtime_state.position_symbol_to_id.end()) {
+    if (step_state == nullptr) {
+        return std::nullopt;
+    }
+    const auto it = step_state->symbol_to_id.find(symbol);
+    if (it == step_state->symbol_to_id.end()) {
         return std::nullopt;
     }
     return it->second;
 }
 
-std::optional<size_t> resolve_fill_symbol_id(
-    State::BinanceExchangeRuntimeState& runtime_state,
+std::optional<size_t> try_cached_position_symbol_id(
+    const State::BinanceExchangeRuntimeState& runtime_state,
+    const QTrading::dto::Position& position,
+    std::optional<size_t> slot = std::nullopt)
+{
+    if (slot.has_value() &&
+        *slot < runtime_state.position_symbol_id_by_slot.size() &&
+        runtime_state.position_symbol_id_by_slot[*slot] != kInvalidSymbolId) {
+        return runtime_state.position_symbol_id_by_slot[*slot];
+    }
+    const auto cached_it = runtime_state.position_symbol_id_by_position_id.find(position.id);
+    if (cached_it != runtime_state.position_symbol_id_by_position_id.end() &&
+        cached_it->second != kInvalidSymbolId) {
+        return cached_it->second;
+    }
+    return std::nullopt;
+}
+
+std::optional<size_t> try_resolve_fill_symbol_id(
+    const State::BinanceExchangeRuntimeState& runtime_state,
+    const State::StepKernelState* step_state,
     const MatchFill& fill)
 {
-    if (fill.symbol_id != std::numeric_limits<size_t>::max()) {
+    const auto step_symbol_id = try_step_symbol_id(step_state, fill.symbol);
+    if (fill.symbol_id != kInvalidSymbolId) {
+        if (step_symbol_id.has_value() && *step_symbol_id != fill.symbol_id) {
+            return std::nullopt;
+        }
+        if (!is_valid_authoritative_symbol_id(step_state, fill.symbol_id)) {
+            return std::nullopt;
+        }
         return fill.symbol_id;
     }
-    return try_get_symbol_id(runtime_state, fill.symbol);
+    if (step_symbol_id.has_value()) {
+        return step_symbol_id;
+    }
+    if (const auto order_it = runtime_state.order_symbol_id_by_order_id.find(fill.order_id);
+        order_it != runtime_state.order_symbol_id_by_order_id.end() &&
+        order_it->second != kInvalidSymbolId) {
+        return order_it->second;
+    }
+    return std::nullopt;
+}
+
+void invalidate_visible_positions_cache(State::BinanceExchangeRuntimeState& runtime_state)
+{
+    runtime_state.visible_positions_cache_version = std::numeric_limits<uint64_t>::max();
+}
+
+void ensure_spot_inventory_shape(
+    State::BinanceExchangeRuntimeState& runtime_state,
+    const State::StepKernelState* step_state,
+    size_t symbol_id)
+{
+    size_t required = 0;
+    if (step_state != nullptr) {
+        required = step_state->symbols.size();
+    }
+    if (symbol_id != kInvalidSymbolId) {
+        required = std::max(required, symbol_id + 1);
+    }
+    if (required == 0) {
+        return;
+    }
+    if (runtime_state.spot_inventory_qty_by_symbol.size() < required) {
+        runtime_state.spot_inventory_qty_by_symbol.resize(required, 0.0);
+        runtime_state.spot_inventory_entry_price_by_symbol.resize(required, 0.0);
+        runtime_state.spot_inventory_position_id_by_symbol.resize(required, 0);
+    }
+}
+
+void normalize_legacy_spot_inventory(
+    State::BinanceExchangeRuntimeState& runtime_state,
+    const State::StepKernelState* step_state)
+{
+    if (runtime_state.positions.empty()) {
+        return;
+    }
+
+    std::vector<QTrading::dto::Position> perp_positions;
+    perp_positions.reserve(runtime_state.positions.size());
+    runtime_state.position_symbol_id_by_slot.clear();
+
+    for (const auto& position : runtime_state.positions) {
+        if (position.instrument_type != QTrading::Dto::Trading::InstrumentType::Spot) {
+            perp_positions.push_back(position);
+            continue;
+        }
+        const auto symbol_id = try_step_symbol_id(step_state, position.symbol);
+        if (!symbol_id.has_value()) {
+            throw_invariant_breach("legacy spot inventory missing authoritative symbol id for " + position.symbol);
+        }
+        ensure_spot_inventory_shape(runtime_state, step_state, *symbol_id);
+        runtime_state.spot_inventory_qty_by_symbol[*symbol_id] = position.quantity;
+        runtime_state.spot_inventory_entry_price_by_symbol[*symbol_id] = position.entry_price;
+        runtime_state.spot_inventory_position_id_by_symbol[*symbol_id] = position.id;
+    }
+
+    if (perp_positions.size() != runtime_state.positions.size()) {
+        runtime_state.positions = std::move(perp_positions);
+        runtime_state.position_index_ready = false;
+        invalidate_visible_positions_cache(runtime_state);
+    }
+}
+
+std::optional<size_t> resolve_position_symbol_id(
+    State::BinanceExchangeRuntimeState& runtime_state,
+    const State::StepKernelState* step_state,
+    const QTrading::dto::Position& position,
+    size_t slot)
+{
+    const auto step_symbol_id = try_step_symbol_id(step_state, position.symbol);
+    const auto cached_symbol_id = try_cached_position_symbol_id(runtime_state, position, slot);
+    if (step_symbol_id.has_value() && cached_symbol_id.has_value() && *step_symbol_id != *cached_symbol_id) {
+        return std::nullopt;
+    }
+
+    const auto resolved = step_symbol_id.has_value() ? step_symbol_id : cached_symbol_id;
+    if (!resolved.has_value() || !is_valid_authoritative_symbol_id(step_state, *resolved)) {
+        return std::nullopt;
+    }
+
+    if (runtime_state.position_symbol_id_by_slot.size() <= slot) {
+        runtime_state.position_symbol_id_by_slot.resize(slot + 1, kInvalidSymbolId);
+    }
+    runtime_state.position_symbol_id_by_slot[slot] = *resolved;
+    runtime_state.position_symbol_id_by_position_id[position.id] = *resolved;
+    return resolved;
 }
 
 State::PositionIndexKey make_position_key(
@@ -161,70 +292,70 @@ State::PositionIndexKey make_position_key(
     return key;
 }
 
-bool position_matches_key(
-    const State::BinanceExchangeRuntimeState& runtime_state,
-    const QTrading::dto::Position& position,
-    const State::PositionIndexKey& key)
-{
-    auto cache_it = runtime_state.position_symbol_id_by_position_id.find(position.id);
-    std::optional<size_t> symbol_id = std::nullopt;
-    if (cache_it != runtime_state.position_symbol_id_by_position_id.end()) {
-        symbol_id = cache_it->second;
-    }
-    else {
-        symbol_id = try_get_symbol_id(runtime_state, position.symbol);
-    }
-    return symbol_id.has_value() &&
-        *symbol_id == key.symbol_id &&
-        position.instrument_type == key.instrument_type &&
-        position.is_long == key.is_long;
-}
-
-void enqueue_position_for_lookup(
-    State::BinanceExchangeRuntimeState& runtime_state,
-    const QTrading::dto::Position& position)
-{
-    size_t symbol_id = ensure_symbol_id(runtime_state, position.symbol);
-    auto cached_it = runtime_state.position_symbol_id_by_position_id.find(position.id);
-    if (cached_it != runtime_state.position_symbol_id_by_position_id.end()) {
-        symbol_id = cached_it->second;
-    }
-    else {
-        runtime_state.position_symbol_id_by_position_id[position.id] = symbol_id;
-    }
-    const auto key = make_position_key(symbol_id, position.instrument_type, position.is_long);
-    runtime_state.position_ids_by_key[key].push_back(position.id);
-}
-
-void rebuild_position_index(State::BinanceExchangeRuntimeState& runtime_state)
+void reset_position_index(State::BinanceExchangeRuntimeState& runtime_state)
 {
     runtime_state.position_slot_by_id.clear();
     runtime_state.position_ids_by_key.clear();
     runtime_state.position_symbol_id_by_position_id.clear();
-    runtime_state.position_symbol_id_by_slot.resize(runtime_state.positions.size(), std::numeric_limits<size_t>::max());
-    for (size_t i = 0; i < runtime_state.positions.size(); ++i) {
-        auto& position = runtime_state.positions[i];
-        runtime_state.position_slot_by_id[position.id] = i;
-        const size_t symbol_id = ensure_symbol_id(runtime_state, position.symbol);
-        runtime_state.position_symbol_id_by_slot[i] = symbol_id;
-        runtime_state.position_symbol_id_by_position_id[position.id] = symbol_id;
-        enqueue_position_for_lookup(runtime_state, position);
-    }
-    runtime_state.position_index_ready = true;
+    runtime_state.position_index_ready = false;
 }
 
-void ensure_position_index(State::BinanceExchangeRuntimeState& runtime_state)
+bool rebuild_position_index_from_cached_symbol_ids(State::BinanceExchangeRuntimeState& runtime_state)
 {
-    if (!runtime_state.position_index_ready) {
-        rebuild_position_index(runtime_state);
+    reset_position_index(runtime_state);
+    if (runtime_state.position_symbol_id_by_slot.size() != runtime_state.positions.size()) {
+        return false;
     }
+
+    for (size_t slot = 0; slot < runtime_state.positions.size(); ++slot) {
+        const auto& position = runtime_state.positions[slot];
+        const size_t symbol_id = runtime_state.position_symbol_id_by_slot[slot];
+        if (symbol_id == kInvalidSymbolId) {
+            return false;
+        }
+        runtime_state.position_slot_by_id[position.id] = slot;
+        runtime_state.position_symbol_id_by_position_id[position.id] = symbol_id;
+        runtime_state.position_ids_by_key[make_position_key(symbol_id, position.instrument_type, position.is_long)]
+            .push_back(position.id);
+    }
+
+    runtime_state.position_index_ready = true;
+    return true;
+}
+
+bool initialize_position_index(
+    State::BinanceExchangeRuntimeState& runtime_state,
+    const State::StepKernelState* step_state)
+{
+    runtime_state.position_symbol_id_by_slot.resize(runtime_state.positions.size(), kInvalidSymbolId);
+    for (size_t slot = 0; slot < runtime_state.positions.size(); ++slot) {
+        if (!resolve_position_symbol_id(runtime_state, step_state, runtime_state.positions[slot], slot).has_value()) {
+            reset_position_index(runtime_state);
+            return false;
+        }
+    }
+    return rebuild_position_index_from_cached_symbol_ids(runtime_state);
+}
+
+bool ensure_position_index(
+    State::BinanceExchangeRuntimeState& runtime_state,
+    const State::StepKernelState* step_state)
+{
+    if (runtime_state.position_index_ready) {
+        return true;
+    }
+    return initialize_position_index(runtime_state, step_state);
 }
 
 std::optional<size_t> find_position_slot_by_key(
     State::BinanceExchangeRuntimeState& runtime_state,
+    const State::StepKernelState* step_state,
     const State::PositionIndexKey& key)
 {
-    ensure_position_index(runtime_state);
+    if (!ensure_position_index(runtime_state, step_state)) {
+        return std::nullopt;
+    }
+
     auto key_it = runtime_state.position_ids_by_key.find(key);
     if (key_it == runtime_state.position_ids_by_key.end()) {
         return std::nullopt;
@@ -239,12 +370,16 @@ std::optional<size_t> find_position_slot_by_key(
             continue;
         }
         const size_t slot = slot_it->second;
-        if (slot >= runtime_state.positions.size()) {
+        if (slot >= runtime_state.positions.size() ||
+            slot >= runtime_state.position_symbol_id_by_slot.size()) {
             queue.pop_front();
             continue;
         }
         const auto& position = runtime_state.positions[slot];
-        if (position.id != position_id || !position_matches_key(runtime_state, position, key)) {
+        if (position.id != position_id ||
+            runtime_state.position_symbol_id_by_slot[slot] != key.symbol_id ||
+            position.instrument_type != key.instrument_type ||
+            position.is_long != key.is_long) {
             queue.pop_front();
             continue;
         }
@@ -253,180 +388,193 @@ std::optional<size_t> find_position_slot_by_key(
     return std::nullopt;
 }
 
-QTrading::dto::Position* find_spot_inventory_position(
+std::optional<size_t> find_position_slot_linear(
+    const State::BinanceExchangeRuntimeState& runtime_state,
+    const std::string& symbol,
+    QTrading::Dto::Trading::InstrumentType instrument_type,
+    std::optional<bool> is_long = std::nullopt)
+{
+    for (size_t slot = 0; slot < runtime_state.positions.size(); ++slot) {
+        const auto& position = runtime_state.positions[slot];
+        if (position.symbol != symbol || position.instrument_type != instrument_type) {
+            continue;
+        }
+        if (is_long.has_value() && position.is_long != *is_long) {
+            continue;
+        }
+        return slot;
+    }
+    return std::nullopt;
+}
+
+std::optional<size_t> find_spot_inventory_position_slot(
     State::BinanceExchangeRuntimeState& runtime_state,
+    const State::StepKernelState* step_state,
+    size_t symbol_id,
     const std::string& symbol)
 {
-    const auto symbol_id = try_get_symbol_id(runtime_state, symbol);
-    if (!symbol_id.has_value()) {
-        return nullptr;
+    if (symbol_id != kInvalidSymbolId) {
+        const auto key = make_position_key(
+            symbol_id,
+            QTrading::Dto::Trading::InstrumentType::Spot,
+            true);
+        if (const auto slot = find_position_slot_by_key(runtime_state, step_state, key); slot.has_value()) {
+            return slot;
+        }
     }
-    const auto key = make_position_key(
-        *symbol_id,
+    return find_position_slot_linear(
+        runtime_state,
+        symbol,
         QTrading::Dto::Trading::InstrumentType::Spot,
         true);
-    const auto slot = find_position_slot_by_key(runtime_state, key);
-    if (!slot.has_value()) {
-        return nullptr;
-    }
-    return &runtime_state.positions[*slot];
 }
 
-QTrading::dto::Position* find_spot_inventory_position(
+std::optional<size_t> find_perp_position_slot(
     State::BinanceExchangeRuntimeState& runtime_state,
-    size_t symbol_id)
-{
-    const auto key = make_position_key(
-        symbol_id,
-        QTrading::Dto::Trading::InstrumentType::Spot,
-        true);
-    const auto slot = find_position_slot_by_key(runtime_state, key);
-    if (!slot.has_value()) {
-        return nullptr;
-    }
-    return &runtime_state.positions[*slot];
-}
-
-QTrading::dto::Position* find_perp_position(
-    State::BinanceExchangeRuntimeState& runtime_state,
+    const State::StepKernelState* step_state,
+    size_t symbol_id,
     const std::string& symbol,
     std::optional<bool> is_long = std::nullopt)
 {
-    const auto symbol_id = try_get_symbol_id(runtime_state, symbol);
-    if (!symbol_id.has_value()) {
-        return nullptr;
-    }
-    if (is_long.has_value()) {
-        const auto key = make_position_key(
-            *symbol_id,
-            QTrading::Dto::Trading::InstrumentType::Perp,
-            *is_long);
-        const auto slot = find_position_slot_by_key(runtime_state, key);
-        if (!slot.has_value()) {
-            return nullptr;
+    if (symbol_id != kInvalidSymbolId) {
+        if (is_long.has_value()) {
+            const auto key = make_position_key(
+                symbol_id,
+                QTrading::Dto::Trading::InstrumentType::Perp,
+                *is_long);
+            if (const auto slot = find_position_slot_by_key(runtime_state, step_state, key); slot.has_value()) {
+                return slot;
+            }
         }
-        return &runtime_state.positions[*slot];
-    }
-
-    const auto long_key = make_position_key(
-        *symbol_id,
-        QTrading::Dto::Trading::InstrumentType::Perp,
-        true);
-    const auto short_key = make_position_key(
-        *symbol_id,
-        QTrading::Dto::Trading::InstrumentType::Perp,
-        false);
-    const auto long_slot = find_position_slot_by_key(runtime_state, long_key);
-    const auto short_slot = find_position_slot_by_key(runtime_state, short_key);
-    if (!long_slot.has_value()) {
-        if (!short_slot.has_value()) {
-            return nullptr;
+        else {
+            const auto long_slot = find_position_slot_by_key(
+                runtime_state,
+                step_state,
+                make_position_key(symbol_id, QTrading::Dto::Trading::InstrumentType::Perp, true));
+            const auto short_slot = find_position_slot_by_key(
+                runtime_state,
+                step_state,
+                make_position_key(symbol_id, QTrading::Dto::Trading::InstrumentType::Perp, false));
+            if (long_slot.has_value() && short_slot.has_value()) {
+                return *long_slot < *short_slot ? long_slot : short_slot;
+            }
+            if (long_slot.has_value()) {
+                return long_slot;
+            }
+            if (short_slot.has_value()) {
+                return short_slot;
+            }
         }
-        return &runtime_state.positions[*short_slot];
     }
-    if (!short_slot.has_value()) {
-        return &runtime_state.positions[*long_slot];
-    }
-    const size_t chosen = *long_slot < *short_slot ? *long_slot : *short_slot;
-    return &runtime_state.positions[chosen];
+    return find_position_slot_linear(
+        runtime_state,
+        symbol,
+        QTrading::Dto::Trading::InstrumentType::Perp,
+        is_long);
 }
 
-QTrading::dto::Position* find_perp_position(
+void register_position_slot(
     State::BinanceExchangeRuntimeState& runtime_state,
-    size_t symbol_id,
-    std::optional<bool> is_long = std::nullopt)
-{
-    if (is_long.has_value()) {
-        const auto key = make_position_key(
-            symbol_id,
-            QTrading::Dto::Trading::InstrumentType::Perp,
-            *is_long);
-        const auto slot = find_position_slot_by_key(runtime_state, key);
-        if (!slot.has_value()) {
-            return nullptr;
-        }
-        return &runtime_state.positions[*slot];
-    }
-
-    const auto long_key = make_position_key(
-        symbol_id,
-        QTrading::Dto::Trading::InstrumentType::Perp,
-        true);
-    const auto short_key = make_position_key(
-        symbol_id,
-        QTrading::Dto::Trading::InstrumentType::Perp,
-        false);
-    const auto long_slot = find_position_slot_by_key(runtime_state, long_key);
-    const auto short_slot = find_position_slot_by_key(runtime_state, short_key);
-    if (!long_slot.has_value()) {
-        if (!short_slot.has_value()) {
-            return nullptr;
-        }
-        return &runtime_state.positions[*short_slot];
-    }
-    if (!short_slot.has_value()) {
-        return &runtime_state.positions[*long_slot];
-    }
-    const size_t chosen = *long_slot < *short_slot ? *long_slot : *short_slot;
-    return &runtime_state.positions[chosen];
-}
-
-void index_appended_position(
-    State::BinanceExchangeRuntimeState& runtime_state,
-    size_t slot)
+    size_t slot,
+    size_t symbol_id)
 {
     if (slot >= runtime_state.positions.size()) {
-        return;
+        throw_invariant_breach("register_position_slot out of range");
     }
-    auto& position = runtime_state.positions[slot];
+
     if (runtime_state.position_symbol_id_by_slot.size() <= slot) {
-        runtime_state.position_symbol_id_by_slot.resize(slot + 1, std::numeric_limits<size_t>::max());
+        runtime_state.position_symbol_id_by_slot.resize(slot + 1, kInvalidSymbolId);
     }
-    if (runtime_state.position_symbol_id_by_slot[slot] == std::numeric_limits<size_t>::max()) {
-        runtime_state.position_symbol_id_by_slot[slot] = ensure_symbol_id(runtime_state, position.symbol);
-    }
-    runtime_state.position_symbol_id_by_position_id[position.id] = runtime_state.position_symbol_id_by_slot[slot];
+
+    auto& position = runtime_state.positions[slot];
+    runtime_state.position_symbol_id_by_slot[slot] = symbol_id;
+    runtime_state.position_symbol_id_by_position_id[position.id] = symbol_id;
     runtime_state.position_slot_by_id[position.id] = slot;
-    enqueue_position_for_lookup(runtime_state, position);
+    runtime_state.position_ids_by_key[make_position_key(symbol_id, position.instrument_type, position.is_long)]
+        .push_back(position.id);
+    runtime_state.position_index_ready = true;
 }
 
-bool remove_position_by_id(
+void reindex_position_slot(
     State::BinanceExchangeRuntimeState& runtime_state,
-    int position_id)
+    size_t slot,
+    size_t symbol_id)
 {
-    ensure_position_index(runtime_state);
-    const auto it = runtime_state.position_slot_by_id.find(position_id);
-    if (it == runtime_state.position_slot_by_id.end()) {
-        return false;
+    if (slot >= runtime_state.positions.size()) {
+        throw_invariant_breach("reindex_position_slot out of range");
     }
 
-    const size_t remove_slot = it->second;
+    if (runtime_state.position_symbol_id_by_slot.size() <= slot) {
+        runtime_state.position_symbol_id_by_slot.resize(slot + 1, kInvalidSymbolId);
+    }
+
+    const auto& position = runtime_state.positions[slot];
+    runtime_state.position_symbol_id_by_slot[slot] = symbol_id;
+    runtime_state.position_symbol_id_by_position_id[position.id] = symbol_id;
+    runtime_state.position_slot_by_id[position.id] = slot;
+    runtime_state.position_ids_by_key[make_position_key(symbol_id, position.instrument_type, position.is_long)]
+        .push_back(position.id);
+}
+
+void append_position(
+    State::BinanceExchangeRuntimeState& runtime_state,
+    QTrading::dto::Position&& position,
+    size_t symbol_id)
+{
+    runtime_state.positions.emplace_back(std::move(position));
+    register_position_slot(runtime_state, runtime_state.positions.size() - 1, symbol_id);
+    invalidate_visible_positions_cache(runtime_state);
+}
+
+void erase_position_slot(
+    State::BinanceExchangeRuntimeState& runtime_state,
+    size_t remove_slot)
+{
+    if (remove_slot >= runtime_state.positions.size()) {
+        throw_invariant_breach("erase_position_slot out of range");
+    }
+
+    const int removed_position_id = runtime_state.positions[remove_slot].id;
     const size_t last_slot = runtime_state.positions.size() - 1;
     if (remove_slot != last_slot) {
         std::swap(runtime_state.positions[remove_slot], runtime_state.positions[last_slot]);
         if (remove_slot < runtime_state.position_symbol_id_by_slot.size() &&
             last_slot < runtime_state.position_symbol_id_by_slot.size()) {
-            std::swap(runtime_state.position_symbol_id_by_slot[remove_slot], runtime_state.position_symbol_id_by_slot[last_slot]);
-        }
-        runtime_state.position_slot_by_id[runtime_state.positions[remove_slot].id] = remove_slot;
-        if (remove_slot < runtime_state.position_symbol_id_by_slot.size()) {
-            runtime_state.position_symbol_id_by_position_id[runtime_state.positions[remove_slot].id] =
-                runtime_state.position_symbol_id_by_slot[remove_slot];
+            std::swap(
+                runtime_state.position_symbol_id_by_slot[remove_slot],
+                runtime_state.position_symbol_id_by_slot[last_slot]);
         }
     }
+
     runtime_state.positions.pop_back();
     if (!runtime_state.position_symbol_id_by_slot.empty()) {
         runtime_state.position_symbol_id_by_slot.pop_back();
     }
-    runtime_state.position_slot_by_id.erase(position_id);
-    runtime_state.position_symbol_id_by_position_id.erase(position_id);
-    return true;
+
+    runtime_state.position_slot_by_id.erase(removed_position_id);
+    runtime_state.position_symbol_id_by_position_id.erase(removed_position_id);
+
+    if (remove_slot < runtime_state.positions.size()) {
+        const auto& moved_position = runtime_state.positions[remove_slot];
+        runtime_state.position_slot_by_id[moved_position.id] = remove_slot;
+        if (remove_slot < runtime_state.position_symbol_id_by_slot.size()) {
+            runtime_state.position_symbol_id_by_position_id[moved_position.id] =
+                runtime_state.position_symbol_id_by_slot[remove_slot];
+        }
+    }
+
+    if (runtime_state.positions.empty()) {
+        reset_position_index(runtime_state);
+        runtime_state.position_symbol_id_by_slot.clear();
+    }
+    invalidate_visible_positions_cache(runtime_state);
 }
 
 void append_perp_position(
     State::BinanceExchangeRuntimeState& runtime_state,
     const State::StepKernelState* step_state,
     const MatchFill& fill,
+    size_t symbol_id,
     double quantity,
     bool is_long,
     double fee,
@@ -446,23 +594,55 @@ void append_perp_position(
     created.leverage = 1.0;
     created.fee_rate = fee_rate;
     created.instrument_type = QTrading::Dto::Trading::InstrumentType::Perp;
-    refresh_perp_position_risk_fields(runtime_state, created, step_state, fill.symbol_id);
-    runtime_state.positions.emplace_back(std::move(created));
-    if (const auto symbol_id = resolve_fill_symbol_id(runtime_state, fill); symbol_id.has_value()) {
-        runtime_state.position_symbol_id_by_slot.push_back(*symbol_id);
-        runtime_state.position_symbol_id_by_position_id[runtime_state.positions.back().id] = *symbol_id;
+    refresh_perp_position_risk_fields(runtime_state, created, step_state, symbol_id);
+    append_position(runtime_state, std::move(created), symbol_id);
+}
+
+void assert_position_index_invariants(
+    State::BinanceExchangeRuntimeState& runtime_state,
+    const State::StepKernelState* step_state)
+{
+#ifndef NDEBUG
+    if (runtime_state.positions.empty()) {
+        assert(runtime_state.position_symbol_id_by_slot.empty());
+        return;
     }
-    else {
-        runtime_state.position_symbol_id_by_slot.push_back(std::numeric_limits<size_t>::max());
+
+    assert(runtime_state.position_symbol_id_by_slot.size() == runtime_state.positions.size());
+    assert(ensure_position_index(runtime_state, step_state));
+    for (size_t slot = 0; slot < runtime_state.positions.size(); ++slot) {
+        const auto& position = runtime_state.positions[slot];
+        const size_t symbol_id = runtime_state.position_symbol_id_by_slot[slot];
+        assert(symbol_id != kInvalidSymbolId);
+        if (step_state != nullptr) {
+            const auto it = step_state->symbol_to_id.find(position.symbol);
+            assert(it != step_state->symbol_to_id.end());
+            assert(it->second == symbol_id);
+        }
+        const auto slot_it = runtime_state.position_slot_by_id.find(position.id);
+        assert(slot_it != runtime_state.position_slot_by_id.end());
+        assert(slot_it->second == slot);
+        const auto symbol_it = runtime_state.position_symbol_id_by_position_id.find(position.id);
+        assert(symbol_it != runtime_state.position_symbol_id_by_position_id.end());
+        assert(symbol_it->second == symbol_id);
     }
-    index_appended_position(runtime_state, runtime_state.positions.size() - 1);
+#else
+    (void)runtime_state;
+    (void)step_state;
+#endif
 }
 
 bool apply_spot_fill(
     State::BinanceExchangeRuntimeState& runtime_state,
     Account& account,
+    const State::StepKernelState* step_state,
     const MatchFill& fill)
 {
+    const auto fill_symbol_id = try_resolve_fill_symbol_id(runtime_state, step_state, fill);
+    if (step_state != nullptr && !fill_symbol_id.has_value()) {
+        throw_invariant_breach("spot fill missing authoritative symbol id for " + fill.symbol);
+    }
+
     const double notional = fill.quantity * fill.price;
     const double fee_rate = fee_rate_for_fill(runtime_state, fill);
     const double fee = notional * fee_rate;
@@ -470,63 +650,57 @@ bool apply_spot_fill(
         fill.side == QTrading::Dto::Trading::OrderSide::Buy;
     const double quantity_fee = base_fee_on_buy ? fill.quantity * fee_rate : 0.0;
     const double net_quantity = fill.quantity - quantity_fee;
-    const auto fill_symbol_id = resolve_fill_symbol_id(runtime_state, fill);
+    const size_t resolved_symbol_id = fill_symbol_id.value_or(kInvalidSymbolId);
+    ensure_spot_inventory_shape(runtime_state, step_state, resolved_symbol_id);
+    if (resolved_symbol_id == kInvalidSymbolId ||
+        resolved_symbol_id >= runtime_state.spot_inventory_qty_by_symbol.size()) {
+        throw_invariant_breach("spot fill cannot resolve inventory slot for " + fill.symbol);
+    }
+
+    auto& qty = runtime_state.spot_inventory_qty_by_symbol[resolved_symbol_id];
+    auto& entry_price = runtime_state.spot_inventory_entry_price_by_symbol[resolved_symbol_id];
+    auto& synthetic_position_id = runtime_state.spot_inventory_position_id_by_symbol[resolved_symbol_id];
 
     if (fill.side == QTrading::Dto::Trading::OrderSide::Buy) {
         account.apply_spot_cash_delta(-(notional + (base_fee_on_buy ? 0.0 : fee)));
-
-        auto* position = fill_symbol_id.has_value()
-            ? find_spot_inventory_position(runtime_state, *fill_symbol_id)
-            : find_spot_inventory_position(runtime_state, fill.symbol);
-        if (!position) {
-            QTrading::dto::Position created{};
-            created.id = allocate_next_position_id(runtime_state);
-            created.order_id = fill.order_id;
-            created.symbol = fill.symbol;
-            created.quantity = net_quantity;
-            created.entry_price = fill.price;
-            created.is_long = true;
-            created.notional = created.quantity * created.entry_price;
-            created.instrument_type = QTrading::Dto::Trading::InstrumentType::Spot;
-            runtime_state.positions.emplace_back(std::move(created));
-            if (const auto symbol_id = resolve_fill_symbol_id(runtime_state, fill); symbol_id.has_value()) {
-                runtime_state.position_symbol_id_by_slot.push_back(*symbol_id);
-                runtime_state.position_symbol_id_by_position_id[runtime_state.positions.back().id] = *symbol_id;
-            }
-            else {
-                runtime_state.position_symbol_id_by_slot.push_back(std::numeric_limits<size_t>::max());
-            }
-            index_appended_position(runtime_state, runtime_state.positions.size() - 1);
-            return true;
-        }
-
-        const double before = position->quantity;
+        const double before = qty;
         const double after = before + net_quantity;
-        if (after > kEpsilon) {
-            position->entry_price = ((position->entry_price * before) + (fill.price * net_quantity)) / after;
+        if (!(after > kEpsilon)) {
+            throw_invariant_breach("spot buy produced non-positive inventory for " + fill.symbol);
         }
-        position->quantity = after;
-        position->notional = after * position->entry_price;
-        position->fee += fee;
-        position->fee_rate = fee_rate;
+        if (before > kEpsilon) {
+            entry_price = ((entry_price * before) + (fill.price * net_quantity)) / after;
+        }
+        else {
+            entry_price = fill.price;
+            if (synthetic_position_id <= 0) {
+                synthetic_position_id = allocate_next_position_id(runtime_state);
+            }
+        }
+        qty = after;
+        invalidate_visible_positions_cache(runtime_state);
         return true;
     }
 
+    if (!(qty > kEpsilon)) {
+        throw_invariant_breach("spot sell fill has no matching inventory position for " + fill.symbol);
+    }
+    if (qty + kEpsilon < fill.quantity) {
+        throw_invariant_breach("spot sell fill exceeds inventory for " + fill.symbol);
+    }
+
+    const double next_quantity = std::max(0.0, qty - fill.quantity);
+    if (next_quantity <= kEpsilon) {
+        qty = 0.0;
+        entry_price = 0.0;
+        synthetic_position_id = 0;
+    }
+    else {
+        qty = next_quantity;
+    }
     account.apply_spot_cash_delta(notional - fee);
-    auto* position = fill_symbol_id.has_value()
-        ? find_spot_inventory_position(runtime_state, *fill_symbol_id)
-        : find_spot_inventory_position(runtime_state, fill.symbol);
-    if (!position) {
-        return false;
-    }
-    const double before_quantity = position->quantity;
-    position->quantity = std::max(0.0, position->quantity - fill.quantity);
-    position->notional = position->quantity * position->entry_price;
-    if (position->quantity <= kEpsilon) {
-        const int closed_id = position->id;
-        return remove_position_by_id(runtime_state, closed_id);
-    }
-    return std::abs(position->quantity - before_quantity) > kEpsilon;
+    invalidate_visible_positions_cache(runtime_state);
+    return true;
 }
 
 bool apply_perp_fill(
@@ -535,134 +709,164 @@ bool apply_perp_fill(
     const State::StepKernelState* step_state,
     const MatchFill& fill)
 {
+    const auto fill_symbol_id = try_resolve_fill_symbol_id(runtime_state, step_state, fill);
+    if (step_state != nullptr && !fill_symbol_id.has_value()) {
+        throw_invariant_breach("perp fill missing authoritative symbol id for " + fill.symbol);
+    }
+
+    const size_t resolved_symbol_id = fill_symbol_id.value_or(kInvalidSymbolId);
     const double notional = fill.quantity * fill.price;
     const double fee_rate = fee_rate_for_fill(runtime_state, fill);
     const double fee = notional * fee_rate;
     double signed_fill = fill.side == QTrading::Dto::Trading::OrderSide::Buy ? fill.quantity : -fill.quantity;
-    const auto fill_symbol_id = resolve_fill_symbol_id(runtime_state, fill);
+
     if (runtime_state.hedge_mode) {
         const bool target_is_long = fill.position_side == QTrading::Dto::Trading::PositionSide::Long;
-        auto* position = fill_symbol_id.has_value()
-            ? find_perp_position(runtime_state, *fill_symbol_id, target_is_long)
-            : find_perp_position(runtime_state, fill.symbol, target_is_long);
+        const auto position_slot = find_perp_position_slot(
+            runtime_state,
+            step_state,
+            resolved_symbol_id,
+            fill.symbol,
+            target_is_long);
+
         if (fill.reduce_only || fill.close_position) {
-            if (!position) {
-                return false;
+            if (!position_slot.has_value()) {
+                throw_invariant_breach("hedge reduce fill has no matching perp position for " + fill.symbol);
             }
+
+            auto& position = runtime_state.positions[*position_slot];
             const auto closes_side = target_is_long
                 ? QTrading::Dto::Trading::OrderSide::Sell
                 : QTrading::Dto::Trading::OrderSide::Buy;
             if (fill.side != closes_side) {
-                return false;
+                throw_invariant_breach("hedge reduce fill side mismatch for " + fill.symbol);
             }
-            const double effective = std::min(position->quantity, fill.quantity);
+
+            const double effective = std::min(position.quantity, fill.quantity);
             if (effective <= kEpsilon) {
-                return false;
+                throw_invariant_breach("hedge reduce fill has no reducible quantity for " + fill.symbol);
             }
-            const double realized_pnl = compute_perp_realized_pnl_for_close(*position, effective, fill.price);
+
+            const double realized_pnl = compute_perp_realized_pnl_for_close(position, effective, fill.price);
+            const double next_quantity = std::max(0.0, position.quantity - effective);
+            if (next_quantity <= kEpsilon) {
+                erase_position_slot(runtime_state, *position_slot);
+            }
+            else {
+                position.quantity = next_quantity;
+                refresh_perp_position_risk_fields(runtime_state, position, step_state, fill_symbol_id);
+            }
             account.apply_perp_wallet_delta(realized_pnl - fee);
-            const double before_quantity = position->quantity;
-            position->quantity = std::max(0.0, position->quantity - effective);
-            if (position->quantity <= kEpsilon) {
-                const int closed_id = position->id;
-                return remove_position_by_id(runtime_state, closed_id);
-            }
-            refresh_perp_position_risk_fields(runtime_state, *position, step_state, fill_symbol_id);
-            return std::abs(position->quantity - before_quantity) > kEpsilon;
+            return true;
         }
 
-        account.apply_perp_wallet_delta(-fee);
-        if (!position || !runtime_state.merge_positions_enabled) {
+        if (!position_slot.has_value() || !runtime_state.merge_positions_enabled) {
             append_perp_position(
                 runtime_state,
                 step_state,
                 fill,
+                resolved_symbol_id,
                 fill.quantity,
                 fill.side == QTrading::Dto::Trading::OrderSide::Buy,
                 fee,
                 fee_rate);
+            account.apply_perp_wallet_delta(-fee);
             return true;
         }
 
-        const double before = position->quantity;
+        auto& position = runtime_state.positions[*position_slot];
+        const double before = position.quantity;
         const double after = before + fill.quantity;
         if (after > kEpsilon) {
-            position->entry_price = ((position->entry_price * before) + (fill.price * fill.quantity)) / after;
+            position.entry_price = ((position.entry_price * before) + (fill.price * fill.quantity)) / after;
         }
-        position->quantity = after;
-        position->is_long = target_is_long;
-        position->fee += fee;
-        position->fee_rate = fee_rate;
-        position->instrument_type = QTrading::Dto::Trading::InstrumentType::Perp;
-        refresh_perp_position_risk_fields(runtime_state, *position, step_state, fill_symbol_id);
+        position.quantity = after;
+        position.is_long = target_is_long;
+        position.fee += fee;
+        position.fee_rate = fee_rate;
+        position.instrument_type = QTrading::Dto::Trading::InstrumentType::Perp;
+        refresh_perp_position_risk_fields(runtime_state, position, step_state, fill_symbol_id);
+        reindex_position_slot(runtime_state, *position_slot, resolved_symbol_id);
+        account.apply_perp_wallet_delta(-fee);
         return true;
     }
 
-    auto* position = fill_symbol_id.has_value()
-        ? find_perp_position(runtime_state, *fill_symbol_id)
-        : find_perp_position(runtime_state, fill.symbol);
+    const auto position_slot = find_perp_position_slot(
+        runtime_state,
+        step_state,
+        resolved_symbol_id,
+        fill.symbol);
     if (fill.reduce_only) {
-        if (!position) {
-            return false;
+        if (!position_slot.has_value()) {
+            throw_invariant_breach("reduce-only fill has no matching perp position for " + fill.symbol);
         }
-        const double current_signed = position->is_long ? position->quantity : -position->quantity;
+        const auto& position = runtime_state.positions[*position_slot];
+        const double current_signed = position.is_long ? position.quantity : -position.quantity;
         if (current_signed * signed_fill >= 0.0) {
-            return false;
+            throw_invariant_breach("reduce-only fill does not reduce existing position for " + fill.symbol);
         }
         const double reducible = std::abs(current_signed);
         const double requested = std::abs(signed_fill);
         const double effective = std::min(reducible, requested);
-        signed_fill = signed_fill > 0.0 ? effective : -effective;
         if (effective <= kEpsilon) {
-            return false;
+            throw_invariant_breach("reduce-only fill has zero effective quantity for " + fill.symbol);
         }
+        signed_fill = signed_fill > 0.0 ? effective : -effective;
     }
+
     double realized_pnl = 0.0;
-    if (position) {
-        const double current_signed = position->is_long ? position->quantity : -position->quantity;
+    if (position_slot.has_value()) {
+        const auto& position = runtime_state.positions[*position_slot];
+        const double current_signed = position.is_long ? position.quantity : -position.quantity;
         if (current_signed * signed_fill < 0.0) {
             const double close_quantity = std::min(std::abs(current_signed), std::abs(signed_fill));
-            realized_pnl = compute_perp_realized_pnl_for_close(*position, close_quantity, fill.price);
+            realized_pnl = compute_perp_realized_pnl_for_close(position, close_quantity, fill.price);
         }
     }
-    account.apply_perp_wallet_delta(realized_pnl - fee);
 
-    if (!position || (runtime_state.merge_positions_enabled == false &&
-            ((position->is_long && signed_fill > 0.0) || (!position->is_long && signed_fill < 0.0)))) {
+    if (!position_slot.has_value() ||
+        (runtime_state.merge_positions_enabled == false &&
+            ((runtime_state.positions[*position_slot].is_long && signed_fill > 0.0) ||
+                (!runtime_state.positions[*position_slot].is_long && signed_fill < 0.0)))) {
         append_perp_position(
             runtime_state,
             step_state,
             fill,
+            resolved_symbol_id,
             std::abs(signed_fill),
             signed_fill > 0.0,
             fee,
             fee_rate);
+        account.apply_perp_wallet_delta(realized_pnl - fee);
         return true;
     }
 
-    const double current_signed = position->is_long ? position->quantity : -position->quantity;
+    auto& position = runtime_state.positions[*position_slot];
+    const double current_signed = position.is_long ? position.quantity : -position.quantity;
     const double next_signed = current_signed + signed_fill;
     if (std::abs(next_signed) <= kEpsilon) {
-        const int closed_id = position->id;
-        return remove_position_by_id(runtime_state, closed_id);
+        erase_position_slot(runtime_state, *position_slot);
+        account.apply_perp_wallet_delta(realized_pnl - fee);
+        return true;
     }
 
     if ((current_signed > 0.0 && signed_fill > 0.0) || (current_signed < 0.0 && signed_fill < 0.0)) {
         const double before = std::abs(current_signed);
         const double after = std::abs(next_signed);
-        position->entry_price = ((position->entry_price * before) + (fill.price * std::abs(signed_fill))) / after;
+        position.entry_price = ((position.entry_price * before) + (fill.price * std::abs(signed_fill))) / after;
     }
     else if ((current_signed > 0.0 && next_signed < 0.0) || (current_signed < 0.0 && next_signed > 0.0)) {
-        position->entry_price = fill.price;
+        position.entry_price = fill.price;
     }
 
-    position->quantity = std::abs(next_signed);
-    position->is_long = next_signed > 0.0;
-    position->fee += fee;
-    position->fee_rate = fee_rate;
-    position->instrument_type = QTrading::Dto::Trading::InstrumentType::Perp;
-    refresh_perp_position_risk_fields(runtime_state, *position, step_state, fill_symbol_id);
-    enqueue_position_for_lookup(runtime_state, *position);
+    position.quantity = std::abs(next_signed);
+    position.is_long = next_signed > 0.0;
+    position.fee += fee;
+    position.fee_rate = fee_rate;
+    position.instrument_type = QTrading::Dto::Trading::InstrumentType::Perp;
+    refresh_perp_position_risk_fields(runtime_state, position, step_state, fill_symbol_id);
+    reindex_position_slot(runtime_state, *position_slot, resolved_symbol_id);
+    account.apply_perp_wallet_delta(realized_pnl - fee);
     return true;
 }
 
@@ -672,17 +876,26 @@ void apply_impl(
     const State::StepKernelState* step_state,
     const std::vector<MatchFill>& fills)
 {
-    rebuild_position_index(runtime_state);
+    normalize_legacy_spot_inventory(runtime_state, step_state);
+    if (!ensure_position_index(runtime_state, step_state)) {
+        if (!runtime_state.positions.empty()) {
+            throw_invariant_breach("unable to rebuild authoritative position index before settlement");
+        }
+        runtime_state.position_symbol_id_by_slot.clear();
+    }
+
     bool positions_mutated = false;
     for (const auto& fill : fills) {
         if (fill.quantity <= kEpsilon || fill.price <= 0.0) {
             continue;
         }
         if (fill.instrument_type == QTrading::Dto::Trading::InstrumentType::Spot) {
-            positions_mutated = apply_spot_fill(runtime_state, account, fill) || positions_mutated;
-            continue;
+            positions_mutated = apply_spot_fill(runtime_state, account, step_state, fill) || positions_mutated;
         }
-        positions_mutated = apply_perp_fill(runtime_state, account, step_state, fill) || positions_mutated;
+        else {
+            positions_mutated = apply_perp_fill(runtime_state, account, step_state, fill) || positions_mutated;
+        }
+        assert_position_index_invariants(runtime_state, step_state);
     }
     if (positions_mutated) {
         ++runtime_state.positions_version;
@@ -709,4 +922,3 @@ void FillSettlementEngine::Apply(
 }
 
 } // namespace QTrading::Infra::Exchanges::BinanceSim::Domain
-

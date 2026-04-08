@@ -63,11 +63,21 @@ struct BinanceExchangeRuntimeState {
     int vip_level{ 0 };
     /// Live position book owned by the facade runtime.
     std::vector<QTrading::dto::Position> positions;
-    /// Dense symbol ids aligned with `positions` slots (runtime hot path).
+    /// Dense spot base-asset inventory quantity by authoritative symbol id.
+    std::vector<double> spot_inventory_qty_by_symbol{};
+    /// Dense spot inventory average entry price by authoritative symbol id.
+    std::vector<double> spot_inventory_entry_price_by_symbol{};
+    /// Dense synthetic spot position ids by authoritative symbol id; 0 means no open inventory.
+    std::vector<int> spot_inventory_position_id_by_symbol{};
+    /// Cached outward-facing combined position view (perp positions + synthetic spot balances).
+    mutable std::vector<QTrading::dto::Position> visible_positions_cache{};
+    /// Version of the combined position cache.
+    mutable uint64_t visible_positions_cache_version{ std::numeric_limits<uint64_t>::max() };
+    /// Dense authoritative dataset symbol ids aligned with `positions` slots.
     std::vector<size_t> position_symbol_id_by_slot{};
     /// Live open-order book owned by the facade runtime.
     std::vector<QTrading::dto::Order> orders;
-    /// Dense symbol ids aligned with `orders` slots (runtime hot path).
+    /// Dense authoritative dataset symbol ids aligned with `orders` slots.
     std::vector<size_t> order_symbol_id_by_slot{};
     /// Internal order-id to symbol-id cache for runtime hot paths.
     std::unordered_map<int, size_t> order_symbol_id_by_order_id{};
@@ -115,13 +125,11 @@ struct BinanceExchangeRuntimeState {
     uint64_t next_position_id{ 0 };
     /// Monotonic version bumped whenever position book mutates.
     uint64_t positions_version{ 0 };
-    /// Internal dense symbol-id cache for fill-settlement position indexing.
-    std::unordered_map<std::string, size_t> position_symbol_to_id{};
     /// Internal position-id to slot index map for fill-settlement fast lookup.
     std::unordered_map<int, size_t> position_slot_by_id{};
     /// Internal `(symbol_id, instrument_type, side)` to position-id queue index.
     std::unordered_map<PositionIndexKey, std::deque<int>, PositionIndexKeyHash> position_ids_by_key{};
-    /// Internal position-id to symbol-id cache for runtime hot paths.
+    /// Internal position-id to authoritative dataset symbol-id cache.
     std::unordered_map<int, size_t> position_symbol_id_by_position_id{};
     /// True when internal fill-settlement position index mirrors `positions`.
     bool position_index_ready{ false };

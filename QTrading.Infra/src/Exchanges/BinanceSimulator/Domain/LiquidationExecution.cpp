@@ -111,6 +111,14 @@ bool cancel_all_perp_orders(State::BinanceExchangeRuntimeState& runtime_state) n
     return removed;
 }
 
+void invalidate_position_index(State::BinanceExchangeRuntimeState& runtime_state) noexcept
+{
+    runtime_state.position_slot_by_id.clear();
+    runtime_state.position_ids_by_key.clear();
+    runtime_state.position_symbol_id_by_position_id.clear();
+    runtime_state.position_index_ready = false;
+}
+
 void append_position_delta(
     const QTrading::dto::Position& position,
     double quantity_before,
@@ -197,7 +205,7 @@ bool apply_full_liquidation_close_on_position(
             runtime_state.position_symbol_id_by_slot.begin() +
             static_cast<std::vector<size_t>::difference_type>(position_index));
     }
-    runtime_state.position_symbol_id_by_position_id.erase(position.id);
+    invalidate_position_index(runtime_state);
     ++runtime_state.positions_version;
     return true;
 }
@@ -260,7 +268,7 @@ bool apply_warning_zone_partial_reduction_on_position(
                 runtime_state.position_symbol_id_by_slot.begin() +
                 static_cast<std::vector<size_t>::difference_type>(position_index));
         }
-        runtime_state.position_symbol_id_by_position_id.erase(position.id);
+        invalidate_position_index(runtime_state);
         ++runtime_state.positions_version;
         return true;
     }
@@ -269,6 +277,7 @@ bool apply_warning_zone_partial_reduction_on_position(
         std::abs(position.quantity * mark),
         step_state,
         symbol_id);
+    invalidate_position_index(runtime_state);
     ++runtime_state.positions_version;
     return true;
 }

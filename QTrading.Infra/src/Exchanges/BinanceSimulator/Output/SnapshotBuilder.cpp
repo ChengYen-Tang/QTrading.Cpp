@@ -24,21 +24,24 @@ double compute_spot_inventory_value(
     }
 
     double total = 0.0;
-    for (const auto& position : runtime_state.positions) {
-        if (position.instrument_type != QTrading::Dto::Trading::InstrumentType::Spot || !position.is_long) {
+    const size_t symbol_count = std::min(
+        step_state.symbols.size(),
+        runtime_state.spot_inventory_qty_by_symbol.size());
+    for (size_t symbol_id = 0; symbol_id < symbol_count; ++symbol_id) {
+        const double qty = runtime_state.spot_inventory_qty_by_symbol[symbol_id];
+        if (!(qty > 0.0)) {
             continue;
         }
-        double price = position.entry_price;
-        const auto symbol_it = step_state.symbol_to_id.find(position.symbol);
-        if (symbol_it != step_state.symbol_to_id.end()) {
-            const size_t i = symbol_it->second;
-            if (i < snapshot_state.has_last_trade_price_by_symbol.size() &&
-                i < snapshot_state.last_trade_price_by_symbol.size() &&
-                snapshot_state.has_last_trade_price_by_symbol[i] != 0) {
-                price = snapshot_state.last_trade_price_by_symbol[i];
-            }
+        double price =
+            symbol_id < runtime_state.spot_inventory_entry_price_by_symbol.size()
+                ? runtime_state.spot_inventory_entry_price_by_symbol[symbol_id]
+                : 0.0;
+        if (symbol_id < snapshot_state.has_last_trade_price_by_symbol.size() &&
+            symbol_id < snapshot_state.last_trade_price_by_symbol.size() &&
+            snapshot_state.has_last_trade_price_by_symbol[symbol_id] != 0) {
+            price = snapshot_state.last_trade_price_by_symbol[symbol_id];
         }
-        total += position.quantity * price;
+        total += qty * price;
     }
     return total;
 }

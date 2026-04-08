@@ -49,6 +49,20 @@ StepKernelState make_step_state_with_perp_symbol()
     return state;
 }
 
+StepKernelState make_step_state_with_symbols(std::initializer_list<std::string> symbols)
+{
+    StepKernelState state{};
+    size_t symbol_id = 0;
+    for (const auto& symbol : symbols) {
+        state.symbols.push_back(symbol);
+        state.symbol_to_id.emplace(symbol, symbol_id++);
+        state.symbol_instrument_type_by_id.push_back(QTrading::Dto::Trading::InstrumentType::Perp);
+        state.symbol_spec_by_id.push_back(QTrading::Dto::Trading::PerpInstrumentSpec());
+        state.symbol_maintenance_margin_tiers_by_id.emplace_back();
+    }
+    return state;
+}
+
 OrderCommandRequest make_perp_limit_request(double quantity, double price)
 {
     OrderCommandRequest request{};
@@ -168,6 +182,23 @@ QTrading::dto::Position make_perp_position(
     position.leverage = 10.0;
     position.fee_rate = 0.001;
     position.instrument_type = QTrading::Dto::Trading::InstrumentType::Perp;
+    return position;
+}
+
+QTrading::dto::Position make_spot_position(
+    const std::string& symbol,
+    double quantity,
+    double entry_price)
+{
+    QTrading::dto::Position position{};
+    position.id = 1;
+    position.order_id = 1;
+    position.symbol = symbol;
+    position.quantity = quantity;
+    position.entry_price = entry_price;
+    position.is_long = true;
+    position.notional = quantity * entry_price;
+    position.instrument_type = QTrading::Dto::Trading::InstrumentType::Spot;
     return position;
 }
 
@@ -782,6 +813,7 @@ TEST(OrderEntryServiceTest, PerpFillMaintenanceMarginUsesSymbolSpecificTiersWhen
 TEST(OrderEntryServiceTest, PerpFullCloseSettlesRealizedPnlIntoWallet)
 {
     BinanceExchangeRuntimeState runtime_state{};
+    StepKernelState step_state = make_step_state_with_perp_symbol();
     runtime_state.positions.push_back(make_perp_position("BTCUSDT", true, 1.0, 100.0));
     Account account(MakeLegacyCtorInitConfig(1000.0));
 
@@ -796,7 +828,11 @@ TEST(OrderEntryServiceTest, PerpFullCloseSettlesRealizedPnlIntoWallet)
     close_fill.price = 110.0;
 
     std::vector<QTrading::Infra::Exchanges::BinanceSim::Domain::MatchFill> fills{ close_fill };
-    QTrading::Infra::Exchanges::BinanceSim::Domain::FillSettlementEngine::Apply(runtime_state, account, fills);
+    QTrading::Infra::Exchanges::BinanceSim::Domain::FillSettlementEngine::Apply(
+        runtime_state,
+        account,
+        step_state,
+        fills);
 
     EXPECT_TRUE(runtime_state.positions.empty());
     EXPECT_NEAR(account.get_wallet_balance(), 1009.978, 1e-9); // +10 realized -0.022 fee
@@ -805,6 +841,7 @@ TEST(OrderEntryServiceTest, PerpFullCloseSettlesRealizedPnlIntoWallet)
 TEST(OrderEntryServiceTest, PerpCloseRealizesLossIntoWallet)
 {
     BinanceExchangeRuntimeState runtime_state{};
+    StepKernelState step_state = make_step_state_with_perp_symbol();
     runtime_state.positions.push_back(make_perp_position("BTCUSDT", true, 1.0, 100.0));
     Account account(MakeLegacyCtorInitConfig(1000.0));
 
@@ -819,7 +856,11 @@ TEST(OrderEntryServiceTest, PerpCloseRealizesLossIntoWallet)
     close_fill.price = 90.0;
 
     std::vector<QTrading::Infra::Exchanges::BinanceSim::Domain::MatchFill> fills{ close_fill };
-    QTrading::Infra::Exchanges::BinanceSim::Domain::FillSettlementEngine::Apply(runtime_state, account, fills);
+    QTrading::Infra::Exchanges::BinanceSim::Domain::FillSettlementEngine::Apply(
+        runtime_state,
+        account,
+        step_state,
+        fills);
 
     EXPECT_TRUE(runtime_state.positions.empty());
     EXPECT_NEAR(account.get_wallet_balance(), 989.982, 1e-9); // -10 realized -0.018 fee
@@ -828,6 +869,7 @@ TEST(OrderEntryServiceTest, PerpCloseRealizesLossIntoWallet)
 TEST(OrderEntryServiceTest, PerpPartialCloseSettlesRealizedPnlIntoWallet)
 {
     BinanceExchangeRuntimeState runtime_state{};
+    StepKernelState step_state = make_step_state_with_perp_symbol();
     runtime_state.positions.push_back(make_perp_position("BTCUSDT", true, 2.0, 100.0));
     Account account(MakeLegacyCtorInitConfig(1000.0));
 
@@ -842,7 +884,11 @@ TEST(OrderEntryServiceTest, PerpPartialCloseSettlesRealizedPnlIntoWallet)
     close_fill.price = 110.0;
 
     std::vector<QTrading::Infra::Exchanges::BinanceSim::Domain::MatchFill> fills{ close_fill };
-    QTrading::Infra::Exchanges::BinanceSim::Domain::FillSettlementEngine::Apply(runtime_state, account, fills);
+    QTrading::Infra::Exchanges::BinanceSim::Domain::FillSettlementEngine::Apply(
+        runtime_state,
+        account,
+        step_state,
+        fills);
 
     ASSERT_EQ(runtime_state.positions.size(), 1u);
     EXPECT_NEAR(runtime_state.positions[0].quantity, 1.5, 1e-12);
@@ -852,6 +898,7 @@ TEST(OrderEntryServiceTest, PerpPartialCloseSettlesRealizedPnlIntoWallet)
 TEST(OrderEntryServiceTest, PerpReduceOnlyCloseSettlesRealizedPnlIntoWallet)
 {
     BinanceExchangeRuntimeState runtime_state{};
+    StepKernelState step_state = make_step_state_with_perp_symbol();
     runtime_state.positions.push_back(make_perp_position("BTCUSDT", false, 2.0, 100.0));
     Account account(MakeLegacyCtorInitConfig(1000.0));
 
@@ -867,7 +914,11 @@ TEST(OrderEntryServiceTest, PerpReduceOnlyCloseSettlesRealizedPnlIntoWallet)
     close_fill.price = 90.0;
 
     std::vector<QTrading::Infra::Exchanges::BinanceSim::Domain::MatchFill> fills{ close_fill };
-    QTrading::Infra::Exchanges::BinanceSim::Domain::FillSettlementEngine::Apply(runtime_state, account, fills);
+    QTrading::Infra::Exchanges::BinanceSim::Domain::FillSettlementEngine::Apply(
+        runtime_state,
+        account,
+        step_state,
+        fills);
 
     ASSERT_EQ(runtime_state.positions.size(), 1u);
     EXPECT_FALSE(runtime_state.positions[0].is_long);
@@ -878,6 +929,7 @@ TEST(OrderEntryServiceTest, PerpReduceOnlyCloseSettlesRealizedPnlIntoWallet)
 TEST(OrderEntryServiceTest, PerpOneWayFlipSettlesClosingRealizedPnlBeforeOpeningOpposite)
 {
     BinanceExchangeRuntimeState runtime_state{};
+    StepKernelState step_state = make_step_state_with_perp_symbol();
     runtime_state.positions.push_back(make_perp_position("BTCUSDT", true, 1.0, 100.0));
     Account account(MakeLegacyCtorInitConfig(1000.0));
 
@@ -892,13 +944,100 @@ TEST(OrderEntryServiceTest, PerpOneWayFlipSettlesClosingRealizedPnlBeforeOpening
     flip_fill.price = 90.0;
 
     std::vector<QTrading::Infra::Exchanges::BinanceSim::Domain::MatchFill> fills{ flip_fill };
-    QTrading::Infra::Exchanges::BinanceSim::Domain::FillSettlementEngine::Apply(runtime_state, account, fills);
+    QTrading::Infra::Exchanges::BinanceSim::Domain::FillSettlementEngine::Apply(
+        runtime_state,
+        account,
+        step_state,
+        fills);
 
     ASSERT_EQ(runtime_state.positions.size(), 1u);
     EXPECT_FALSE(runtime_state.positions[0].is_long);
     EXPECT_NEAR(runtime_state.positions[0].quantity, 1.0, 1e-12);
     EXPECT_NEAR(runtime_state.positions[0].entry_price, 90.0, 1e-12);
     EXPECT_NEAR(account.get_wallet_balance(), 989.964, 1e-9); // -10 realized -0.036 fee
+}
+
+TEST(OrderEntryServiceTest, SpotSellWithoutInventoryLeavesCashUnchanged)
+{
+    BinanceExchangeRuntimeState runtime_state{};
+    StepKernelState step_state = make_step_state_with_symbols({ "BTCUSDT", "ETHUSDT", "OPUSDT" });
+    Account::AccountInitConfig init{};
+    init.spot_initial_cash = 1000.0;
+    init.perp_initial_wallet = 0.0;
+    Account account(init);
+
+    QTrading::Infra::Exchanges::BinanceSim::Domain::MatchFill sell_fill{};
+    sell_fill.order_id = 7;
+    sell_fill.symbol = "OPUSDT";
+    sell_fill.symbol_id = step_state.symbol_to_id.at("OPUSDT");
+    sell_fill.instrument_type = QTrading::Dto::Trading::InstrumentType::Spot;
+    sell_fill.side = QTrading::Dto::Trading::OrderSide::Sell;
+    sell_fill.is_taker = false;
+    sell_fill.quantity = 2.0;
+    sell_fill.price = 10.0;
+
+    const double cash_before = account.get_spot_balance().WalletBalance;
+    EXPECT_THROW(
+        QTrading::Infra::Exchanges::BinanceSim::Domain::FillSettlementEngine::Apply(
+            runtime_state,
+            account,
+            step_state,
+            std::vector<QTrading::Infra::Exchanges::BinanceSim::Domain::MatchFill>{ sell_fill }),
+        std::logic_error);
+    EXPECT_NEAR(account.get_spot_balance().WalletBalance, cash_before, 1e-12);
+    EXPECT_TRUE(runtime_state.positions.empty());
+}
+
+TEST(OrderEntryServiceTest, SpotSettlementUsesAuthoritativeStepSymbolIdAcrossMultiSymbolBook)
+{
+    BinanceExchangeRuntimeState runtime_state{};
+    StepKernelState step_state = make_step_state_with_symbols({ "BTCUSDT", "ETHUSDT", "OPUSDT" });
+    runtime_state.positions.push_back(make_spot_position("OPUSDT", 5.0, 10.0));
+    runtime_state.positions.push_back(make_spot_position("ETHUSDT", 3.0, 20.0));
+    runtime_state.positions[1].id = 2;
+
+    Account::AccountInitConfig init{};
+    init.spot_initial_cash = 0.0;
+    init.perp_initial_wallet = 0.0;
+    Account account(init);
+
+    QTrading::Infra::Exchanges::BinanceSim::Domain::MatchFill sell_fill{};
+    sell_fill.order_id = 8;
+    sell_fill.symbol = "OPUSDT";
+    sell_fill.symbol_id = step_state.symbol_to_id.at("OPUSDT");
+    sell_fill.instrument_type = QTrading::Dto::Trading::InstrumentType::Spot;
+    sell_fill.side = QTrading::Dto::Trading::OrderSide::Sell;
+    sell_fill.is_taker = false;
+    sell_fill.quantity = 5.0;
+    sell_fill.price = 11.0;
+
+    QTrading::Infra::Exchanges::BinanceSim::Domain::FillSettlementEngine::Apply(
+        runtime_state,
+        account,
+        step_state,
+        std::vector<QTrading::Infra::Exchanges::BinanceSim::Domain::MatchFill>{ sell_fill });
+
+    EXPECT_TRUE(runtime_state.positions.empty());
+    ASSERT_EQ(runtime_state.spot_inventory_qty_by_symbol.size(), step_state.symbols.size());
+    EXPECT_NEAR(
+        runtime_state.spot_inventory_qty_by_symbol[step_state.symbol_to_id.at("OPUSDT")],
+        0.0,
+        1e-12);
+    EXPECT_NEAR(
+        runtime_state.spot_inventory_qty_by_symbol[step_state.symbol_to_id.at("ETHUSDT")],
+        3.0,
+        1e-12);
+    EXPECT_NEAR(
+        runtime_state.spot_inventory_entry_price_by_symbol[step_state.symbol_to_id.at("ETHUSDT")],
+        20.0,
+        1e-12);
+    EXPECT_EQ(
+        runtime_state.spot_inventory_position_id_by_symbol[step_state.symbol_to_id.at("OPUSDT")],
+        0);
+    EXPECT_EQ(
+        runtime_state.spot_inventory_position_id_by_symbol[step_state.symbol_to_id.at("ETHUSDT")],
+        2);
+    EXPECT_NEAR(account.get_spot_balance().WalletBalance, 54.945, 1e-12);
 }
 
 TEST(OrderEntryServiceTest, TickPriceTimePriority_BuyHigherLimitFillsFirst)

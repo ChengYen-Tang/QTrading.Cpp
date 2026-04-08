@@ -42,6 +42,56 @@
 namespace QTrading::Infra::Exchanges::BinanceSim::Application {
 namespace {
 
+constexpr double kPositionViewEpsilon = 1e-12;
+
+void rebuild_visible_positions_cache(
+    const State::BinanceExchangeRuntimeState& runtime_state,
+    const State::StepKernelState& step_state)
+{
+    auto& cache = runtime_state.visible_positions_cache;
+    cache = runtime_state.positions;
+    cache.reserve(runtime_state.positions.size() + runtime_state.spot_inventory_qty_by_symbol.size());
+
+    const size_t symbol_count = std::min(
+        step_state.symbols.size(),
+        runtime_state.spot_inventory_qty_by_symbol.size());
+    for (size_t symbol_id = 0; symbol_id < symbol_count; ++symbol_id) {
+        const double qty = runtime_state.spot_inventory_qty_by_symbol[symbol_id];
+        if (!(qty > kPositionViewEpsilon)) {
+            continue;
+        }
+
+        QTrading::dto::Position synthetic{};
+        synthetic.id =
+            symbol_id < runtime_state.spot_inventory_position_id_by_symbol.size()
+                ? runtime_state.spot_inventory_position_id_by_symbol[symbol_id]
+                : 0;
+        synthetic.order_id = 0;
+        synthetic.symbol = step_state.symbols[symbol_id];
+        synthetic.quantity = qty;
+        synthetic.entry_price =
+            symbol_id < runtime_state.spot_inventory_entry_price_by_symbol.size()
+                ? runtime_state.spot_inventory_entry_price_by_symbol[symbol_id]
+                : 0.0;
+        synthetic.is_long = true;
+        synthetic.notional = synthetic.quantity * synthetic.entry_price;
+        synthetic.instrument_type = QTrading::Dto::Trading::InstrumentType::Spot;
+        cache.emplace_back(std::move(synthetic));
+    }
+
+    runtime_state.visible_positions_cache_version = runtime_state.positions_version;
+}
+
+const std::vector<QTrading::dto::Position>& visible_positions(
+    const State::BinanceExchangeRuntimeState& runtime_state,
+    const State::StepKernelState& step_state)
+{
+    if (runtime_state.visible_positions_cache_version != runtime_state.positions_version) {
+        rebuild_visible_positions_cache(runtime_state, step_state);
+    }
+    return runtime_state.visible_positions_cache;
+}
+
 // Computes replay progress using current cursors without rebuilding payloads.
 // Kept in O(symbol_count) and allocation-free for per-step usage.
 double compute_progress_pct(const State::StepKernelState& step_state)
@@ -449,7 +499,7 @@ void publish_position_order_channels(
     }
 
     if (positions_maybe_changed) {
-        const auto& positions = runtime_state.positions;
+        const auto& positions = visible_positions(runtime_state, step_state);
         if (!step_state.has_published_positions) {
             if (!positions.empty()) {
                 if (exchange.get_position_channel()) {
@@ -489,23 +539,24 @@ double compute_spot_inventory_value_for_log(
 {
     constexpr double kEpsilon = 1e-12;
     double total = 0.0;
-    for (const auto& position : runtime_state.positions) {
-        if (position.instrument_type != QTrading::Dto::Trading::InstrumentType::Spot ||
-            !position.is_long ||
-            position.quantity <= kEpsilon) {
+    const size_t symbol_count = std::min(
+        step_state.symbols.size(),
+        runtime_state.spot_inventory_qty_by_symbol.size());
+    for (size_t symbol_id = 0; symbol_id < symbol_count; ++symbol_id) {
+        const double qty = runtime_state.spot_inventory_qty_by_symbol[symbol_id];
+        if (!(qty > kEpsilon)) {
             continue;
         }
-        double price = position.entry_price;
-        const auto id_it = step_state.symbol_to_id.find(position.symbol);
-        if (id_it != step_state.symbol_to_id.end()) {
-            const size_t idx = id_it->second;
-            if (idx < snapshot_state.has_last_trade_price_by_symbol.size() &&
-                idx < snapshot_state.last_trade_price_by_symbol.size() &&
-                snapshot_state.has_last_trade_price_by_symbol[idx] != 0) {
-                price = snapshot_state.last_trade_price_by_symbol[idx];
-            }
+        double price =
+            symbol_id < runtime_state.spot_inventory_entry_price_by_symbol.size()
+                ? runtime_state.spot_inventory_entry_price_by_symbol[symbol_id]
+                : 0.0;
+        if (symbol_id < snapshot_state.has_last_trade_price_by_symbol.size() &&
+            symbol_id < snapshot_state.last_trade_price_by_symbol.size() &&
+            snapshot_state.has_last_trade_price_by_symbol[symbol_id] != 0) {
+            price = snapshot_state.last_trade_price_by_symbol[symbol_id];
         }
-        total += position.quantity * price;
+        total += qty * price;
     }
     return total;
 }
@@ -637,6 +688,7 @@ void refresh_perp_mark_state(
         total_maintenance_margin += position.maintenance_margin;
     }
 
+    runtime_state.visible_positions_cache_version = std::numeric_limits<uint64_t>::max();
     account.update_perp_mark_state(
         total_unrealized,
         total_position_initial_margin,
@@ -849,7 +901,7 @@ void emit_account_position_order_events(
     const auto& prev_orders = step_state.has_event_snapshots
         ? step_state.last_event_orders
         : kEmptyOrders;
-    const auto& cur_positions = runtime_state.positions;
+    const auto& cur_positions = visible_positions(runtime_state, step_state);
     const auto& cur_orders = runtime_state.orders;
     const auto& fills = step_state.match_fills_scratch;
 
@@ -1339,7 +1391,7 @@ bool StepKernel::run_step() const
     step_state.has_funding_apply_positions = false;
     step_state.funding_apply_positions.clear();
     if (need_step_entry_snapshots) {
-        step_state.step_entry_positions = runtime_state.positions;
+        step_state.step_entry_positions = visible_positions(runtime_state, step_state);
         step_state.step_entry_orders = runtime_state.orders;
     }
     else {
@@ -1357,7 +1409,7 @@ bool StepKernel::run_step() const
                 Contracts::FundingApplyTiming::BeforeMatching,
             [&]() {
                 if (need_funding_apply_snapshot) {
-                    step_state.funding_apply_positions = runtime_state.positions;
+                    step_state.funding_apply_positions = visible_positions(runtime_state, step_state);
                     step_state.has_funding_apply_positions = true;
                 }
                 if (apply_funding_for_step(step_state, runtime_state, exchange_.account_state(), *frame.market_payload)) {
@@ -1377,7 +1429,7 @@ bool StepKernel::run_step() const
                 if (runtime_state.simulation_config.funding_apply_timing ==
                     Contracts::FundingApplyTiming::AfterMatching) {
                     if (need_funding_apply_snapshot) {
-                        step_state.funding_apply_positions = runtime_state.positions;
+                        step_state.funding_apply_positions = visible_positions(runtime_state, step_state);
                         step_state.has_funding_apply_positions = true;
                     }
                 }
@@ -1464,7 +1516,7 @@ bool StepKernel::run_step() const
     observable_ctx.step_seq = step_state.step_seq;
     observable_ctx.replay_exhausted = false;
     observable_ctx.market_payload = std::move(frame.market_payload);
-    observable_ctx.position_snapshot = &runtime_state.positions;
+    observable_ctx.position_snapshot = &visible_positions(runtime_state, step_state);
     observable_ctx.order_snapshot = &runtime_state.orders;
     observable_ctx.account_state_version = step_state.account_state_version;
     resolve_log_module_ids_if_needed(step_state, runtime_state.logger);
@@ -1484,7 +1536,7 @@ bool StepKernel::run_step() const
         (!step_state.has_published_orders && !runtime_state.orders.empty()) ||
         runtime_state.orders_version != step_state.last_published_orders_version;
     positions_maybe_changed = positions_maybe_changed ||
-        (!step_state.has_published_positions && !runtime_state.positions.empty()) ||
+        (!step_state.has_published_positions && !visible_positions(runtime_state, step_state).empty()) ||
         runtime_state.positions_version != step_state.last_published_positions_version;
     publish_position_order_channels(
         exchange_,
