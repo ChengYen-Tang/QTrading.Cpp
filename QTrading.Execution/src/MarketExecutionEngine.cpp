@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <string_view>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -77,6 +78,23 @@ bool ShouldSkipDueToExistingOpenOrder(
     return has_open_order_by_symbol.find(symbol) != has_open_order_by_symbol.end();
 }
 
+bool EndsWith(const std::string& value, std::string_view suffix)
+{
+    return value.size() >= suffix.size() &&
+        value.compare(value.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
+std::string PairRootSymbol(const std::string& symbol)
+{
+    if (EndsWith(symbol, "_SPOT")) {
+        return symbol.substr(0, symbol.size() - 5);
+    }
+    if (EndsWith(symbol, "_PERP")) {
+        return symbol.substr(0, symbol.size() - 5);
+    }
+    return symbol;
+}
+
 }
 
 MarketExecutionEngine::MarketExecutionEngine(
@@ -128,6 +146,7 @@ std::vector<ExecutionOrder> MarketExecutionEngine::plan(
     }
     struct CarryRebalanceOrderMeta {
         std::size_t order_index{ 0 };
+        std::string pair_root{};
         double signed_notional{ 0.0 };
         double reference_price{ 0.0 };
     };
@@ -146,71 +165,67 @@ std::vector<ExecutionOrder> MarketExecutionEngine::plan(
                 return;
             }
 
-            double total_buy_notional = 0.0;
-            double total_sell_notional = 0.0;
+            std::unordered_map<std::string, std::vector<const CarryRebalanceOrderMeta*>> meta_by_pair;
+            meta_by_pair.reserve(meta.size());
             for (const auto& m : meta) {
                 if (m.order_index >= out_orders.size()) {
                     continue;
                 }
-                if (m.signed_notional > 0.0) {
-                    total_buy_notional += m.signed_notional;
-                }
-                else if (m.signed_notional < 0.0) {
-                    total_sell_notional += -m.signed_notional;
-                }
-            }
-
-            if (total_buy_notional <= 0.0 || total_sell_notional <= 0.0) {
-                if (!cfg_.carry_require_two_sided_rebalance) {
-                    return;
-                }
-                std::vector<bool> remove(out_orders.size(), false);
-                for (const auto& m : meta) {
-                    if (m.order_index < remove.size()) {
-                        remove[m.order_index] = true;
-                    }
-                }
-                std::vector<ExecutionOrder> filtered;
-                filtered.reserve(out_orders.size());
-                for (std::size_t i = 0; i < out_orders.size(); ++i) {
-                    if (!remove[i]) {
-                        filtered.push_back(std::move(out_orders[i]));
-                    }
-                }
-                out_orders = std::move(filtered);
-                return;
-            }
-
-            if (!cfg_.carry_balance_two_sided_rebalance) {
-                return;
-            }
-
-            const bool scale_buy = total_buy_notional > total_sell_notional;
-            const double larger = scale_buy ? total_buy_notional : total_sell_notional;
-            const double smaller = scale_buy ? total_sell_notional : total_buy_notional;
-            if (larger <= 0.0 || smaller <= 0.0) {
-                return;
-            }
-            const double scale = Clamp01(smaller / larger);
-            if (scale >= 0.999999) {
-                return;
+                meta_by_pair[m.pair_root].push_back(&m);
             }
 
             std::vector<bool> remove(out_orders.size(), false);
-            for (const auto& m : meta) {
-                if (m.order_index >= out_orders.size()) {
+            for (const auto& [pair_root, group] : meta_by_pair) {
+                double total_buy_notional = 0.0;
+                double total_sell_notional = 0.0;
+                for (const auto* m : group) {
+                    if (m->signed_notional > 0.0) {
+                        total_buy_notional += m->signed_notional;
+                    }
+                    else if (m->signed_notional < 0.0) {
+                        total_sell_notional += -m->signed_notional;
+                    }
+                }
+
+                if (total_buy_notional <= 0.0 || total_sell_notional <= 0.0) {
+                    if (!cfg_.carry_require_two_sided_rebalance) {
+                        continue;
+                    }
+                    for (const auto* m : group) {
+                        if (m->order_index < remove.size()) {
+                            remove[m->order_index] = true;
+                        }
+                    }
                     continue;
                 }
-                const bool is_buy_side = m.signed_notional > 0.0;
-                if ((scale_buy && !is_buy_side) || (!scale_buy && is_buy_side)) {
+
+                if (!cfg_.carry_balance_two_sided_rebalance) {
                     continue;
                 }
-                const double adjusted_notional = std::fabs(m.signed_notional) * scale;
-                if (adjusted_notional < min_notional || m.reference_price <= 0.0) {
-                    remove[m.order_index] = true;
+
+                const bool scale_buy = total_buy_notional > total_sell_notional;
+                const double larger = scale_buy ? total_buy_notional : total_sell_notional;
+                const double smaller = scale_buy ? total_sell_notional : total_buy_notional;
+                if (larger <= 0.0 || smaller <= 0.0) {
                     continue;
                 }
-                out_orders[m.order_index].qty = adjusted_notional / m.reference_price;
+                const double scale = Clamp01(smaller / larger);
+                if (scale >= 0.999999) {
+                    continue;
+                }
+
+                for (const auto* m : group) {
+                    const bool is_buy_side = m->signed_notional > 0.0;
+                    if ((scale_buy && !is_buy_side) || (!scale_buy && is_buy_side)) {
+                        continue;
+                    }
+                    const double adjusted_notional = std::fabs(m->signed_notional) * scale;
+                    if (adjusted_notional < min_notional || m->reference_price <= 0.0) {
+                        remove[m->order_index] = true;
+                        continue;
+                    }
+                    out_orders[m->order_index].qty = adjusted_notional / m->reference_price;
+                }
             }
 
             std::vector<ExecutionOrder> filtered;
@@ -401,6 +416,8 @@ std::vector<ExecutionOrder> MarketExecutionEngine::plan(
             const double raw_delta_notional = target_notional - cur_notional;
             bool reduce_only =
                 (cur_notional != 0.0) && (cur_notional * raw_delta_notional < 0.0);
+            const bool is_pair_trade_order = QTrading::Contracts::IsCarryLikeStrategy(strategy_kind) &&
+                !reduce_only;
             const bool is_carry_rebalance = QTrading::Contracts::IsCarryLikeStrategy(strategy_kind) &&
                 (signal.urgency == ExecutionUrgency::Low) &&
                 !reduce_only;
@@ -526,9 +543,11 @@ std::vector<ExecutionOrder> MarketExecutionEngine::plan(
                 ? OrderUrgency::Medium
                 : OrderUrgency::Low;
             orders.push_back(std::move(ord));
-            if (is_carry_rebalance) {
+            if (is_pair_trade_order) {
                 carry_rebalance_order_meta.push_back(
-                    { orders.size() - 1, delta_notional, price_by_id[id] });
+                    { orders.size() - 1, PairRootSymbol(symbol), delta_notional, price_by_id[id] });
+            }
+            if (is_carry_rebalance) {
                 last_carry_order_ts_by_symbol_[symbol] = market->Timestamp;
                 mark_carry_rebalance(symbol);
                 mark_carry_window_budget_use(symbol, abs_notional);

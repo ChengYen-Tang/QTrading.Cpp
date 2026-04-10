@@ -4,6 +4,7 @@
 #include "Signal/SignalDecision.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 #include <mutex>
 #include <thread>
@@ -12,6 +13,29 @@
 namespace {
 
 constexpr double kAllocatorScoreFloor = 1e-12;
+constexpr double kExposureEpsilon = 1e-6;
+
+double Clamp01(double value)
+{
+    return std::clamp(value, 0.0, 1.0);
+}
+
+double SignedOrderDeltaNotional(
+    const QTrading::Execution::ExecutionOrder& order,
+    double reference_price)
+{
+    if (!(reference_price > 0.0) || !(order.qty > 0.0)) {
+        return 0.0;
+    }
+    const double sign =
+        (order.action == QTrading::Execution::OrderAction::Buy) ? 1.0 : -1.0;
+    return sign * order.qty * reference_price;
+}
+
+bool HasMaterialExposure(double signed_notional)
+{
+    return std::abs(signed_notional) > kExposureEpsilon;
+}
 
 QTrading::Execution::ExecutionSignalStatus ToExecutionStatus(
     QTrading::Signal::SignalStatus status)
@@ -123,6 +147,7 @@ BasisArbitrageMultiPairRuntime::BasisArbitrageMultiPairRuntime(
     , base_signal_cfg_(std::move(signal_cfg))
     , base_intent_cfg_(std::move(intent_cfg))
     , runtime_cfg_(std::move(runtime_cfg))
+    , allowed_raw_symbols_(runtime_cfg_.basis_allowed_raw_symbols)
     , risk_engine_(risk_engine)
     , execution_engine_(execution_engine)
     , monitoring_(monitoring)
@@ -133,6 +158,26 @@ BasisArbitrageMultiPairRuntime::BasisArbitrageMultiPairRuntime(
 {
     runtime_cfg_.basis_multi_top_n = std::max<std::size_t>(1, runtime_cfg_.basis_multi_top_n);
     runtime_cfg_.basis_multi_shard_size = std::max<std::size_t>(1, runtime_cfg_.basis_multi_shard_size);
+    runtime_cfg_.basis_multi_min_score_ratio = Clamp01(runtime_cfg_.basis_multi_min_score_ratio);
+    if (!std::isfinite(runtime_cfg_.basis_multi_confidence_power) ||
+        runtime_cfg_.basis_multi_confidence_power < 0.0)
+    {
+        runtime_cfg_.basis_multi_confidence_power = 1.0;
+    }
+    runtime_cfg_.basis_multi_max_pair_weight =
+        std::clamp(runtime_cfg_.basis_multi_max_pair_weight, 0.0, 1.0);
+    if (!std::isfinite(runtime_cfg_.basis_pair_min_spot_quote_volume) ||
+        runtime_cfg_.basis_pair_min_spot_quote_volume < 0.0) {
+        runtime_cfg_.basis_pair_min_spot_quote_volume = 0.0;
+    }
+    if (!std::isfinite(runtime_cfg_.basis_pair_min_perp_quote_volume) ||
+        runtime_cfg_.basis_pair_min_perp_quote_volume < 0.0) {
+        runtime_cfg_.basis_pair_min_perp_quote_volume = 0.0;
+    }
+    if (!std::isfinite(runtime_cfg_.basis_pair_min_quote_volume_ratio) ||
+        runtime_cfg_.basis_pair_min_quote_volume_ratio < 0.0) {
+        runtime_cfg_.basis_pair_min_quote_volume_ratio = 0.0;
+    }
 }
 
 void BasisArbitrageMultiPairRuntime::InitializePairsIfNeeded(const MarketPtr& market)
@@ -158,6 +203,10 @@ void BasisArbitrageMultiPairRuntime::InitializePairsIfNeeded(const MarketPtr& ma
             continue;
         }
         const auto raw_symbol = StripSuffix(symbol, "_SPOT");
+        if (!allowed_raw_symbols_.empty() &&
+            allowed_raw_symbols_.find(raw_symbol) == allowed_raw_symbols_.end()) {
+            continue;
+        }
         const auto perp_symbol = raw_symbol + "_PERP";
         const auto perp_it = symbol_to_market_id.find(perp_symbol);
         if (perp_it == symbol_to_market_id.end()) {
@@ -167,7 +216,9 @@ void BasisArbitrageMultiPairRuntime::InitializePairsIfNeeded(const MarketPtr& ma
         pair_static_infos_.push_back(PairStaticInfo{
             raw_symbol,
             symbol,
-            perp_symbol
+            perp_symbol,
+            i,
+            perp_it->second
         });
         pair_runtime_states_.emplace_back(
             symbol,
@@ -246,7 +297,104 @@ BasisArbitrageMultiPairRuntime::BuildActivePairRanking(const MarketPtr& market)
         ranking_buffer_.resize(top_n);
     }
     std::sort(ranking_buffer_.begin(), ranking_buffer_.end(), signal_rank_cmp);
+    ApplyPortfolioAllocator(ranking_buffer_);
     return ranking_buffer_;
+}
+
+void BasisArbitrageMultiPairRuntime::ApplyPortfolioAllocator(
+    std::vector<PairSignalSnapshot>& ranked_pairs) const
+{
+    if (ranked_pairs.empty()) {
+        return;
+    }
+
+    const double best_score =
+        std::max(ranked_pairs.front().signal.allocator_score, kAllocatorScoreFloor);
+    const double min_score =
+        std::max(kAllocatorScoreFloor, best_score * runtime_cfg_.basis_multi_min_score_ratio);
+    const double confidence_power = runtime_cfg_.basis_multi_confidence_power;
+    const double max_pair_weight = runtime_cfg_.basis_multi_max_pair_weight;
+
+    double total_raw_weight = 0.0;
+    std::size_t kept_count = 0;
+    for (auto& pair : ranked_pairs) {
+        const double score = std::max(pair.signal.allocator_score, 0.0);
+        if (score < min_score) {
+            pair.portfolio_weight = 0.0;
+            continue;
+        }
+
+        const double confidence_scale =
+            std::pow(Clamp01(pair.signal.confidence), confidence_power);
+        const double raw_weight =
+            std::max(score * std::max(confidence_scale, kAllocatorScoreFloor), kAllocatorScoreFloor);
+        pair.portfolio_weight = raw_weight;
+        total_raw_weight += raw_weight;
+        ++kept_count;
+    }
+
+    if (kept_count == 0 || total_raw_weight <= 0.0) {
+        ranked_pairs.clear();
+        return;
+    }
+
+    for (auto& pair : ranked_pairs) {
+        if (pair.portfolio_weight > 0.0) {
+            pair.portfolio_weight /= total_raw_weight;
+        }
+    }
+
+    if (max_pair_weight <= 0.0 || max_pair_weight >= 1.0 || ranked_pairs.size() <= 1) {
+        ranked_pairs.erase(
+            std::remove_if(
+                ranked_pairs.begin(),
+                ranked_pairs.end(),
+                [](const PairSignalSnapshot& pair) { return pair.portfolio_weight <= 0.0; }),
+            ranked_pairs.end());
+        return;
+    }
+
+    double capped_total = 0.0;
+    double residual_total = 0.0;
+    for (auto& pair : ranked_pairs) {
+        if (pair.portfolio_weight <= 0.0) {
+            continue;
+        }
+        if (pair.portfolio_weight > max_pair_weight) {
+            pair.portfolio_weight = max_pair_weight;
+        }
+        else {
+            residual_total += pair.portfolio_weight;
+        }
+        capped_total += pair.portfolio_weight;
+    }
+
+    double remaining_capacity = std::max(0.0, 1.0 - capped_total);
+    if (remaining_capacity > 0.0 && residual_total > 0.0) {
+        for (auto& pair : ranked_pairs) {
+            if (pair.portfolio_weight <= 0.0 || pair.portfolio_weight >= max_pair_weight) {
+                continue;
+            }
+            pair.portfolio_weight += remaining_capacity * (pair.portfolio_weight / residual_total);
+        }
+    }
+
+    double final_total = 0.0;
+    for (const auto& pair : ranked_pairs) {
+        final_total += pair.portfolio_weight;
+    }
+    if (final_total > 0.0) {
+        for (auto& pair : ranked_pairs) {
+            pair.portfolio_weight /= final_total;
+        }
+    }
+
+    ranked_pairs.erase(
+        std::remove_if(
+            ranked_pairs.begin(),
+            ranked_pairs.end(),
+            [](const PairSignalSnapshot& pair) { return pair.portfolio_weight <= 0.0; }),
+        ranked_pairs.end());
 }
 
 void BasisArbitrageMultiPairRuntime::RebuildShards()
@@ -365,6 +513,9 @@ void BasisArbitrageMultiPairRuntime::CollectActivePairsInShard(
     std::vector<PairSignalSnapshot>& out)
 {
     for (std::size_t i = shard.begin; i < shard.end; ++i) {
+        if (!PairHasTradableLiquidityThisCycle(i, market)) {
+            continue;
+        }
         auto signal = pair_runtime_states_[i].signal_engine.on_market(market);
         if (signal.status != QTrading::Signal::SignalStatus::Active) {
             continue;
@@ -374,6 +525,49 @@ void BasisArbitrageMultiPairRuntime::CollectActivePairsInShard(
             std::move(signal)
         });
     }
+}
+
+bool BasisArbitrageMultiPairRuntime::PairHasTradableLiquidityThisCycle(
+    std::size_t pair_index,
+    const MarketPtr& market) const
+{
+    if (!market || pair_index >= pair_static_infos_.size()) {
+        return false;
+    }
+
+    const auto& pair = pair_static_infos_[pair_index];
+    if (pair.spot_market_id >= market->trade_klines_by_id.size() ||
+        pair.perp_market_id >= market->trade_klines_by_id.size()) {
+        return false;
+    }
+
+    const auto& spot = market->trade_klines_by_id[pair.spot_market_id];
+    const auto& perp = market->trade_klines_by_id[pair.perp_market_id];
+    if (!spot.has_value() || !perp.has_value()) {
+        return false;
+    }
+    if (!(spot->ClosePrice > 0.0) || !(perp->ClosePrice > 0.0)) {
+        return false;
+    }
+
+    const double spot_quote_volume = std::max(0.0, spot->QuoteVolume);
+    const double perp_quote_volume = std::max(0.0, perp->QuoteVolume);
+    if (spot_quote_volume < runtime_cfg_.basis_pair_min_spot_quote_volume ||
+        perp_quote_volume < runtime_cfg_.basis_pair_min_perp_quote_volume) {
+        return false;
+    }
+
+    if (runtime_cfg_.basis_pair_min_quote_volume_ratio > 0.0) {
+        if (!(perp_quote_volume > 0.0)) {
+            return false;
+        }
+        const double ratio = spot_quote_volume / perp_quote_volume;
+        if (ratio < runtime_cfg_.basis_pair_min_quote_volume_ratio) {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 std::unordered_set<std::size_t> BasisArbitrageMultiPairRuntime::CollectExposedPairIndexes(
@@ -429,6 +623,240 @@ void BasisArbitrageMultiPairRuntime::MergeRiskTarget(
     }
 }
 
+void BasisArbitrageMultiPairRuntime::NormalizePairTargetsToAvoidSingleLegExposure(
+    QTrading::Risk::RiskTarget& target,
+    const QTrading::Risk::AccountState& account,
+    const MarketPtr& market) const
+{
+    if (!market || !market->symbols || pair_static_infos_.empty()) {
+        return;
+    }
+
+    std::unordered_map<std::string, double> reference_price_by_symbol;
+    reference_price_by_symbol.reserve(market->symbols->size());
+    const auto& symbols = *market->symbols;
+    for (std::size_t i = 0; i < symbols.size(); ++i) {
+        if (i >= market->trade_klines_by_id.size() || !market->trade_klines_by_id[i].has_value()) {
+            continue;
+        }
+        const double price = market->trade_klines_by_id[i]->ClosePrice;
+        if (price > 0.0) {
+            reference_price_by_symbol.emplace(symbols[i], price);
+        }
+    }
+
+    struct PairNotionalState {
+        double current_spot = 0.0;
+        double current_perp = 0.0;
+    };
+    std::vector<PairNotionalState> pair_states(pair_static_infos_.size());
+
+    for (const auto& position : account.positions) {
+        const auto pair_it = symbol_to_pair_index_.find(position.symbol);
+        if (pair_it == symbol_to_pair_index_.end()) {
+            continue;
+        }
+        const auto price_it = reference_price_by_symbol.find(position.symbol);
+        if (price_it == reference_price_by_symbol.end() || !(price_it->second > 0.0)) {
+            continue;
+        }
+        const double signed_notional =
+            (position.is_long ? 1.0 : -1.0) * position.quantity * price_it->second;
+        auto& state = pair_states[pair_it->second];
+        if (position.symbol == pair_static_infos_[pair_it->second].spot_symbol) {
+            state.current_spot += signed_notional;
+        }
+        else if (position.symbol == pair_static_infos_[pair_it->second].perp_symbol) {
+            state.current_perp += signed_notional;
+        }
+    }
+
+    for (std::size_t pair_index = 0; pair_index < pair_static_infos_.size(); ++pair_index) {
+        const auto& pair = pair_static_infos_[pair_index];
+        const auto& state = pair_states[pair_index];
+        const double current_spot = state.current_spot;
+        const double current_perp = state.current_perp;
+        const auto spot_it = target.target_positions.find(pair.spot_symbol);
+        const auto perp_it = target.target_positions.find(pair.perp_symbol);
+        const double target_spot = (spot_it == target.target_positions.end()) ? current_spot : spot_it->second;
+        const double target_perp = (perp_it == target.target_positions.end()) ? current_perp : perp_it->second;
+
+        const int current_open_legs =
+            static_cast<int>(HasMaterialExposure(current_spot)) +
+            static_cast<int>(HasMaterialExposure(current_perp));
+        const int target_open_legs =
+            static_cast<int>(HasMaterialExposure(target_spot)) +
+            static_cast<int>(HasMaterialExposure(target_perp));
+
+        bool clamp_to_current = false;
+        if (current_open_legs == 0) {
+            clamp_to_current = target_open_legs == 1;
+        }
+        else if (current_open_legs == 1) {
+            if (target_open_legs == 2 || target_open_legs == 0) {
+                clamp_to_current = false;
+            }
+            else {
+                const bool current_has_spot = HasMaterialExposure(current_spot);
+                const double current_single =
+                    current_has_spot ? std::abs(current_spot) : std::abs(current_perp);
+                const double target_single =
+                    current_has_spot ? std::abs(target_spot) : std::abs(target_perp);
+                clamp_to_current = target_single > current_single + kExposureEpsilon;
+            }
+        }
+        else {
+            clamp_to_current = target_open_legs == 1;
+        }
+
+        if (!clamp_to_current) {
+            continue;
+        }
+
+        target.target_positions[pair.spot_symbol] = current_spot;
+        target.target_positions[pair.perp_symbol] = current_perp;
+    }
+}
+
+std::vector<QTrading::Execution::ExecutionOrder>
+BasisArbitrageMultiPairRuntime::FilterOrdersToAvoidSingleLegExposure(
+    const std::vector<QTrading::Execution::ExecutionOrder>& orders,
+    const QTrading::Risk::AccountState& account,
+    const MarketPtr& market) const
+{
+    if (orders.empty() || !market || !market->symbols || pair_static_infos_.empty()) {
+        return orders;
+    }
+
+    std::unordered_map<std::string, double> reference_price_by_symbol;
+    reference_price_by_symbol.reserve(market->symbols->size());
+    const auto& symbols = *market->symbols;
+    for (std::size_t i = 0; i < symbols.size(); ++i) {
+        if (i >= market->trade_klines_by_id.size() || !market->trade_klines_by_id[i].has_value()) {
+            continue;
+        }
+        const double price = market->trade_klines_by_id[i]->ClosePrice;
+        if (price > 0.0) {
+            reference_price_by_symbol.emplace(symbols[i], price);
+        }
+    }
+
+    struct PairOrderState {
+        bool has_spot_order = false;
+        bool has_perp_order = false;
+        double current_spot_notional = 0.0;
+        double current_perp_notional = 0.0;
+        double projected_spot_notional = 0.0;
+        double projected_perp_notional = 0.0;
+        std::vector<std::size_t> order_indexes;
+    };
+
+    std::vector<PairOrderState> pair_order_states(pair_static_infos_.size());
+
+    for (const auto& position : account.positions) {
+        const auto pair_it = symbol_to_pair_index_.find(position.symbol);
+        if (pair_it == symbol_to_pair_index_.end()) {
+            continue;
+        }
+        const auto price_it = reference_price_by_symbol.find(position.symbol);
+        if (price_it == reference_price_by_symbol.end() || !(price_it->second > 0.0)) {
+            continue;
+        }
+        const double signed_notional =
+            (position.is_long ? 1.0 : -1.0) * position.quantity * price_it->second;
+        auto& state = pair_order_states[pair_it->second];
+        if (position.symbol == pair_static_infos_[pair_it->second].spot_symbol) {
+            state.current_spot_notional += signed_notional;
+        }
+        else if (position.symbol == pair_static_infos_[pair_it->second].perp_symbol) {
+            state.current_perp_notional += signed_notional;
+        }
+    }
+
+    for (std::size_t i = 0; i < orders.size(); ++i) {
+        const auto& order = orders[i];
+        const auto pair_it = symbol_to_pair_index_.find(order.symbol);
+        if (pair_it == symbol_to_pair_index_.end()) {
+            continue;
+        }
+        const auto price_it = reference_price_by_symbol.find(order.symbol);
+        const double reference_price =
+            (price_it != reference_price_by_symbol.end()) ? price_it->second : order.price;
+        const double delta_notional = SignedOrderDeltaNotional(order, reference_price);
+        auto& state = pair_order_states[pair_it->second];
+        state.order_indexes.push_back(i);
+        if (order.symbol == pair_static_infos_[pair_it->second].spot_symbol) {
+            state.has_spot_order = true;
+            state.projected_spot_notional += delta_notional;
+        }
+        else if (order.symbol == pair_static_infos_[pair_it->second].perp_symbol) {
+            state.has_perp_order = true;
+            state.projected_perp_notional += delta_notional;
+        }
+    }
+
+    std::vector<bool> keep_order(orders.size(), true);
+    for (std::size_t pair_index = 0; pair_index < pair_order_states.size(); ++pair_index) {
+        const auto& state = pair_order_states[pair_index];
+        if (state.order_indexes.empty()) {
+            continue;
+        }
+        if (state.has_spot_order && state.has_perp_order) {
+            continue;
+        }
+
+        const double current_spot = state.current_spot_notional;
+        const double current_perp = state.current_perp_notional;
+        const double projected_spot = current_spot + state.projected_spot_notional;
+        const double projected_perp = current_perp + state.projected_perp_notional;
+
+        const int current_open_legs =
+            static_cast<int>(HasMaterialExposure(current_spot)) +
+            static_cast<int>(HasMaterialExposure(current_perp));
+        const int projected_open_legs =
+            static_cast<int>(HasMaterialExposure(projected_spot)) +
+            static_cast<int>(HasMaterialExposure(projected_perp));
+
+        bool drop_pair_orders = false;
+        if (current_open_legs == 0) {
+            drop_pair_orders = projected_open_legs == 1;
+        }
+        else if (current_open_legs == 1) {
+            if (projected_open_legs == 2 || projected_open_legs == 0) {
+                drop_pair_orders = false;
+            }
+            else {
+                const bool current_has_spot = HasMaterialExposure(current_spot);
+                const double current_single =
+                    current_has_spot ? std::abs(current_spot) : std::abs(current_perp);
+                const double projected_single =
+                    current_has_spot ? std::abs(projected_spot) : std::abs(projected_perp);
+                drop_pair_orders = projected_single > current_single + kExposureEpsilon;
+            }
+        }
+        else {
+            drop_pair_orders = projected_open_legs == 1;
+        }
+
+        if (!drop_pair_orders) {
+            continue;
+        }
+
+        for (const auto order_index : state.order_indexes) {
+            keep_order[order_index] = false;
+        }
+    }
+
+    std::vector<QTrading::Execution::ExecutionOrder> filtered;
+    filtered.reserve(orders.size());
+    for (std::size_t i = 0; i < orders.size(); ++i) {
+        if (keep_order[i]) {
+            filtered.push_back(orders[i]);
+        }
+    }
+    return filtered;
+}
+
 void BasisArbitrageMultiPairRuntime::RunOneCycle()
 {
     auto market_opt = exchange_->get_market_channel()->Receive();
@@ -468,25 +896,18 @@ void BasisArbitrageMultiPairRuntime::RunOneCycle()
     QTrading::Signal::SignalDecision execution_signal_src =
         MakeInactiveBasisSignal(market ? market->Timestamp : 0);
 
-    const double allocation_scale =
-        chosen_active_pairs.empty() ? 0.0 : 1.0;
-    double total_allocator_score = 0.0;
-    for (const auto& pair : chosen_active_pairs) {
-        total_allocator_score += std::max(pair.signal.allocator_score, kAllocatorScoreFloor);
-    }
-
     for (const auto pair_index : chosen_pair_indexes) {
         auto& pair_runtime = pair_runtime_states_[pair_index];
         const auto& pair_static = pair_static_infos_[pair_index];
         const int active_slot = active_pair_slots_[pair_index];
 
         if (active_slot >= 0) {
-            auto signal = chosen_active_pairs[static_cast<std::size_t>(active_slot)].signal;
+            const auto& chosen_pair = chosen_active_pairs[static_cast<std::size_t>(active_slot)];
+            auto signal = chosen_pair.signal;
             auto intent = pair_runtime.intent_builder.build(signal, market);
             auto risk = risk_engine_.position(intent, account, market);
-            if (allocation_scale > 0.0 && total_allocator_score > 0.0) {
-                const double pair_weight =
-                    std::max(signal.allocator_score, kAllocatorScoreFloor) / total_allocator_score;
+            if (chosen_pair.portfolio_weight > 0.0) {
+                const double pair_weight = chosen_pair.portfolio_weight;
                 risk = ScaleRiskTarget(risk, pair_weight);
             }
             MergeRiskTarget(risk, merged_risk);
@@ -514,8 +935,10 @@ void BasisArbitrageMultiPairRuntime::RunOneCycle()
     active_pair_slot_touched_.clear();
 
     const auto execution_signal = ToExecutionSignal(execution_signal_src);
+    NormalizePairTargetsToAvoidSingleLegExposure(merged_risk, account, market);
     const auto orders = execution_orchestrator_.Execute(merged_risk, account, execution_signal, market);
-    exchange_gateway_.SubmitOrders(orders);
+    const auto filtered_orders = FilterOrdersToAvoidSingleLegExposure(orders, account, market);
+    exchange_gateway_.SubmitOrders(filtered_orders);
     exchange_gateway_.ApplyMonitoringAlerts(monitoring_.check(account));
 }
 

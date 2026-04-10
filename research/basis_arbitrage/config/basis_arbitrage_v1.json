@@ -21,32 +21,32 @@
     "basis_mr_use_mark_index": false,
     "basis_mr_window_bars": 180,
     "basis_mr_min_samples": 90,
-    "basis_mr_entry_z": 2.00,
+    "basis_mr_entry_z": 2.80,
     "basis_mr_exit_z": 0.50,
     "basis_mr_max_abs_z": 5.00,
-    "basis_mr_entry_persistence_bars": 2,
+    "basis_mr_entry_persistence_bars": 3,
     "basis_mr_exit_persistence_bars": 2,
     "basis_mr_cooldown_ms": 900000,
     "basis_mr_std_floor": 0.000001,
     "basis_mr_confidence_from_z": true,
     "basis_mr_confidence_floor": 0.35,
-    "basis_regime_confidence_enabled": false,
+    "basis_regime_confidence_enabled": true,
     "basis_regime_use_mark_index": true,
     "basis_regime_window_bars": 240,
     "basis_regime_min_samples": 60,
     "basis_regime_calm_z": 1.00,
     "basis_regime_stress_z": 2.50,
-    "basis_regime_min_confidence_scale": 0.50,
+    "basis_regime_min_confidence_scale": 0.35,
     "basis_stop_alpha_z": 5.00,
     "basis_stop_risk_z": 3.00,
     "basis_cost_gate_enabled": true,
-    "basis_cost_edge_threshold_pct": 0.0005,
+    "basis_cost_edge_threshold_pct": 0.0010,
     "basis_cost_expected_hold_hours": 8.0,
     "basis_cost_expected_funding_settlements": 1.0,
     "basis_cost_borrow_apr": 0.00,
     "basis_cost_trading_cost_rate_per_leg": 0.0002,
     "basis_cost_risk_penalty_weight": 0.0005,
-    "basis_cost_trend_penalty_weight": 0.0002,
+    "basis_cost_trend_penalty_weight": 0.0004,
     "basis_cost_include_funding": true
   },
   "intent": {
@@ -63,7 +63,7 @@
     "notional_usdt": 1000.0,
     "leverage": 2.0,
     "max_leverage": 3.0,
-    "rebalance_threshold_ratio": 0.03,
+    "rebalance_threshold_ratio": 0.05,
     "carry_allocator_leverage_model_enabled": true,
     "carry_allocator_spot_cash_per_notional": 1.0,
     "carry_allocator_perp_margin_buffer_ratio": 0.10,
@@ -91,8 +91,8 @@
   "execution": {
     "min_notional": 5.0,
     "carry_rebalance_cooldown_ms": 300000,
-    "carry_max_rebalance_step_ratio": 0.25,
-    "carry_max_participation_rate": 0.01,
+    "carry_max_rebalance_step_ratio": 0.20,
+    "carry_max_participation_rate": 0.0075,
     "carry_maker_first_enabled": false,
     "carry_target_anchor_enabled": false,
     "carry_confidence_adaptive_enabled": false
@@ -101,8 +101,19 @@
     "max_open_orders_per_symbol": 5
   },
   "runtime": {
-    "basis_multi_top_n": 3,
+    "basis_multi_top_n": 2,
     "basis_multi_shard_size": 16,
-    "basis_multi_worker_count": 0
+    "basis_multi_worker_count": 0,
+    "basis_multi_min_score_ratio": 0.65,
+    "basis_multi_confidence_power": 1.5,
+    "basis_multi_max_pair_weight": 0.55,
+    "basis_pair_min_spot_quote_volume": 1.0,
+    "basis_pair_min_perp_quote_volume": 1.0,
+    "basis_pair_min_quote_volume_ratio": 0.0,
+    "basis_allowed_raw_symbols": [
+      "ZECUSDT",
+      "APEUSDT",
+      "HBARUSDT"
+    ]
   }
 }

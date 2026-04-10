@@ -35,6 +35,35 @@ MarketPtr MakeMarketWithSymbol(
     return market;
 }
 
+MarketPtr MakeMarketWithSymbols(
+    uint64_t ts,
+    std::initializer_list<std::tuple<std::string, double, double>> rows)
+{
+    auto market = std::make_shared<QTrading::Dto::Market::Binance::MultiKlineDto>();
+    market->Timestamp = ts;
+    auto symbols = std::make_shared<std::vector<std::string>>();
+    market->symbols = symbols;
+    market->trade_klines_by_id.resize(rows.size());
+
+    std::size_t i = 0;
+    for (const auto& [symbol, close, quote_volume] : rows) {
+        symbols->push_back(symbol);
+        market->trade_klines_by_id[i++] = QTrading::Dto::Market::Binance::KlineDto(
+            ts,
+            0,
+            0,
+            0,
+            close,
+            0,
+            ts,
+            quote_volume,
+            0,
+            0,
+            0);
+    }
+    return market;
+}
+
 } // namespace
 
 TEST(LiquidityAwareExecutionSchedulerTests, CapsCarryDeltaByQuoteVolumeParticipation)
@@ -486,5 +515,119 @@ TEST(LiquidityAwareExecutionSchedulerTests, IncreaseBatchTimerIsNotResetByTarget
         MakeMarketWithSymbol(2200, "BTCUSDT_PERP", 10'000.0, 1000.0));
     ASSERT_EQ(s5.size(), 1u);
     EXPECT_DOUBLE_EQ(s5[0].target_notional, 1100.0);
+}
+
+TEST(LiquidityAwareExecutionSchedulerTests, BalancesCarryPairToSmallerFeasibleDelta)
+{
+    QTrading::Execution::LiquidityAwareExecutionScheduler::Config cfg;
+    cfg.carry_delta_participation_cap_enabled = true;
+    cfg.carry_delta_participation_rate = 0.10;
+    cfg.carry_min_slice_notional_usdt = 0.0;
+    cfg.carry_apply_only_low_urgency = true;
+    cfg.include_open_orders_in_current_notional = false;
+
+    QTrading::Execution::LiquidityAwareExecutionScheduler scheduler(cfg);
+    std::vector<QTrading::Execution::ExecutionParentOrder> parent_orders = {
+        { 1, "APTUSDT_SPOT", 1000.0, 1.0 },
+        { 1, "APTUSDT_PERP", -1000.0, 1.0 },
+    };
+
+    QTrading::Risk::AccountState account;
+    QTrading::Execution::ExecutionSignal signal;
+    signal.strategy = "basis_arbitrage";
+    signal.urgency = QTrading::Execution::ExecutionUrgency::Low;
+
+    const auto slices = scheduler.BuildSlices(
+        parent_orders,
+        account,
+        signal,
+        MakeMarketWithSymbols(
+            1,
+            {
+                { "APTUSDT_SPOT", 10.0, 100.0 },
+                { "APTUSDT_PERP", 10.0, 400.0 },
+            }));
+
+    ASSERT_EQ(slices.size(), 2u);
+    EXPECT_DOUBLE_EQ(slices[0].target_notional, 10.0);
+    EXPECT_DOUBLE_EQ(slices[1].target_notional, -10.0);
+}
+
+TEST(LiquidityAwareExecutionSchedulerTests, SuppressesCarryPairWhenOneLegFallsBelowFeasibleSize)
+{
+    QTrading::Execution::LiquidityAwareExecutionScheduler::Config cfg;
+    cfg.carry_delta_participation_cap_enabled = true;
+    cfg.carry_delta_participation_rate = 0.10;
+    cfg.carry_min_slice_notional_usdt = 15.0;
+    cfg.carry_apply_only_low_urgency = true;
+    cfg.include_open_orders_in_current_notional = false;
+
+    QTrading::Execution::LiquidityAwareExecutionScheduler scheduler(cfg);
+    std::vector<QTrading::Execution::ExecutionParentOrder> parent_orders = {
+        { 1, "APTUSDT_SPOT", 1000.0, 1.0 },
+        { 1, "APTUSDT_PERP", -1000.0, 1.0 },
+    };
+
+    QTrading::Risk::AccountState account;
+    QTrading::Execution::ExecutionSignal signal;
+    signal.strategy = "basis_arbitrage";
+    signal.urgency = QTrading::Execution::ExecutionUrgency::Low;
+
+    const auto slices = scheduler.BuildSlices(
+        parent_orders,
+        account,
+        signal,
+        MakeMarketWithSymbols(
+            1,
+            {
+                { "APTUSDT_SPOT", 10.0, 100.0 },
+                { "APTUSDT_PERP", 10.0, 400.0 },
+            }));
+
+    ASSERT_EQ(slices.size(), 2u);
+    EXPECT_DOUBLE_EQ(slices[0].target_notional, 0.0);
+    EXPECT_DOUBLE_EQ(slices[1].target_notional, 0.0);
+}
+
+TEST(LiquidityAwareExecutionSchedulerTests, KeepsReduceOnlyLegIndependentWhenCounterLegIsNewRisk)
+{
+    QTrading::Execution::LiquidityAwareExecutionScheduler::Config cfg;
+    cfg.carry_delta_participation_cap_enabled = true;
+    cfg.carry_delta_participation_rate = 1.0;
+    cfg.carry_min_slice_notional_usdt = 0.0;
+    cfg.carry_apply_only_low_urgency = true;
+    cfg.include_open_orders_in_current_notional = false;
+
+    QTrading::Execution::LiquidityAwareExecutionScheduler scheduler(cfg);
+    std::vector<QTrading::Execution::ExecutionParentOrder> parent_orders = {
+        { 1, "APTUSDT_SPOT", 500.0, 1.0 },
+        { 1, "APTUSDT_PERP", -500.0, 1.0 },
+    };
+
+    QTrading::Risk::AccountState account;
+    QTrading::dto::Position perp_position{};
+    perp_position.symbol = "APTUSDT_PERP";
+    perp_position.quantity = 100.0; // current notional = -1000 at price 10
+    perp_position.is_long = false;
+    account.positions.push_back(perp_position);
+
+    QTrading::Execution::ExecutionSignal signal;
+    signal.strategy = "basis_arbitrage";
+    signal.urgency = QTrading::Execution::ExecutionUrgency::Low;
+
+    const auto slices = scheduler.BuildSlices(
+        parent_orders,
+        account,
+        signal,
+        MakeMarketWithSymbols(
+            1,
+            {
+                { "APTUSDT_SPOT", 10.0, 500.0 },
+                { "APTUSDT_PERP", 10.0, 500.0 },
+            }));
+
+    ASSERT_EQ(slices.size(), 2u);
+    EXPECT_DOUBLE_EQ(slices[0].target_notional, 500.0);
+    EXPECT_DOUBLE_EQ(slices[1].target_notional, -500.0);
 }
 

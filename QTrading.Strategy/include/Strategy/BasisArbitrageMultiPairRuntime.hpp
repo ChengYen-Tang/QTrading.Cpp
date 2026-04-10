@@ -55,6 +55,8 @@ private:
         std::string raw_symbol;
         std::string spot_symbol;
         std::string perp_symbol;
+        std::size_t spot_market_id = 0;
+        std::size_t perp_market_id = 0;
     };
 
     struct PairRuntimeState {
@@ -72,6 +74,7 @@ private:
     struct PairSignalSnapshot {
         std::size_t pair_index = 0;
         QTrading::Signal::SignalDecision signal;
+        double portfolio_weight = 0.0;
     };
     struct PairShard {
         std::size_t begin = 0;
@@ -84,6 +87,7 @@ private:
     };
 
     std::vector<PairSignalSnapshot> BuildActivePairRanking(const MarketPtr& market);
+    void ApplyPortfolioAllocator(std::vector<PairSignalSnapshot>& ranked_pairs) const;
     void RebuildShards();
     void InitializeWorkersIfNeeded();
     void StopWorkers();
@@ -92,15 +96,25 @@ private:
         const MarketPtr& market,
         const PairShard& shard,
         std::vector<PairSignalSnapshot>& out);
+    bool PairHasTradableLiquidityThisCycle(std::size_t pair_index, const MarketPtr& market) const;
     std::unordered_set<std::size_t> CollectExposedPairIndexes(const QTrading::Risk::AccountState& account) const;
     QTrading::Risk::RiskTarget ScaleRiskTarget(const QTrading::Risk::RiskTarget& input, double scale) const;
     void MergeRiskTarget(const QTrading::Risk::RiskTarget& input, QTrading::Risk::RiskTarget& merged) const;
+    void NormalizePairTargetsToAvoidSingleLegExposure(
+        QTrading::Risk::RiskTarget& target,
+        const QTrading::Risk::AccountState& account,
+        const MarketPtr& market) const;
+    std::vector<QTrading::Execution::ExecutionOrder> FilterOrdersToAvoidSingleLegExposure(
+        const std::vector<QTrading::Execution::ExecutionOrder>& orders,
+        const QTrading::Risk::AccountState& account,
+        const MarketPtr& market) const;
 
     std::shared_ptr<QTrading::Infra::Exchanges::BinanceSim::BinanceExchange> exchange_;
     QTrading::Universe::IUniverseSelector& universe_selector_;
     QTrading::Signal::BasisArbitrageSignalEngine::Config base_signal_cfg_;
     QTrading::Intent::BasisArbitrageIntentBuilder::Config base_intent_cfg_;
     StrategyRuntimeConfig runtime_cfg_;
+    std::unordered_set<std::string> allowed_raw_symbols_;
     QTrading::Risk::SimpleRiskEngine& risk_engine_;
     QTrading::Execution::IExecutionEngine<MarketPtr>& execution_engine_;
     QTrading::Monitoring::SimpleMonitoring& monitoring_;

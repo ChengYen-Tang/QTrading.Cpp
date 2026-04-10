@@ -641,6 +641,85 @@ TEST(MarketExecutionEngineTests, CarryBalanceTwoSidedRebalanceClipsLargerSide)
     EXPECT_NEAR(perp->qty, 1000.0 / 10000.0, 1e-9);
 }
 
+TEST(MarketExecutionEngineTests, BasisTwoSidedInvariantAppliesEvenAtHighUrgency)
+{
+    auto ex = std::make_shared<FakeExchange>();
+
+    QTrading::Execution::MarketExecutionEngine::Config cfg;
+    cfg.min_notional = 10.0;
+    cfg.carry_rebalance_cooldown_ms = 0;
+    cfg.carry_max_rebalance_step_ratio = 1.0;
+    cfg.carry_max_participation_rate = 1.0;
+    cfg.carry_require_two_sided_rebalance = true;
+
+    QTrading::Execution::MarketExecutionEngine engine(ex, cfg);
+
+    QTrading::Risk::RiskTarget target;
+    target.target_positions["BTCUSDT_PERP"] = -1000.0;
+    target.leverage["BTCUSDT_PERP"] = 2.0;
+
+    QTrading::Execution::ExecutionSignal signal;
+    signal.strategy = "basis_arbitrage";
+    signal.urgency = QTrading::Execution::ExecutionUrgency::High;
+
+    auto orders = engine.plan(target, signal, MakeMarket(1, "BTCUSDT_PERP", 10000.0));
+    EXPECT_TRUE(orders.empty());
+}
+
+TEST(MarketExecutionEngineTests, TwoSidedInvariantIsEnforcedPerPairNotGlobally)
+{
+    auto ex = std::make_shared<FakeExchange>();
+
+    QTrading::Execution::MarketExecutionEngine::Config cfg;
+    cfg.min_notional = 10.0;
+    cfg.carry_rebalance_cooldown_ms = 0;
+    cfg.carry_max_rebalance_step_ratio = 1.0;
+    cfg.carry_max_participation_rate = 1.0;
+    cfg.carry_require_two_sided_rebalance = true;
+    cfg.carry_balance_two_sided_rebalance = true;
+
+    QTrading::Execution::MarketExecutionEngine engine(ex, cfg);
+
+    QTrading::Risk::RiskTarget target;
+    target.target_positions["BTCUSDT_SPOT"] = 1000.0;
+    target.target_positions["BTCUSDT_PERP"] = -1000.0;
+    target.target_positions["APTUSDT_PERP"] = -1000.0;
+    target.leverage["BTCUSDT_SPOT"] = 1.0;
+    target.leverage["BTCUSDT_PERP"] = 2.0;
+    target.leverage["APTUSDT_PERP"] = 2.0;
+
+    QTrading::Execution::ExecutionSignal signal;
+    signal.strategy = "basis_arbitrage";
+    signal.urgency = QTrading::Execution::ExecutionUrgency::High;
+
+    auto market = std::make_shared<QTrading::Dto::Market::Binance::MultiKlineDto>();
+    market->Timestamp = 1;
+    market->symbols = std::make_shared<std::vector<std::string>>(
+        std::initializer_list<std::string>{ "BTCUSDT_SPOT", "BTCUSDT_PERP", "APTUSDT_PERP" });
+    market->trade_klines_by_id.resize(3);
+    market->trade_klines_by_id[0] =
+        QTrading::Dto::Market::Binance::KlineDto(1, 0, 0, 0, 10000.0, 0, 1, 0, 0, 0, 0);
+    market->trade_klines_by_id[1] =
+        QTrading::Dto::Market::Binance::KlineDto(1, 0, 0, 0, 10000.0, 0, 1, 0, 0, 0, 0);
+    market->trade_klines_by_id[2] =
+        QTrading::Dto::Market::Binance::KlineDto(1, 0, 0, 0, 10000.0, 0, 1, 0, 0, 0, 0);
+
+    auto orders = engine.plan(target, signal, market);
+
+    ASSERT_EQ(orders.size(), 2u);
+    bool has_btc_spot = false;
+    bool has_btc_perp = false;
+    bool has_apt_perp = false;
+    for (const auto& order : orders) {
+        has_btc_spot = has_btc_spot || order.symbol == "BTCUSDT_SPOT";
+        has_btc_perp = has_btc_perp || order.symbol == "BTCUSDT_PERP";
+        has_apt_perp = has_apt_perp || order.symbol == "APTUSDT_PERP";
+    }
+    EXPECT_TRUE(has_btc_spot);
+    EXPECT_TRUE(has_btc_perp);
+    EXPECT_FALSE(has_apt_perp);
+}
+
 TEST(MarketExecutionEngineTests, CarryMakerFirstUsesLimitOrderWhenGapIsSmall)
 {
     auto ex = std::make_shared<FakeExchange>();

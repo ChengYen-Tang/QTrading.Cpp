@@ -47,6 +47,26 @@ void ApplyBool(const rapidjson::Value* obj, const char* key, bool& out)
     out = member->value.GetBool();
 }
 
+void ApplyStringSet(
+    const rapidjson::Value* obj,
+    const char* key,
+    std::unordered_set<std::string>& out)
+{
+    if (obj == nullptr) {
+        return;
+    }
+    const auto member = obj->FindMember(key);
+    if (member == obj->MemberEnd() || !member->value.IsArray()) {
+        return;
+    }
+    out.clear();
+    for (const auto& item : member->value.GetArray()) {
+        if (item.IsString()) {
+            out.emplace(item.GetString());
+        }
+    }
+}
+
 template <typename T>
 void ApplyNumber(const rapidjson::Value* obj, const char* key, T& out)
 {
@@ -178,6 +198,13 @@ void ApplySharedStrategyConfigSections(
     ApplyNumber(runtime, "basis_multi_top_n", configs.runtime_cfg.basis_multi_top_n);
     ApplyNumber(runtime, "basis_multi_shard_size", configs.runtime_cfg.basis_multi_shard_size);
     ApplyNumber(runtime, "basis_multi_worker_count", configs.runtime_cfg.basis_multi_worker_count);
+    ApplyNumber(runtime, "basis_multi_min_score_ratio", configs.runtime_cfg.basis_multi_min_score_ratio);
+    ApplyNumber(runtime, "basis_multi_confidence_power", configs.runtime_cfg.basis_multi_confidence_power);
+    ApplyNumber(runtime, "basis_multi_max_pair_weight", configs.runtime_cfg.basis_multi_max_pair_weight);
+    ApplyNumber(runtime, "basis_pair_min_spot_quote_volume", configs.runtime_cfg.basis_pair_min_spot_quote_volume);
+    ApplyNumber(runtime, "basis_pair_min_perp_quote_volume", configs.runtime_cfg.basis_pair_min_perp_quote_volume);
+    ApplyNumber(runtime, "basis_pair_min_quote_volume_ratio", configs.runtime_cfg.basis_pair_min_quote_volume_ratio);
+    ApplyStringSet(runtime, "basis_allowed_raw_symbols", configs.runtime_cfg.basis_allowed_raw_symbols);
 }
 
 void ApplyBasisArbitrageSpecificConfigSections(

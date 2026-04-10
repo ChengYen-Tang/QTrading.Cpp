@@ -395,8 +395,10 @@ SignalDecision BasisArbitrageSignalEngine::on_market(
         out.confidence > 0.0 &&
         alpha_stats.has_value())
     {
+        const double exit_band_gain =
+            alpha_stats->stddev * std::max(0.0, alpha_stats->abs_z - cfg_.basis_mr_exit_z);
         const double expected_reversion_gain =
-            std::max(0.0, std::fabs(trade_basis_pct - alpha_stats->mean));
+            std::max(0.0, std::min(std::fabs(trade_basis_pct - alpha_stats->mean), exit_band_gain));
         const double borrow_cost =
             cfg_.basis_cost_borrow_apr * (cfg_.basis_cost_expected_hold_hours / kHoursPerYear);
         const double trading_cost =

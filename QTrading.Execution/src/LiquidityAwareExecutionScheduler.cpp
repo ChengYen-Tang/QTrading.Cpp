@@ -6,7 +6,9 @@
 #include <cmath>
 #include <limits>
 #include <string>
+#include <string_view>
 #include <unordered_map>
+#include <vector>
 
 namespace QTrading::Execution {
 namespace {
@@ -68,6 +70,30 @@ bool IsCarryLikeStrategy(const QTrading::Execution::ExecutionSignal& signal)
     const auto kind =
         QTrading::Contracts::ResolveStrategyKind(signal.strategy_kind, signal.strategy);
     return QTrading::Contracts::IsCarryLikeStrategy(kind);
+}
+
+bool EndsWith(const std::string& value, std::string_view suffix)
+{
+    return value.size() >= suffix.size() &&
+        value.compare(value.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
+std::string PairRootSymbol(const std::string& symbol)
+{
+    if (EndsWith(symbol, "_SPOT") || EndsWith(symbol, "_PERP")) {
+        return symbol.substr(0, symbol.size() - 5);
+    }
+    return symbol;
+}
+
+bool IsSpotOrPerpSymbol(const std::string& symbol)
+{
+    return EndsWith(symbol, "_SPOT") || EndsWith(symbol, "_PERP");
+}
+
+bool IsSpotSymbol(const std::string& symbol)
+{
+    return EndsWith(symbol, "_SPOT");
 }
 
 } // namespace
@@ -156,6 +182,10 @@ std::vector<ExecutionSlice> LiquidityAwareExecutionScheduler::BuildSlices(
         IsCarryLikeStrategy(signal) &&
         (!cfg_.carry_apply_only_low_urgency ||
          signal.urgency == ExecutionUrgency::Low);
+    const bool apply_pair_balancing =
+        IsCarryLikeStrategy(signal) &&
+        (!cfg_.carry_apply_only_low_urgency ||
+         signal.urgency == ExecutionUrgency::Low);
 
     if ((!apply_participation_cap && !apply_window_budget && !apply_increase_batching) ||
         !has_symbol_index_ ||
@@ -204,6 +234,19 @@ std::vector<ExecutionSlice> LiquidityAwareExecutionScheduler::BuildSlices(
         }
     }
 
+    struct PendingSlice {
+        ExecutionSlice slice{};
+        std::string root{};
+        double current_notional{ 0.0 };
+        double delta_notional{ 0.0 };
+        bool reduce_only{ false };
+        bool is_pair_leg{ false };
+        bool is_spot_leg{ false };
+    };
+
+    std::vector<PendingSlice> pending_slices;
+    pending_slices.reserve(parent_orders.size());
+
     for (const auto& parent : parent_orders) {
         double parent_target_notional = parent.target_notional;
         if (apply_increase_batching) {
@@ -246,12 +289,13 @@ std::vector<ExecutionSlice> LiquidityAwareExecutionScheduler::BuildSlices(
         }
 
         double slice_target_notional = parent_target_notional;
+        double current_notional = current_notional_by_symbol[parent.symbol];
+        double delta_notional = parent_target_notional - current_notional;
         const auto id_it = symbol_to_id_.find(parent.symbol);
         if (id_it != symbol_to_id_.end()) {
             const double quote_volume = QuoteVolumeFromId(market, id_it->second);
             if (quote_volume > 0.0) {
-                const double current_notional = current_notional_by_symbol[parent.symbol];
-                const double raw_delta = parent_target_notional - current_notional;
+                const double raw_delta = delta_notional;
                 const double confidence = Clamp01(signal.confidence);
                 double max_delta_notional = std::numeric_limits<double>::infinity();
 
@@ -330,17 +374,97 @@ std::vector<ExecutionSlice> LiquidityAwareExecutionScheduler::BuildSlices(
                 if (apply_window_budget) {
                     budget_consumed_notional_by_symbol_[parent.symbol] += std::fabs(clipped_delta);
                 }
+                delta_notional = clipped_delta;
                 slice_target_notional = current_notional + clipped_delta;
             }
         }
 
-        slices.push_back(
-            ExecutionSlice{
-                parent.ts_ms,
-                parent.symbol,
-                slice_target_notional,
-                parent.leverage,
+        pending_slices.push_back(
+            PendingSlice{
+                ExecutionSlice{
+                    parent.ts_ms,
+                    parent.symbol,
+                    slice_target_notional,
+                    parent.leverage,
+                },
+                PairRootSymbol(parent.symbol),
+                current_notional,
+                delta_notional,
+                (current_notional != 0.0) && ((current_notional * delta_notional) < 0.0),
+                IsSpotOrPerpSymbol(parent.symbol),
+                IsSpotSymbol(parent.symbol),
             });
+    }
+
+    if (apply_pair_balancing) {
+        struct PairState {
+            std::size_t spot_index = std::numeric_limits<std::size_t>::max();
+            std::size_t perp_index = std::numeric_limits<std::size_t>::max();
+            bool spot_non_reduce = false;
+            bool perp_non_reduce = false;
+        };
+
+        std::unordered_map<std::string, PairState> pair_states;
+        pair_states.reserve(pending_slices.size());
+        for (std::size_t i = 0; i < pending_slices.size(); ++i) {
+            const auto& pending = pending_slices[i];
+            if (!pending.is_pair_leg) {
+                continue;
+            }
+            auto& state = pair_states[pending.root];
+            if (pending.is_spot_leg) {
+                state.spot_index = i;
+                state.spot_non_reduce = !pending.reduce_only;
+            }
+            else {
+                state.perp_index = i;
+                state.perp_non_reduce = !pending.reduce_only;
+            }
+        }
+
+        for (const auto& [_, state] : pair_states) {
+            if (state.spot_index == std::numeric_limits<std::size_t>::max() ||
+                state.perp_index == std::numeric_limits<std::size_t>::max()) {
+                continue;
+            }
+            if (!state.spot_non_reduce || !state.perp_non_reduce) {
+                continue;
+            }
+
+            auto& spot = pending_slices[state.spot_index];
+            auto& perp = pending_slices[state.perp_index];
+            const double spot_abs = std::fabs(spot.delta_notional);
+            const double perp_abs = std::fabs(perp.delta_notional);
+            const bool opposite_direction =
+                (spot.delta_notional > 0.0 && perp.delta_notional < 0.0) ||
+                (spot.delta_notional < 0.0 && perp.delta_notional > 0.0);
+
+            if (spot_abs <= 0.0 || perp_abs <= 0.0 || !opposite_direction) {
+                spot.delta_notional = 0.0;
+                spot.slice.target_notional = spot.current_notional;
+                perp.delta_notional = 0.0;
+                perp.slice.target_notional = perp.current_notional;
+                continue;
+            }
+
+            const double balanced_abs = std::min(spot_abs, perp_abs);
+            if (balanced_abs < cfg_.carry_min_slice_notional_usdt) {
+                spot.delta_notional = 0.0;
+                spot.slice.target_notional = spot.current_notional;
+                perp.delta_notional = 0.0;
+                perp.slice.target_notional = perp.current_notional;
+                continue;
+            }
+
+            spot.delta_notional = std::copysign(balanced_abs, spot.delta_notional);
+            spot.slice.target_notional = spot.current_notional + spot.delta_notional;
+            perp.delta_notional = std::copysign(balanced_abs, perp.delta_notional);
+            perp.slice.target_notional = perp.current_notional + perp.delta_notional;
+        }
+    }
+
+    for (const auto& pending : pending_slices) {
+        slices.push_back(pending.slice);
     }
 
     return slices;

@@ -7,6 +7,7 @@
 #include "Signal/FundingCarrySignalEngine.hpp"
 
 #include <filesystem>
+#include <unordered_set>
 
 namespace QTrading::Strategy {
 
@@ -14,6 +15,13 @@ struct StrategyRuntimeConfig {
     std::size_t basis_multi_top_n = 3;
     std::size_t basis_multi_shard_size = 16;
     std::size_t basis_multi_worker_count = 0;
+    double basis_multi_min_score_ratio = 0.35;
+    double basis_multi_confidence_power = 1.0;
+    double basis_multi_max_pair_weight = 0.60;
+    double basis_pair_min_spot_quote_volume = 0.0;
+    double basis_pair_min_perp_quote_volume = 0.0;
+    double basis_pair_min_quote_volume_ratio = 0.0;
+    std::unordered_set<std::string> basis_allowed_raw_symbols;
 };
 
 struct StrategyModuleConfigs {
