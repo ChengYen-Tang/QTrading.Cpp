@@ -110,10 +110,19 @@
     "basis_pair_min_spot_quote_volume": 1.0,
     "basis_pair_min_perp_quote_volume": 1.0,
     "basis_pair_min_quote_volume_ratio": 0.0,
-    "basis_allowed_raw_symbols": [
-      "ZECUSDT",
-      "APEUSDT",
-      "HBARUSDT"
-    ]
+    "basis_quality_enabled": true,
+    "basis_quality_window_bars": 240,
+    "basis_quality_min_samples": 120,
+    "basis_quality_min_abs_basis_p95_pct": 0.0018,
+    "basis_quality_max_spot_zero_volume_share": 0.08,
+    "basis_quality_min_spot_perp_quote_ratio": 0.08,
+    "basis_quality_structural_min_samples": 1440,
+    "basis_quality_structural_min_abs_basis_mean_pct": 0.00075,
+    "basis_quality_structural_max_spot_zero_volume_share": 0.11,
+    "basis_quality_structural_max_spot_perp_quote_ratio": 0.50,
+    "basis_quality_structural_exception_max_spot_zero_volume_share": 0.16,
+    "basis_quality_structural_exception_min_abs_basis_mean_pct": 0.00110,
+    "basis_quality_structural_exception_max_spot_perp_quote_ratio": 0.50,
+    "basis_allowed_raw_symbols": []
   }
 }

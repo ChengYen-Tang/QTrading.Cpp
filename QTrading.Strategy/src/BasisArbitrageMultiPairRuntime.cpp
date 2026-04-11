@@ -20,6 +20,14 @@ double Clamp01(double value)
     return std::clamp(value, 0.0, 1.0);
 }
 
+double ClampNonNegativeFinite(double value)
+{
+    if (!std::isfinite(value) || value < 0.0) {
+        return 0.0;
+    }
+    return value;
+}
+
 double SignedOrderDeltaNotional(
     const QTrading::Execution::ExecutionOrder& order,
     double reference_price)
@@ -178,6 +186,44 @@ BasisArbitrageMultiPairRuntime::BasisArbitrageMultiPairRuntime(
         runtime_cfg_.basis_pair_min_quote_volume_ratio < 0.0) {
         runtime_cfg_.basis_pair_min_quote_volume_ratio = 0.0;
     }
+    runtime_cfg_.basis_quality_window_bars =
+        std::max<std::size_t>(runtime_cfg_.basis_quality_window_bars, 10);
+    runtime_cfg_.basis_quality_min_samples =
+        std::max<std::size_t>(runtime_cfg_.basis_quality_min_samples, 1);
+    runtime_cfg_.basis_quality_min_samples =
+        std::min(runtime_cfg_.basis_quality_min_samples, runtime_cfg_.basis_quality_window_bars);
+    if (!std::isfinite(runtime_cfg_.basis_quality_min_abs_basis_p95_pct) ||
+        runtime_cfg_.basis_quality_min_abs_basis_p95_pct < 0.0) {
+        runtime_cfg_.basis_quality_min_abs_basis_p95_pct = 0.0;
+    }
+    runtime_cfg_.basis_quality_max_spot_zero_volume_share =
+        Clamp01(runtime_cfg_.basis_quality_max_spot_zero_volume_share);
+    if (!std::isfinite(runtime_cfg_.basis_quality_min_spot_perp_quote_ratio) ||
+        runtime_cfg_.basis_quality_min_spot_perp_quote_ratio < 0.0) {
+        runtime_cfg_.basis_quality_min_spot_perp_quote_ratio = 0.0;
+    }
+    runtime_cfg_.basis_quality_structural_min_samples =
+        std::max<std::size_t>(runtime_cfg_.basis_quality_structural_min_samples, 0);
+    if (!std::isfinite(runtime_cfg_.basis_quality_structural_min_abs_basis_mean_pct) ||
+        runtime_cfg_.basis_quality_structural_min_abs_basis_mean_pct < 0.0) {
+        runtime_cfg_.basis_quality_structural_min_abs_basis_mean_pct = 0.0;
+    }
+    runtime_cfg_.basis_quality_structural_max_spot_zero_volume_share =
+        Clamp01(runtime_cfg_.basis_quality_structural_max_spot_zero_volume_share);
+    if (!std::isfinite(runtime_cfg_.basis_quality_structural_max_spot_perp_quote_ratio) ||
+        runtime_cfg_.basis_quality_structural_max_spot_perp_quote_ratio < 0.0) {
+        runtime_cfg_.basis_quality_structural_max_spot_perp_quote_ratio = 0.0;
+    }
+    runtime_cfg_.basis_quality_structural_exception_max_spot_zero_volume_share =
+        Clamp01(runtime_cfg_.basis_quality_structural_exception_max_spot_zero_volume_share);
+    if (!std::isfinite(runtime_cfg_.basis_quality_structural_exception_min_abs_basis_mean_pct) ||
+        runtime_cfg_.basis_quality_structural_exception_min_abs_basis_mean_pct < 0.0) {
+        runtime_cfg_.basis_quality_structural_exception_min_abs_basis_mean_pct = 0.0;
+    }
+    if (!std::isfinite(runtime_cfg_.basis_quality_structural_exception_max_spot_perp_quote_ratio) ||
+        runtime_cfg_.basis_quality_structural_exception_max_spot_perp_quote_ratio < 0.0) {
+        runtime_cfg_.basis_quality_structural_exception_max_spot_perp_quote_ratio = 0.0;
+    }
 }
 
 void BasisArbitrageMultiPairRuntime::InitializePairsIfNeeded(const MarketPtr& market)
@@ -225,6 +271,15 @@ void BasisArbitrageMultiPairRuntime::InitializePairsIfNeeded(const MarketPtr& ma
             perp_symbol,
             base_signal_cfg_,
             base_intent_cfg_);
+        if (runtime_cfg_.basis_quality_enabled) {
+            auto& quality = pair_runtime_states_.back().quality_state;
+            const std::size_t window_size =
+                std::max<std::size_t>(runtime_cfg_.basis_quality_window_bars, 1);
+            quality.abs_basis_window.assign(window_size, 0.0);
+            quality.abs_basis_scratch.assign(window_size, 0.0);
+            quality.quote_ratio_window.assign(window_size, 0.0);
+            quality.spot_zero_window.assign(window_size, 0);
+        }
         symbol_to_pair_index_.emplace(symbol, pair_index);
         symbol_to_pair_index_.emplace(perp_symbol, pair_index);
     }
@@ -513,10 +568,17 @@ void BasisArbitrageMultiPairRuntime::CollectActivePairsInShard(
     std::vector<PairSignalSnapshot>& out)
 {
     for (std::size_t i = shard.begin; i < shard.end; ++i) {
+        if (runtime_cfg_.basis_quality_enabled) {
+            UpdatePairQualityState(i, market);
+        }
+
+        auto signal = pair_runtime_states_[i].signal_engine.on_market(market);
+        if (runtime_cfg_.basis_quality_enabled && !PairPassesQualityGate(i)) {
+            continue;
+        }
         if (!PairHasTradableLiquidityThisCycle(i, market)) {
             continue;
         }
-        auto signal = pair_runtime_states_[i].signal_engine.on_market(market);
         if (signal.status != QTrading::Signal::SignalStatus::Active) {
             continue;
         }
@@ -525,6 +587,160 @@ void BasisArbitrageMultiPairRuntime::CollectActivePairsInShard(
             std::move(signal)
         });
     }
+}
+
+void BasisArbitrageMultiPairRuntime::UpdatePairQualityState(
+    std::size_t pair_index,
+    const MarketPtr& market)
+{
+    if (!runtime_cfg_.basis_quality_enabled ||
+        !market ||
+        pair_index >= pair_static_infos_.size() ||
+        pair_index >= pair_runtime_states_.size()) {
+        return;
+    }
+
+    const auto& pair = pair_static_infos_[pair_index];
+    auto& quality = pair_runtime_states_[pair_index].quality_state;
+    if (quality.abs_basis_window.empty()) {
+        const std::size_t window_size =
+            std::max<std::size_t>(runtime_cfg_.basis_quality_window_bars, 1);
+        quality.abs_basis_window.assign(window_size, 0.0);
+        quality.abs_basis_scratch.assign(window_size, 0.0);
+        quality.quote_ratio_window.assign(window_size, 0.0);
+        quality.spot_zero_window.assign(window_size, 0);
+        quality.next_index = 0;
+        quality.sample_count = 0;
+        quality.spot_zero_count = 0;
+        quality.quote_ratio_sum = 0.0;
+        quality.structural_sample_count = 0;
+        quality.structural_spot_zero_count = 0;
+        quality.structural_abs_basis_sum = 0.0;
+        quality.structural_quote_ratio_sum = 0.0;
+    }
+
+    bool spot_zero_volume = true;
+    double quote_ratio = 0.0;
+    double abs_basis_pct = 0.0;
+
+    if (pair.spot_market_id < market->trade_klines_by_id.size() &&
+        pair.perp_market_id < market->trade_klines_by_id.size()) {
+        const auto& spot = market->trade_klines_by_id[pair.spot_market_id];
+        const auto& perp = market->trade_klines_by_id[pair.perp_market_id];
+        if (spot.has_value() && perp.has_value() &&
+            spot->ClosePrice > 0.0 && perp->ClosePrice > 0.0) {
+            const double spot_quote_volume = ClampNonNegativeFinite(spot->QuoteVolume);
+            const double perp_quote_volume = ClampNonNegativeFinite(perp->QuoteVolume);
+            spot_zero_volume = !(spot_quote_volume > 0.0);
+            if (perp_quote_volume > 0.0) {
+                quote_ratio = spot_quote_volume / perp_quote_volume;
+            }
+            abs_basis_pct = std::fabs((perp->ClosePrice - spot->ClosePrice) / spot->ClosePrice);
+        }
+    }
+
+    const std::size_t capacity = quality.abs_basis_window.size();
+    if (capacity == 0) {
+        return;
+    }
+
+    const std::size_t slot = quality.next_index;
+    if (quality.sample_count == capacity) {
+        quality.spot_zero_count -= static_cast<std::size_t>(quality.spot_zero_window[slot]);
+        quality.quote_ratio_sum -= quality.quote_ratio_window[slot];
+    }
+    else {
+        ++quality.sample_count;
+    }
+
+    quality.abs_basis_window[slot] = ClampNonNegativeFinite(abs_basis_pct);
+    quality.quote_ratio_window[slot] = ClampNonNegativeFinite(quote_ratio);
+    quality.spot_zero_window[slot] = spot_zero_volume ? 1 : 0;
+    quality.spot_zero_count += static_cast<std::size_t>(quality.spot_zero_window[slot]);
+    quality.quote_ratio_sum += quality.quote_ratio_window[slot];
+    quality.next_index = (slot + 1) % capacity;
+    ++quality.structural_sample_count;
+    quality.structural_spot_zero_count += static_cast<std::size_t>(spot_zero_volume ? 1 : 0);
+    quality.structural_abs_basis_sum += ClampNonNegativeFinite(abs_basis_pct);
+    quality.structural_quote_ratio_sum += ClampNonNegativeFinite(quote_ratio);
+}
+
+bool BasisArbitrageMultiPairRuntime::PairPassesQualityGate(std::size_t pair_index)
+{
+    if (!runtime_cfg_.basis_quality_enabled ||
+        pair_index >= pair_runtime_states_.size()) {
+        return true;
+    }
+
+    auto& quality = pair_runtime_states_[pair_index].quality_state;
+    if (quality.sample_count < runtime_cfg_.basis_quality_min_samples) {
+        return false;
+    }
+
+    if (quality.abs_basis_scratch.size() < quality.sample_count) {
+        return false;
+    }
+    std::copy_n(
+        quality.abs_basis_window.begin(),
+        static_cast<std::ptrdiff_t>(quality.sample_count),
+        quality.abs_basis_scratch.begin());
+    const std::size_t p95_index =
+        static_cast<std::size_t>(std::ceil(static_cast<double>(quality.sample_count) * 0.95)) - 1;
+    auto nth = quality.abs_basis_scratch.begin() + static_cast<std::ptrdiff_t>(p95_index);
+    std::nth_element(
+        quality.abs_basis_scratch.begin(),
+        nth,
+        quality.abs_basis_scratch.begin() + static_cast<std::ptrdiff_t>(quality.sample_count));
+    const double abs_basis_p95 = *nth;
+    const double zero_volume_share =
+        static_cast<double>(quality.spot_zero_count) /
+        static_cast<double>(std::max<std::size_t>(quality.sample_count, 1));
+    const double avg_quote_ratio =
+        quality.quote_ratio_sum / static_cast<double>(std::max<std::size_t>(quality.sample_count, 1));
+    const double structural_abs_basis_mean =
+        quality.structural_abs_basis_sum /
+        static_cast<double>(std::max<std::size_t>(quality.structural_sample_count, 1));
+    const double structural_zero_volume_share =
+        static_cast<double>(quality.structural_spot_zero_count) /
+        static_cast<double>(std::max<std::size_t>(quality.structural_sample_count, 1));
+    const double structural_avg_quote_ratio =
+        quality.structural_quote_ratio_sum /
+        static_cast<double>(std::max<std::size_t>(quality.structural_sample_count, 1));
+
+    if (abs_basis_p95 < runtime_cfg_.basis_quality_min_abs_basis_p95_pct) {
+        return false;
+    }
+    if (zero_volume_share > runtime_cfg_.basis_quality_max_spot_zero_volume_share) {
+        return false;
+    }
+    if (avg_quote_ratio < runtime_cfg_.basis_quality_min_spot_perp_quote_ratio) {
+        return false;
+    }
+    if (runtime_cfg_.basis_quality_structural_min_samples > 0 &&
+        quality.structural_sample_count < runtime_cfg_.basis_quality_structural_min_samples) {
+        return false;
+    }
+    const bool structural_base_pass =
+        structural_abs_basis_mean >=
+            runtime_cfg_.basis_quality_structural_min_abs_basis_mean_pct &&
+        structural_zero_volume_share <=
+            runtime_cfg_.basis_quality_structural_max_spot_zero_volume_share &&
+        (runtime_cfg_.basis_quality_structural_max_spot_perp_quote_ratio <= 0.0 ||
+         structural_avg_quote_ratio <=
+            runtime_cfg_.basis_quality_structural_max_spot_perp_quote_ratio);
+
+    const bool structural_exception_pass =
+        structural_zero_volume_share >
+            runtime_cfg_.basis_quality_structural_max_spot_zero_volume_share &&
+        structural_zero_volume_share <=
+            runtime_cfg_.basis_quality_structural_exception_max_spot_zero_volume_share &&
+        structural_abs_basis_mean >=
+            runtime_cfg_.basis_quality_structural_exception_min_abs_basis_mean_pct &&
+        (runtime_cfg_.basis_quality_structural_exception_max_spot_perp_quote_ratio <= 0.0 ||
+         structural_avg_quote_ratio <=
+            runtime_cfg_.basis_quality_structural_exception_max_spot_perp_quote_ratio);
+
+    return structural_base_pass || structural_exception_pass;
 }
 
 bool BasisArbitrageMultiPairRuntime::PairHasTradableLiquidityThisCycle(

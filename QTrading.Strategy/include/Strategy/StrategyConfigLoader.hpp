@@ -21,6 +21,19 @@ struct StrategyRuntimeConfig {
     double basis_pair_min_spot_quote_volume = 0.0;
     double basis_pair_min_perp_quote_volume = 0.0;
     double basis_pair_min_quote_volume_ratio = 0.0;
+    bool basis_quality_enabled = false;
+    std::size_t basis_quality_window_bars = 240;
+    std::size_t basis_quality_min_samples = 120;
+    double basis_quality_min_abs_basis_p95_pct = 0.0;
+    double basis_quality_max_spot_zero_volume_share = 1.0;
+    double basis_quality_min_spot_perp_quote_ratio = 0.0;
+    std::size_t basis_quality_structural_min_samples = 0;
+    double basis_quality_structural_min_abs_basis_mean_pct = 0.0;
+    double basis_quality_structural_max_spot_zero_volume_share = 1.0;
+    double basis_quality_structural_max_spot_perp_quote_ratio = 0.0;
+    double basis_quality_structural_exception_max_spot_zero_volume_share = 1.0;
+    double basis_quality_structural_exception_min_abs_basis_mean_pct = 0.0;
+    double basis_quality_structural_exception_max_spot_perp_quote_ratio = 0.0;
     std::unordered_set<std::string> basis_allowed_raw_symbols;
 };
 

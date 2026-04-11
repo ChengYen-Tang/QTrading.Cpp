@@ -204,6 +204,19 @@ void ApplySharedStrategyConfigSections(
     ApplyNumber(runtime, "basis_pair_min_spot_quote_volume", configs.runtime_cfg.basis_pair_min_spot_quote_volume);
     ApplyNumber(runtime, "basis_pair_min_perp_quote_volume", configs.runtime_cfg.basis_pair_min_perp_quote_volume);
     ApplyNumber(runtime, "basis_pair_min_quote_volume_ratio", configs.runtime_cfg.basis_pair_min_quote_volume_ratio);
+    ApplyBool(runtime, "basis_quality_enabled", configs.runtime_cfg.basis_quality_enabled);
+    ApplyNumber(runtime, "basis_quality_window_bars", configs.runtime_cfg.basis_quality_window_bars);
+    ApplyNumber(runtime, "basis_quality_min_samples", configs.runtime_cfg.basis_quality_min_samples);
+    ApplyNumber(runtime, "basis_quality_min_abs_basis_p95_pct", configs.runtime_cfg.basis_quality_min_abs_basis_p95_pct);
+    ApplyNumber(runtime, "basis_quality_max_spot_zero_volume_share", configs.runtime_cfg.basis_quality_max_spot_zero_volume_share);
+    ApplyNumber(runtime, "basis_quality_min_spot_perp_quote_ratio", configs.runtime_cfg.basis_quality_min_spot_perp_quote_ratio);
+    ApplyNumber(runtime, "basis_quality_structural_min_samples", configs.runtime_cfg.basis_quality_structural_min_samples);
+    ApplyNumber(runtime, "basis_quality_structural_min_abs_basis_mean_pct", configs.runtime_cfg.basis_quality_structural_min_abs_basis_mean_pct);
+    ApplyNumber(runtime, "basis_quality_structural_max_spot_zero_volume_share", configs.runtime_cfg.basis_quality_structural_max_spot_zero_volume_share);
+    ApplyNumber(runtime, "basis_quality_structural_max_spot_perp_quote_ratio", configs.runtime_cfg.basis_quality_structural_max_spot_perp_quote_ratio);
+    ApplyNumber(runtime, "basis_quality_structural_exception_max_spot_zero_volume_share", configs.runtime_cfg.basis_quality_structural_exception_max_spot_zero_volume_share);
+    ApplyNumber(runtime, "basis_quality_structural_exception_min_abs_basis_mean_pct", configs.runtime_cfg.basis_quality_structural_exception_min_abs_basis_mean_pct);
+    ApplyNumber(runtime, "basis_quality_structural_exception_max_spot_perp_quote_ratio", configs.runtime_cfg.basis_quality_structural_exception_max_spot_perp_quote_ratio);
     ApplyStringSet(runtime, "basis_allowed_raw_symbols", configs.runtime_cfg.basis_allowed_raw_symbols);
 }
 

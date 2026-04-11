@@ -60,8 +60,24 @@ private:
     };
 
     struct PairRuntimeState {
+        struct QualityState {
+            std::vector<double> abs_basis_window;
+            std::vector<double> abs_basis_scratch;
+            std::vector<double> quote_ratio_window;
+            std::vector<unsigned char> spot_zero_window;
+            std::size_t next_index = 0;
+            std::size_t sample_count = 0;
+            std::size_t spot_zero_count = 0;
+            double quote_ratio_sum = 0.0;
+            std::size_t structural_sample_count = 0;
+            std::size_t structural_spot_zero_count = 0;
+            double structural_abs_basis_sum = 0.0;
+            double structural_quote_ratio_sum = 0.0;
+        };
+
         QTrading::Signal::BasisArbitrageSignalEngine signal_engine;
         QTrading::Intent::BasisArbitrageIntentBuilder intent_builder;
+        QualityState quality_state;
 
         PairRuntimeState(
             std::string spot_symbol,
@@ -96,6 +112,8 @@ private:
         const MarketPtr& market,
         const PairShard& shard,
         std::vector<PairSignalSnapshot>& out);
+    void UpdatePairQualityState(std::size_t pair_index, const MarketPtr& market);
+    bool PairPassesQualityGate(std::size_t pair_index);
     bool PairHasTradableLiquidityThisCycle(std::size_t pair_index, const MarketPtr& market) const;
     std::unordered_set<std::size_t> CollectExposedPairIndexes(const QTrading::Risk::AccountState& account) const;
     QTrading::Risk::RiskTarget ScaleRiskTarget(const QTrading::Risk::RiskTarget& input, double scale) const;
