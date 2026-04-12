@@ -28,6 +28,30 @@ double ClampNonNegativeFinite(double value)
     return value;
 }
 
+double SafeRatio(double numerator, double denominator)
+{
+    if (!(std::isfinite(numerator) && std::isfinite(denominator)) || denominator <= 0.0) {
+        return 0.0;
+    }
+    return numerator / denominator;
+}
+
+double RampUp(double value, double threshold)
+{
+    if (!(std::isfinite(value) && std::isfinite(threshold)) || threshold <= 0.0) {
+        return (value > 0.0) ? 1.0 : 0.0;
+    }
+    return Clamp01(value / threshold);
+}
+
+double RampDown(double value, double cap)
+{
+    if (!(std::isfinite(value) && std::isfinite(cap)) || cap <= 0.0) {
+        return 1.0;
+    }
+    return Clamp01(1.0 - SafeRatio(value, cap));
+}
+
 double SignedOrderDeltaNotional(
     const QTrading::Execution::ExecutionOrder& order,
     double reference_price)
@@ -174,6 +198,12 @@ BasisArbitrageMultiPairRuntime::BasisArbitrageMultiPairRuntime(
     }
     runtime_cfg_.basis_multi_max_pair_weight =
         std::clamp(runtime_cfg_.basis_multi_max_pair_weight, 0.0, 1.0);
+    runtime_cfg_.basis_multi_min_effective_quality_scale =
+        Clamp01(runtime_cfg_.basis_multi_min_effective_quality_scale);
+    if (!std::isfinite(runtime_cfg_.basis_multi_min_effective_allocator_score) ||
+        runtime_cfg_.basis_multi_min_effective_allocator_score < 0.0) {
+        runtime_cfg_.basis_multi_min_effective_allocator_score = 0.0;
+    }
     if (!std::isfinite(runtime_cfg_.basis_pair_min_spot_quote_volume) ||
         runtime_cfg_.basis_pair_min_spot_quote_volume < 0.0) {
         runtime_cfg_.basis_pair_min_spot_quote_volume = 0.0;
@@ -573,18 +603,43 @@ void BasisArbitrageMultiPairRuntime::CollectActivePairsInShard(
         }
 
         auto signal = pair_runtime_states_[i].signal_engine.on_market(market);
-        if (runtime_cfg_.basis_quality_enabled && !PairPassesQualityGate(i)) {
-            continue;
-        }
-        if (!PairHasTradableLiquidityThisCycle(i, market)) {
-            continue;
-        }
         if (signal.status != QTrading::Signal::SignalStatus::Active) {
             continue;
         }
+
+        const double quality_scale =
+            runtime_cfg_.basis_quality_enabled ? ComputePairQualityScale(i) : 1.0;
+        if (!(quality_scale > 0.0)) {
+            continue;
+        }
+
+        const double liquidity_scale = ComputePairLiquidityScale(i, market);
+        if (!(liquidity_scale > 0.0)) {
+            continue;
+        }
+
+        const double effective_quality_scale = std::sqrt(quality_scale * liquidity_scale);
+        if (effective_quality_scale < runtime_cfg_.basis_multi_min_effective_quality_scale) {
+            continue;
+        }
+
+        const double total_scale = std::sqrt(quality_scale * liquidity_scale);
+        signal.confidence = Clamp01(signal.confidence * total_scale);
+        signal.allocator_score =
+            std::max(0.0, signal.allocator_score * quality_scale * liquidity_scale);
+        if (signal.allocator_score < runtime_cfg_.basis_multi_min_effective_allocator_score) {
+            continue;
+        }
+        if (!(signal.confidence > 0.0) || !(signal.allocator_score > 0.0)) {
+            continue;
+        }
+
         out.push_back(PairSignalSnapshot{
             i,
-            std::move(signal)
+            std::move(signal),
+            0.0,
+            quality_scale,
+            liquidity_scale
         });
     }
 }
@@ -665,20 +720,20 @@ void BasisArbitrageMultiPairRuntime::UpdatePairQualityState(
     quality.structural_quote_ratio_sum += ClampNonNegativeFinite(quote_ratio);
 }
 
-bool BasisArbitrageMultiPairRuntime::PairPassesQualityGate(std::size_t pair_index)
+double BasisArbitrageMultiPairRuntime::ComputePairQualityScale(std::size_t pair_index)
 {
     if (!runtime_cfg_.basis_quality_enabled ||
         pair_index >= pair_runtime_states_.size()) {
-        return true;
+        return 1.0;
     }
 
     auto& quality = pair_runtime_states_[pair_index].quality_state;
     if (quality.sample_count < runtime_cfg_.basis_quality_min_samples) {
-        return false;
+        return 0.0;
     }
 
     if (quality.abs_basis_scratch.size() < quality.sample_count) {
-        return false;
+        return 0.0;
     }
     std::copy_n(
         quality.abs_basis_window.begin(),
@@ -707,83 +762,113 @@ bool BasisArbitrageMultiPairRuntime::PairPassesQualityGate(std::size_t pair_inde
         quality.structural_quote_ratio_sum /
         static_cast<double>(std::max<std::size_t>(quality.structural_sample_count, 1));
 
-    if (abs_basis_p95 < runtime_cfg_.basis_quality_min_abs_basis_p95_pct) {
-        return false;
-    }
-    if (zero_volume_share > runtime_cfg_.basis_quality_max_spot_zero_volume_share) {
-        return false;
-    }
-    if (avg_quote_ratio < runtime_cfg_.basis_quality_min_spot_perp_quote_ratio) {
-        return false;
-    }
     if (runtime_cfg_.basis_quality_structural_min_samples > 0 &&
         quality.structural_sample_count < runtime_cfg_.basis_quality_structural_min_samples) {
-        return false;
+        return 0.0;
     }
-    const bool structural_base_pass =
-        structural_abs_basis_mean >=
-            runtime_cfg_.basis_quality_structural_min_abs_basis_mean_pct &&
-        structural_zero_volume_share <=
-            runtime_cfg_.basis_quality_structural_max_spot_zero_volume_share &&
-        (runtime_cfg_.basis_quality_structural_max_spot_perp_quote_ratio <= 0.0 ||
-         structural_avg_quote_ratio <=
-            runtime_cfg_.basis_quality_structural_max_spot_perp_quote_ratio);
 
-    const bool structural_exception_pass =
-        structural_zero_volume_share >
-            runtime_cfg_.basis_quality_structural_max_spot_zero_volume_share &&
-        structural_zero_volume_share <=
-            runtime_cfg_.basis_quality_structural_exception_max_spot_zero_volume_share &&
-        structural_abs_basis_mean >=
-            runtime_cfg_.basis_quality_structural_exception_min_abs_basis_mean_pct &&
-        (runtime_cfg_.basis_quality_structural_exception_max_spot_perp_quote_ratio <= 0.0 ||
-         structural_avg_quote_ratio <=
-            runtime_cfg_.basis_quality_structural_exception_max_spot_perp_quote_ratio);
+    const double local_basis_scale =
+        RampUp(abs_basis_p95, runtime_cfg_.basis_quality_min_abs_basis_p95_pct);
+    const double local_zero_scale =
+        RampDown(zero_volume_share, runtime_cfg_.basis_quality_max_spot_zero_volume_share);
+    const double local_quote_scale =
+        RampUp(avg_quote_ratio, runtime_cfg_.basis_quality_min_spot_perp_quote_ratio);
+    const double local_scale =
+        local_basis_scale * local_zero_scale * local_quote_scale;
 
-    return structural_base_pass || structural_exception_pass;
+    const double structural_basis_scale =
+        RampUp(
+            structural_abs_basis_mean,
+            runtime_cfg_.basis_quality_structural_min_abs_basis_mean_pct);
+    const double structural_zero_scale =
+        RampDown(
+            structural_zero_volume_share,
+            runtime_cfg_.basis_quality_structural_max_spot_zero_volume_share);
+    double structural_quote_scale = 1.0;
+    if (runtime_cfg_.basis_quality_structural_max_spot_perp_quote_ratio > 0.0) {
+        structural_quote_scale =
+            RampDown(
+                structural_avg_quote_ratio,
+                runtime_cfg_.basis_quality_structural_max_spot_perp_quote_ratio);
+    }
+    const double structural_base_scale =
+        structural_basis_scale * structural_zero_scale * structural_quote_scale;
+
+    double structural_exception_scale = 0.0;
+    if (structural_zero_volume_share >
+        runtime_cfg_.basis_quality_structural_max_spot_zero_volume_share)
+    {
+        const double exception_zero_denominator =
+            std::max(
+                runtime_cfg_.basis_quality_structural_exception_max_spot_zero_volume_share -
+                    runtime_cfg_.basis_quality_structural_max_spot_zero_volume_share,
+                1e-12);
+        const double exception_zero_scale = Clamp01(
+            1.0 -
+            (structural_zero_volume_share -
+                runtime_cfg_.basis_quality_structural_max_spot_zero_volume_share) /
+                exception_zero_denominator);
+        const double exception_basis_scale =
+            RampUp(
+                structural_abs_basis_mean,
+                runtime_cfg_.basis_quality_structural_exception_min_abs_basis_mean_pct);
+        double exception_quote_scale = 1.0;
+        if (runtime_cfg_.basis_quality_structural_exception_max_spot_perp_quote_ratio > 0.0) {
+            exception_quote_scale =
+                RampDown(
+                    structural_avg_quote_ratio,
+                    runtime_cfg_.basis_quality_structural_exception_max_spot_perp_quote_ratio);
+        }
+        structural_exception_scale =
+            exception_zero_scale * exception_basis_scale * exception_quote_scale;
+    }
+
+    const double structural_scale =
+        std::max(structural_base_scale, structural_exception_scale);
+    return Clamp01(std::sqrt(local_scale * structural_scale));
 }
 
-bool BasisArbitrageMultiPairRuntime::PairHasTradableLiquidityThisCycle(
+double BasisArbitrageMultiPairRuntime::ComputePairLiquidityScale(
     std::size_t pair_index,
     const MarketPtr& market) const
 {
     if (!market || pair_index >= pair_static_infos_.size()) {
-        return false;
+        return 0.0;
     }
 
     const auto& pair = pair_static_infos_[pair_index];
     if (pair.spot_market_id >= market->trade_klines_by_id.size() ||
         pair.perp_market_id >= market->trade_klines_by_id.size()) {
-        return false;
+        return 0.0;
     }
 
     const auto& spot = market->trade_klines_by_id[pair.spot_market_id];
     const auto& perp = market->trade_klines_by_id[pair.perp_market_id];
     if (!spot.has_value() || !perp.has_value()) {
-        return false;
+        return 0.0;
     }
     if (!(spot->ClosePrice > 0.0) || !(perp->ClosePrice > 0.0)) {
-        return false;
+        return 0.0;
     }
 
     const double spot_quote_volume = std::max(0.0, spot->QuoteVolume);
     const double perp_quote_volume = std::max(0.0, perp->QuoteVolume);
-    if (spot_quote_volume < runtime_cfg_.basis_pair_min_spot_quote_volume ||
-        perp_quote_volume < runtime_cfg_.basis_pair_min_perp_quote_volume) {
-        return false;
-    }
+    const double spot_scale =
+        RampUp(spot_quote_volume, runtime_cfg_.basis_pair_min_spot_quote_volume);
+    const double perp_scale =
+        RampUp(perp_quote_volume, runtime_cfg_.basis_pair_min_perp_quote_volume);
 
+    double ratio_scale = 1.0;
     if (runtime_cfg_.basis_pair_min_quote_volume_ratio > 0.0) {
         if (!(perp_quote_volume > 0.0)) {
-            return false;
+            return 0.0;
         }
         const double ratio = spot_quote_volume / perp_quote_volume;
-        if (ratio < runtime_cfg_.basis_pair_min_quote_volume_ratio) {
-            return false;
-        }
+        ratio_scale =
+            RampUp(ratio, runtime_cfg_.basis_pair_min_quote_volume_ratio);
     }
 
-    return true;
+    return Clamp01(std::sqrt(spot_scale * perp_scale) * ratio_scale);
 }
 
 std::unordered_set<std::size_t> BasisArbitrageMultiPairRuntime::CollectExposedPairIndexes(

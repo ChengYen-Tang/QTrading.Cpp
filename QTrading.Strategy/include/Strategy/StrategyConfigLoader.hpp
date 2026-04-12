@@ -18,6 +18,8 @@ struct StrategyRuntimeConfig {
     double basis_multi_min_score_ratio = 0.35;
     double basis_multi_confidence_power = 1.0;
     double basis_multi_max_pair_weight = 0.60;
+    double basis_multi_min_effective_quality_scale = 0.0;
+    double basis_multi_min_effective_allocator_score = 0.0;
     double basis_pair_min_spot_quote_volume = 0.0;
     double basis_pair_min_perp_quote_volume = 0.0;
     double basis_pair_min_quote_volume_ratio = 0.0;

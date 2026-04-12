@@ -303,6 +303,8 @@ TEST(BasisArbitrageSignalEngineTests, CostAwareGateBlocksWeakNetEdge)
     cfg.basis_mr_entry_z = 1.0;
     cfg.basis_mr_exit_z = 0.2;
     cfg.basis_mr_max_abs_z = 10.0;
+    cfg.basis_mr_entry_persistence_bars = 1;
+    cfg.basis_mr_exit_persistence_bars = 1;
     cfg.basis_cost_gate_enabled = true;
     cfg.basis_cost_edge_threshold_pct = 0.0090;
     cfg.basis_cost_trading_cost_rate_per_leg = 0.0010;
@@ -342,6 +344,7 @@ TEST(BasisArbitrageSignalEngineTests, CostAwareGateCanUseFundingCarryAsEdgeBoost
     cfg.basis_cost_gate_enabled = true;
     cfg.basis_cost_edge_threshold_pct = 0.0100;
     cfg.basis_cost_trading_cost_rate_per_leg = 0.0002;
+    cfg.basis_cost_expected_hold_hours = 8.0;
     cfg.basis_cost_expected_funding_settlements = 1.0;
     cfg.basis_cost_include_funding = true;
     cfg.adaptive_confidence_enabled = false;
@@ -350,15 +353,22 @@ TEST(BasisArbitrageSignalEngineTests, CostAwareGateCanUseFundingCarryAsEdgeBoost
     QTrading::Signal::BasisArbitrageSignalEngine no_funding(cfg);
     QTrading::Signal::BasisArbitrageSignalEngine with_funding(cfg);
 
+    constexpr unsigned long long kWarmupStart = 30ull * 60ull * 60ull * 1000ull;
+    constexpr unsigned long long kSignalTs = kWarmupStart + 2000ull;
+
     for (unsigned long long i = 0; i < 10; ++i) {
-        (void)no_funding.on_market(MakeMarket(1000 + i, true, true, 100.0));
-        (void)with_funding.on_market(MakeMarket(1000 + i, true, true, 100.0));
+        (void)no_funding.on_market(MakeMarket(kWarmupStart + i, true, true, 100.0));
+        (void)with_funding.on_market(MakeMarket(kWarmupStart + i, true, true, 100.0));
     }
 
     const auto blocked =
-        no_funding.on_market(MakeMarket(2000, true, true, 101.0, std::nullopt, std::nullopt, std::nullopt));
-    const auto allowed =
-        with_funding.on_market(MakeMarket(2000, true, true, 101.0, std::nullopt, std::nullopt, 0.0020));
+        no_funding.on_market(MakeMarket(kSignalTs, true, true, 101.0, std::nullopt, std::nullopt, std::nullopt));
+    auto funded_market = MakeMarket(kSignalTs, true, true, 101.0, std::nullopt, std::nullopt, 0.0200);
+    funded_market->funding_by_id[1] =
+        QTrading::Dto::Market::Binance::FundingRateDto(
+            kSignalTs - 7ull * 60ull * 60ull * 1000ull,
+            0.0200);
+    const auto allowed = with_funding.on_market(funded_market);
 
     EXPECT_EQ(blocked.status, QTrading::Signal::SignalStatus::Inactive);
     EXPECT_EQ(allowed.status, QTrading::Signal::SignalStatus::Active);

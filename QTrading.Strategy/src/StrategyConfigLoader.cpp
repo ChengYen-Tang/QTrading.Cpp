@@ -183,13 +183,33 @@ void ApplySharedStrategyConfigSections(
     ApplyNumber(execution, "min_notional", configs.execution_cfg.min_notional);
     ApplyNumber(execution, "carry_rebalance_cooldown_ms", configs.execution_cfg.carry_rebalance_cooldown_ms);
     ApplyNumber(execution, "carry_max_rebalance_step_ratio", configs.execution_cfg.carry_max_rebalance_step_ratio);
+    ApplyNumber(execution, "carry_large_notional_step_ratio", configs.execution_cfg.carry_large_notional_step_ratio);
+    ApplyNumber(execution, "carry_large_notional_threshold", configs.execution_cfg.carry_large_notional_threshold);
+    ApplyNumber(execution, "carry_large_notional_cooldown_ms", configs.execution_cfg.carry_large_notional_cooldown_ms);
     ApplyNumber(execution, "carry_max_participation_rate", configs.execution_cfg.carry_max_participation_rate);
+    ApplyBool(execution, "carry_window_budget_enabled", configs.execution_cfg.carry_window_budget_enabled);
+    ApplyNumber(execution, "carry_window_budget_ms", configs.execution_cfg.carry_window_budget_ms);
+    ApplyNumber(execution, "carry_window_budget_participation_rate", configs.execution_cfg.carry_window_budget_participation_rate);
+    ApplyNumber(execution, "carry_bootstrap_gap_ratio", configs.execution_cfg.carry_bootstrap_gap_ratio);
+    ApplyNumber(execution, "carry_bootstrap_step_ratio", configs.execution_cfg.carry_bootstrap_step_ratio);
+    ApplyNumber(execution, "carry_bootstrap_participation_rate", configs.execution_cfg.carry_bootstrap_participation_rate);
+    ApplyNumber(execution, "carry_bootstrap_cooldown_ms", configs.execution_cfg.carry_bootstrap_cooldown_ms);
+    ApplyNumber(execution, "carry_min_rebalance_notional_ratio", configs.execution_cfg.carry_min_rebalance_notional_ratio);
+    ApplyNumber(execution, "carry_max_rebalances_per_day", configs.execution_cfg.carry_max_rebalances_per_day);
     ApplyBool(execution, "carry_maker_first_enabled", configs.execution_cfg.carry_maker_first_enabled);
     ApplyNumber(execution, "carry_maker_limit_offset_bps", configs.execution_cfg.carry_maker_limit_offset_bps);
     ApplyNumber(execution, "carry_maker_catchup_gap_ratio", configs.execution_cfg.carry_maker_catchup_gap_ratio);
     ApplyBool(execution, "carry_target_anchor_enabled", configs.execution_cfg.carry_target_anchor_enabled);
     ApplyNumber(execution, "carry_target_anchor_update_ratio", configs.execution_cfg.carry_target_anchor_update_ratio);
     ApplyBool(execution, "carry_confidence_adaptive_enabled", configs.execution_cfg.carry_confidence_adaptive_enabled);
+    ApplyNumber(execution, "carry_confidence_step_scale_min", configs.execution_cfg.carry_confidence_step_scale_min);
+    ApplyNumber(execution, "carry_confidence_step_scale_max", configs.execution_cfg.carry_confidence_step_scale_max);
+    ApplyNumber(execution, "carry_confidence_participation_scale_min", configs.execution_cfg.carry_confidence_participation_scale_min);
+    ApplyNumber(execution, "carry_confidence_participation_scale_max", configs.execution_cfg.carry_confidence_participation_scale_max);
+    ApplyNumber(execution, "carry_confidence_cooldown_scale_min", configs.execution_cfg.carry_confidence_cooldown_scale_min);
+    ApplyNumber(execution, "carry_confidence_cooldown_scale_max", configs.execution_cfg.carry_confidence_cooldown_scale_max);
+    ApplyBool(execution, "carry_require_two_sided_rebalance", configs.execution_cfg.carry_require_two_sided_rebalance);
+    ApplyBool(execution, "carry_balance_two_sided_rebalance", configs.execution_cfg.carry_balance_two_sided_rebalance);
 
     const rapidjson::Value* monitoring = FindObject(doc, "monitoring");
     ApplyNumber(monitoring, "max_open_orders_per_symbol", configs.monitoring_cfg.max_open_orders_per_symbol);
@@ -201,6 +221,8 @@ void ApplySharedStrategyConfigSections(
     ApplyNumber(runtime, "basis_multi_min_score_ratio", configs.runtime_cfg.basis_multi_min_score_ratio);
     ApplyNumber(runtime, "basis_multi_confidence_power", configs.runtime_cfg.basis_multi_confidence_power);
     ApplyNumber(runtime, "basis_multi_max_pair_weight", configs.runtime_cfg.basis_multi_max_pair_weight);
+    ApplyNumber(runtime, "basis_multi_min_effective_quality_scale", configs.runtime_cfg.basis_multi_min_effective_quality_scale);
+    ApplyNumber(runtime, "basis_multi_min_effective_allocator_score", configs.runtime_cfg.basis_multi_min_effective_allocator_score);
     ApplyNumber(runtime, "basis_pair_min_spot_quote_volume", configs.runtime_cfg.basis_pair_min_spot_quote_volume);
     ApplyNumber(runtime, "basis_pair_min_perp_quote_volume", configs.runtime_cfg.basis_pair_min_perp_quote_volume);
     ApplyNumber(runtime, "basis_pair_min_quote_volume_ratio", configs.runtime_cfg.basis_pair_min_quote_volume_ratio);
@@ -260,6 +282,10 @@ void ApplyBasisArbitrageSpecificConfigSections(
     ApplyNumber(signal, "basis_cost_risk_penalty_weight", configs.signal_cfg.basis_cost_risk_penalty_weight);
     ApplyNumber(signal, "basis_cost_trend_penalty_weight", configs.signal_cfg.basis_cost_trend_penalty_weight);
     ApplyBool(signal, "basis_cost_include_funding", configs.signal_cfg.basis_cost_include_funding);
+    ApplyNumber(signal, "basis_cost_common_move_penalty_window_bars", configs.signal_cfg.basis_cost_common_move_penalty_window_bars);
+    ApplyNumber(signal, "basis_cost_common_move_penalty_start_pct", configs.signal_cfg.basis_cost_common_move_penalty_start_pct);
+    ApplyNumber(signal, "basis_cost_common_move_penalty_full_pct", configs.signal_cfg.basis_cost_common_move_penalty_full_pct);
+    ApplyNumber(signal, "basis_cost_common_move_penalty_min_scale", configs.signal_cfg.basis_cost_common_move_penalty_min_scale);
 
     const rapidjson::Value* intent = FindObject(doc, "intent");
     ApplyBool(intent, "basis_directional_enabled", configs.intent_cfg.basis_directional_enabled);

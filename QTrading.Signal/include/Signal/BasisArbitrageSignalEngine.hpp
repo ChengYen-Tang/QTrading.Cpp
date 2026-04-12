@@ -28,6 +28,8 @@ private:
     QTrading::Signal::Support::PairSymbolIds symbol_ids_{};
     std::deque<double> basis_window_{};
     std::deque<double> basis_regime_window_{};
+    std::deque<double> spot_trade_close_window_{};
+    std::deque<double> perp_trade_close_window_{};
     bool alpha_ema_initialized_{ false };
     double basis_alpha_ema_short_{ 0.0 };
     double basis_alpha_ema_mid_{ 0.0 };

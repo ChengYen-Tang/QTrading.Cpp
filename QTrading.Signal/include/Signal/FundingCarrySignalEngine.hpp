@@ -244,6 +244,14 @@ public:
         double basis_cost_trend_penalty_weight = 0.0;
         /// @brief If true, observed perp funding contributes to net edge as carry side-effect.
         bool basis_cost_include_funding = true;
+        /// @brief Rolling lookback used to detect large common-mode spot/perp moves before basis entries.
+        std::size_t basis_cost_common_move_penalty_window_bars = 10;
+        /// @brief Average absolute common-mode return where basis common-move penalty starts ramping in.
+        double basis_cost_common_move_penalty_start_pct = 0.03;
+        /// @brief Average absolute common-mode return where basis common-move penalty reaches full strength.
+        double basis_cost_common_move_penalty_full_pct = 0.08;
+        /// @brief Minimum multiplier applied under full common-move penalty pressure.
+        double basis_cost_common_move_penalty_min_scale = 0.20;
     };
 
     explicit FundingCarrySignalEngine(Config cfg);

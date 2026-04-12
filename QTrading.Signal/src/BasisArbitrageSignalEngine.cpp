@@ -9,6 +9,7 @@ namespace QTrading::Signal {
 namespace {
 
 constexpr double kHoursPerYear = 365.0 * 24.0;
+constexpr uint64_t kFundingSettlementIntervalMs = 8ull * 60ull * 60ull * 1000ull;
 
 struct RollingStats {
     double mean{ 0.0 };
@@ -56,6 +57,19 @@ void UpdateEma(double value, double alpha, bool& initialized, double& ema)
         return;
     }
     ema = ema * (1.0 - alpha) + value * alpha;
+}
+
+template <typename T>
+void PushBounded(std::deque<T>& window, T value, std::size_t max_size)
+{
+    if (max_size == 0) {
+        window.clear();
+        return;
+    }
+    window.push_back(value);
+    while (window.size() > max_size) {
+        window.pop_front();
+    }
 }
 
 } // namespace
@@ -142,6 +156,24 @@ BasisArbitrageSignalEngine::BasisArbitrageSignalEngine(Config cfg)
     if (!std::isfinite(cfg_.basis_cost_trend_penalty_weight) || cfg_.basis_cost_trend_penalty_weight < 0.0) {
         cfg_.basis_cost_trend_penalty_weight = 0.0;
     }
+    cfg_.basis_cost_common_move_penalty_window_bars =
+        std::max<std::size_t>(cfg_.basis_cost_common_move_penalty_window_bars, 2);
+    if (!std::isfinite(cfg_.basis_cost_common_move_penalty_start_pct) ||
+        cfg_.basis_cost_common_move_penalty_start_pct < 0.0)
+    {
+        cfg_.basis_cost_common_move_penalty_start_pct = 0.0;
+    }
+    if (!std::isfinite(cfg_.basis_cost_common_move_penalty_full_pct) ||
+        cfg_.basis_cost_common_move_penalty_full_pct < cfg_.basis_cost_common_move_penalty_start_pct)
+    {
+        cfg_.basis_cost_common_move_penalty_full_pct =
+            cfg_.basis_cost_common_move_penalty_start_pct;
+    }
+    if (!std::isfinite(cfg_.basis_cost_common_move_penalty_min_scale)) {
+        cfg_.basis_cost_common_move_penalty_min_scale = 0.20;
+    }
+    cfg_.basis_cost_common_move_penalty_min_scale =
+        std::clamp(cfg_.basis_cost_common_move_penalty_min_scale, 0.0, 1.0);
 }
 
 SignalDecision BasisArbitrageSignalEngine::on_market(
@@ -169,6 +201,26 @@ SignalDecision BasisArbitrageSignalEngine::on_market(
         return out;
     }
     const double trade_basis_pct = *trade_basis_pct_opt;
+    if (symbol_ids_.spot_id >= market->trade_klines_by_id.size() ||
+        symbol_ids_.perp_id >= market->trade_klines_by_id.size() ||
+        !market->trade_klines_by_id[symbol_ids_.spot_id].has_value() ||
+        !market->trade_klines_by_id[symbol_ids_.perp_id].has_value())
+    {
+        out.status = SignalStatus::Inactive;
+        return out;
+    }
+    const double spot_trade_close =
+        market->trade_klines_by_id[symbol_ids_.spot_id]->ClosePrice;
+    const double perp_trade_close =
+        market->trade_klines_by_id[symbol_ids_.perp_id]->ClosePrice;
+    PushBounded(
+        spot_trade_close_window_,
+        spot_trade_close,
+        cfg_.basis_cost_common_move_penalty_window_bars);
+    PushBounded(
+        perp_trade_close_window_,
+        perp_trade_close,
+        cfg_.basis_cost_common_move_penalty_window_bars);
 
     const std::size_t ema_long_period = std::max<std::size_t>(cfg_.basis_mr_window_bars, 3);
     const std::size_t ema_mid_period = std::max<std::size_t>(ema_long_period / 3, 2);
@@ -395,10 +447,12 @@ SignalDecision BasisArbitrageSignalEngine::on_market(
         out.confidence > 0.0 &&
         alpha_stats.has_value())
     {
+        const double dislocation_abs =
+            std::max(0.0, std::fabs(trade_basis_pct - alpha_stats->mean));
         const double exit_band_gain =
             alpha_stats->stddev * std::max(0.0, alpha_stats->abs_z - cfg_.basis_mr_exit_z);
         const double expected_reversion_gain =
-            std::max(0.0, std::min(std::fabs(trade_basis_pct - alpha_stats->mean), exit_band_gain));
+            std::max(0.0, std::min(dislocation_abs, exit_band_gain));
         const double borrow_cost =
             cfg_.basis_cost_borrow_apr * (cfg_.basis_cost_expected_hold_hours / kHoursPerYear);
         const double trading_cost =
@@ -420,11 +474,30 @@ SignalDecision BasisArbitrageSignalEngine::on_market(
         {
             const auto& funding_opt = market->funding_by_id[symbol_ids_.perp_id];
             if (funding_opt.has_value() && std::isfinite(funding_opt->Rate)) {
+                double funding_capture_scale = 0.0;
+                const double expected_hold_ms =
+                    std::max(0.0, cfg_.basis_cost_expected_hold_hours * 60.0 * 60.0 * 1000.0);
+                if (expected_hold_ms > 0.0) {
+                    const uint64_t elapsed_since_settlement_ms =
+                        (out.ts_ms >= funding_opt->FundingTime)
+                        ? (out.ts_ms - funding_opt->FundingTime)
+                        : 0ull;
+                    const uint64_t capped_elapsed_ms =
+                        std::min<uint64_t>(elapsed_since_settlement_ms, kFundingSettlementIntervalMs);
+                    const double time_to_next_settlement_ms =
+                        static_cast<double>(kFundingSettlementIntervalMs - capped_elapsed_ms);
+                    funding_capture_scale =
+                        std::clamp(
+                            (expected_hold_ms - time_to_next_settlement_ms) / expected_hold_ms,
+                            0.0,
+                            1.0);
+                }
                 const double direction = (trade_basis_pct >= 0.0) ? 1.0 : -1.0;
                 funding_edge =
                     direction *
                     funding_opt->Rate *
-                    cfg_.basis_cost_expected_funding_settlements;
+                    cfg_.basis_cost_expected_funding_settlements *
+                    funding_capture_scale;
             }
         }
 
@@ -434,7 +507,6 @@ SignalDecision BasisArbitrageSignalEngine::on_market(
             borrow_cost -
             trading_cost -
             risk_penalty;
-        out.allocator_score = net_edge;
 
         if (net_edge <= cfg_.basis_cost_edge_threshold_pct) {
             mr_active_ = false;
@@ -452,6 +524,86 @@ SignalDecision BasisArbitrageSignalEngine::on_market(
                 cfg_.basis_cost_edge_threshold_pct + 1e-12);
         const double edge_scale = std::clamp(net_edge / gross_edge, 0.0, 1.0);
         out.confidence = std::clamp(out.confidence * edge_scale, 0.0, 1.0);
+
+        const double score_cost_base =
+            std::max(
+                trading_cost + borrow_cost + risk_penalty,
+                cfg_.basis_cost_edge_threshold_pct + 1e-12);
+        const double net_margin =
+            std::max(0.0, net_edge - cfg_.basis_cost_edge_threshold_pct);
+        const double cost_efficiency =
+            std::clamp(net_margin / score_cost_base, 0.0, 2.0) * 0.5;
+        const double capture_efficiency =
+            (dislocation_abs > 0.0)
+            ? std::clamp(expected_reversion_gain / dislocation_abs, 0.0, 1.0)
+            : 0.0;
+        const double z_span =
+            std::max(cfg_.basis_mr_max_abs_z - cfg_.basis_mr_entry_z, 1e-12);
+        const double z_intensity =
+            cfg_.basis_mr_enabled
+            ? std::clamp((alpha_stats->abs_z - cfg_.basis_mr_entry_z) / z_span, 0.0, 1.0)
+            : 1.0;
+        const double z_freshness =
+            cfg_.basis_mr_enabled
+            ? std::clamp(alpha_stats->abs_z / std::max(cfg_.basis_mr_entry_z, 1e-12), 0.0, 1.0)
+            : 1.0;
+        double common_move_scale = 1.0;
+        double common_move_abs = 0.0;
+        bool common_move_same_direction = false;
+        if (spot_trade_close_window_.size() >= cfg_.basis_cost_common_move_penalty_window_bars &&
+            perp_trade_close_window_.size() >= cfg_.basis_cost_common_move_penalty_window_bars)
+        {
+            const double spot_base =
+                std::max(std::fabs(spot_trade_close_window_.front()), 1e-12);
+            const double perp_base =
+                std::max(std::fabs(perp_trade_close_window_.front()), 1e-12);
+            const double spot_return = (spot_trade_close / spot_base) - 1.0;
+            const double perp_return = (perp_trade_close / perp_base) - 1.0;
+            common_move_same_direction = (std::signbit(spot_return) == std::signbit(perp_return));
+            if (common_move_same_direction) {
+                common_move_abs =
+                    0.5 * (std::fabs(spot_return) + std::fabs(perp_return));
+                if (common_move_abs > cfg_.basis_cost_common_move_penalty_start_pct) {
+                    const double span =
+                        std::max(
+                            cfg_.basis_cost_common_move_penalty_full_pct -
+                            cfg_.basis_cost_common_move_penalty_start_pct,
+                            1e-12);
+                    const double progress =
+                        std::clamp(
+                            (common_move_abs - cfg_.basis_cost_common_move_penalty_start_pct) / span,
+                            0.0,
+                            1.0);
+                    common_move_scale =
+                        1.0 -
+                        (1.0 - cfg_.basis_cost_common_move_penalty_min_scale) * progress;
+                }
+            }
+        }
+        if (common_move_same_direction &&
+            cfg_.basis_cost_common_move_penalty_full_pct > 0.0 &&
+            common_move_abs >= cfg_.basis_cost_common_move_penalty_full_pct)
+        {
+            mr_active_ = false;
+            mr_entry_streak_ = 0;
+            mr_exit_streak_ = 0;
+            mr_last_exit_ts_ = out.ts_ms;
+            out.status = SignalStatus::Inactive;
+            out.confidence = 0.0;
+            return out;
+        }
+        const double trend_efficiency =
+            std::clamp(1.0 - normalized_trend_pressure, 0.0, 1.0);
+        out.confidence = std::clamp(out.confidence * common_move_scale, 0.0, 1.0);
+        const double score_quality =
+            std::max(0.0, cost_efficiency) *
+            std::max(0.0, capture_efficiency) *
+            std::max(0.0, z_freshness) *
+            std::max(0.0, common_move_scale) *
+            std::max(0.0, 0.25 + 0.75 * z_intensity) *
+            std::max(0.0, 0.25 + 0.75 * trend_efficiency);
+        out.allocator_score =
+            std::max(0.0, net_edge * out.confidence * score_quality);
     }
     else if (alpha_stats.has_value()) {
         out.allocator_score =

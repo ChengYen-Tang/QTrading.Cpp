@@ -91,6 +91,8 @@ private:
         std::size_t pair_index = 0;
         QTrading::Signal::SignalDecision signal;
         double portfolio_weight = 0.0;
+        double quality_scale = 1.0;
+        double liquidity_scale = 1.0;
     };
     struct PairShard {
         std::size_t begin = 0;
@@ -113,8 +115,8 @@ private:
         const PairShard& shard,
         std::vector<PairSignalSnapshot>& out);
     void UpdatePairQualityState(std::size_t pair_index, const MarketPtr& market);
-    bool PairPassesQualityGate(std::size_t pair_index);
-    bool PairHasTradableLiquidityThisCycle(std::size_t pair_index, const MarketPtr& market) const;
+    double ComputePairQualityScale(std::size_t pair_index);
+    double ComputePairLiquidityScale(std::size_t pair_index, const MarketPtr& market) const;
     std::unordered_set<std::size_t> CollectExposedPairIndexes(const QTrading::Risk::AccountState& account) const;
     QTrading::Risk::RiskTarget ScaleRiskTarget(const QTrading::Risk::RiskTarget& input, double scale) const;
     void MergeRiskTarget(const QTrading::Risk::RiskTarget& input, QTrading::Risk::RiskTarget& merged) const;

@@ -47,7 +47,11 @@
     "basis_cost_trading_cost_rate_per_leg": 0.0002,
     "basis_cost_risk_penalty_weight": 0.0005,
     "basis_cost_trend_penalty_weight": 0.0004,
-    "basis_cost_include_funding": true
+    "basis_cost_include_funding": true,
+    "basis_cost_common_move_penalty_window_bars": 10,
+    "basis_cost_common_move_penalty_start_pct": 0.015,
+    "basis_cost_common_move_penalty_full_pct": 0.035,
+    "basis_cost_common_move_penalty_min_scale": 0.05
   },
   "intent": {
     "spot_symbol": "BTCUSDT_SPOT",
@@ -107,6 +111,8 @@
     "basis_multi_min_score_ratio": 0.65,
     "basis_multi_confidence_power": 1.5,
     "basis_multi_max_pair_weight": 0.55,
+    "basis_multi_min_effective_quality_scale": 0.65,
+    "basis_multi_min_effective_allocator_score": 0.0,
     "basis_pair_min_spot_quote_volume": 1.0,
     "basis_pair_min_perp_quote_volume": 1.0,
     "basis_pair_min_quote_volume_ratio": 0.0,
