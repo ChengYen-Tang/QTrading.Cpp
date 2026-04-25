@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Contracts/StrategyIdentity.hpp"
+
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -28,8 +30,12 @@ struct TradeIntent {
     std::string intent_id;
     /// @brief Strategy identifier.
     std::string strategy;
+    /// @brief Typed strategy identity for downstream policy routing.
+    QTrading::Contracts::StrategyKind strategy_kind = QTrading::Contracts::StrategyKind::Unknown;
     /// @brief Structure name (e.g., delta_neutral_carry).
     std::string structure;
+    /// @brief Typed trade structure for downstream policy routing.
+    QTrading::Contracts::TradeStructureKind structure_kind = QTrading::Contracts::TradeStructureKind::Unknown;
     /// @brief Position mode (hedge/oneway).
     std::string position_mode;
     /// @brief Urgency hint.

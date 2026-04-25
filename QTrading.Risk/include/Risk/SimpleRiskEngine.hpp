@@ -12,7 +12,7 @@
 namespace QTrading::Risk {
 
 /// @brief Basic risk engine using fixed notional and leverage caps.
-class SimpleRiskEngine final : public IRiskEngine<
+class SimpleRiskEngine : public IRiskEngine<
     std::shared_ptr<QTrading::Dto::Market::Binance::MultiKlineDto>> {
 public:
     struct Config {
@@ -56,6 +56,18 @@ public:
         uint64_t basis_overlay_refresh_ms = 8ull * 60ull * 60ull * 1000ull;
         /// @brief EMA alpha for basis level estimation (0..1).
         double basis_level_ema_alpha = 0.05;
+        /// @brief Enable directional basis alpha overlay (basis-arbitrage strategy only).
+        ///        This is a continuous size scaler, not a hard gate.
+        bool basis_alpha_overlay_enabled = false;
+        /// @brief Center basis level for directional overlay (typically 0.0).
+        double basis_alpha_overlay_center_pct = 0.0;
+        /// @brief Basis band used to normalize overlay strength (>0).
+        ///        |basis-center| >= band means full up/down overlay effect.
+        double basis_alpha_overlay_band_pct = 0.01;
+        /// @brief Max upscale multiplier under favorable directional basis (>=1).
+        double basis_alpha_overlay_upscale_cap = 1.10;
+        /// @brief Max downscale multiplier under adverse directional basis (0..1].
+        double basis_alpha_overlay_downscale_floor = 0.85;
         /// @brief Force carry rebalance when gross exposure deviates from target by this ratio.
         ///        Example: 0.5 means rebalance if gross is outside [50%, 150%] of target.
         ///        Set to a very large value to disable.
@@ -156,11 +168,19 @@ public:
         double perp_liq_min_notional_scale = 0.25;
         /// @brief Optional explicit instrument typing; when empty, fallback inference is used.
         std::unordered_map<std::string, QTrading::Dto::Trading::InstrumentType> instrument_types;
+        /// @brief Mark-index spread soft-derisk start threshold (bps). <=0 disables soft derisk.
+        double mark_index_soft_derisk_start_bps = 0.0;
+        /// @brief Mark-index spread soft-derisk full threshold (bps). Must be >= start threshold.
+        double mark_index_soft_derisk_full_bps = 0.0;
+        /// @brief Minimum notional scale under full mark-index soft-derisk pressure (0..1].
+        double mark_index_soft_derisk_min_scale = 0.30;
+        /// @brief Mark-index spread hard guard threshold (bps). <=0 disables hard guard.
+        double mark_index_hard_guard_bps = 0.0;
     };
 
     explicit SimpleRiskEngine(Config cfg);
 
-    RiskTarget position(const QTrading::Intent::TradeIntent& intent,
+    virtual RiskTarget position(const QTrading::Intent::TradeIntent& intent,
         const AccountState& account,
         const std::shared_ptr<QTrading::Dto::Market::Binance::MultiKlineDto>& market) override;
 

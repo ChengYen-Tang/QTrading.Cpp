@@ -1,16 +1,11 @@
 ﻿#pragma once
 
-#include <concepts>
-#include <functional>
 #include <memory>
 #include <string>
 #include "Dto/Order.hpp"
 #include "Dto/Position.hpp"
 #include "Global.hpp"
 #include "Queue/Channel.hpp"
-
-using namespace QTrading::dto;
-using namespace QTrading::Utils::Queue;
 
 namespace QTrading::Infra::Exchanges {
 	/// @brief Interface for a generic exchange, parameterized on market data type.
@@ -20,13 +15,13 @@ namespace QTrading::Infra::Exchanges {
 	public:
 		/// @brief Get the channel for market data snapshots.
 		/// @return Shared pointer to the market data channel.
-		std::shared_ptr<Channel<TMarket>>                         get_market_channel()   const { return market_channel; }
+		std::shared_ptr<QTrading::Utils::Queue::Channel<TMarket>>                         get_market_channel()   const { return market_channel; }
 		/// @brief Get the channel for publishing position updates.
 		/// @return Shared pointer to the position channel.
-		std::shared_ptr<Channel<std::vector<Position>>>           get_position_channel() const { return position_channel; }
+		std::shared_ptr<QTrading::Utils::Queue::Channel<std::vector<QTrading::dto::Position>>>           get_position_channel() const { return position_channel; }
 		/// @brief Get the channel for publishing order updates.
 		/// @return Shared pointer to the order channel.
-		std::shared_ptr<Channel<std::vector<Order>>>              get_order_channel()    const { return order_channel; }
+		std::shared_ptr<QTrading::Utils::Queue::Channel<std::vector<QTrading::dto::Order>>>              get_order_channel()    const { return order_channel; }
 
 		/// @brief Advance the simulation by one step (e.g., one time tick).
 		/// @return True if new market data was emitted; false if data is exhausted.
@@ -34,10 +29,10 @@ namespace QTrading::Infra::Exchanges {
 
 		/// @brief Retrieve a snapshot of all current positions.
 		/// @return Reference to a vector of Position DTOs.
-		virtual const std::vector<Position>& get_all_positions()   const = 0;
+		virtual const std::vector<QTrading::dto::Position>& get_all_positions()   const = 0;
 		/// @brief Retrieve a snapshot of all open orders.
 		/// @return Reference to a vector of Order DTOs.
-		virtual const std::vector<Order>& get_all_open_orders() const = 0;
+		virtual const std::vector<QTrading::dto::Order>& get_all_open_orders() const = 0;
 
 		/// @brief Set leverage for a symbol (optional override).
 		/// @param symbol Trading symbol.
@@ -67,9 +62,9 @@ namespace QTrading::Infra::Exchanges {
 		}
 
 	protected:
-		std::shared_ptr<Channel<TMarket>>             market_channel;      ///< Channel for market snapshots.
-		std::shared_ptr<Channel<std::vector<Position>>> position_channel;  ///< Channel for position updates.
-		std::shared_ptr<Channel<std::vector<Order>>>    order_channel;     ///< Channel for order updates.
+		std::shared_ptr<QTrading::Utils::Queue::Channel<TMarket>>             market_channel;      ///< Channel for market snapshots.
+		std::shared_ptr<QTrading::Utils::Queue::Channel<std::vector<QTrading::dto::Position>>> position_channel;  ///< Channel for position updates.
+		std::shared_ptr<QTrading::Utils::Queue::Channel<std::vector<QTrading::dto::Order>>>    order_channel;     ///< Channel for order updates.
 
 		/// @brief Update the global timestamp for logging.
 		/// @param ts New timestamp value (e.g., milliseconds since epoch).

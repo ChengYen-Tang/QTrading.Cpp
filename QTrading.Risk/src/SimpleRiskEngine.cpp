@@ -1,5 +1,7 @@
 #include "Risk/SimpleRiskEngine.hpp"
 
+#include "Contracts/StrategyIdentity.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -19,11 +21,11 @@ std::optional<double> GetPriceBySymbol(
         return std::nullopt;
     }
 
-    if (market->symbols && !market->klines_by_id.empty()) {
+    if (market->symbols && !market->trade_klines_by_id.empty()) {
         const auto& symbols = *market->symbols;
         for (std::size_t i = 0; i < symbols.size(); ++i) {
-            if (symbols[i] == symbol && i < market->klines_by_id.size()) {
-                const auto& opt = market->klines_by_id[i];
+            if (symbols[i] == symbol && i < market->trade_klines_by_id.size()) {
+                const auto& opt = market->trade_klines_by_id[i];
                 if (opt.has_value()) {
                     return opt->ClosePrice;
                 }
@@ -32,12 +34,39 @@ std::optional<double> GetPriceBySymbol(
         }
     }
 
-    const auto& klines = market->klines;
-    auto it = klines.find(symbol);
-    if (it == klines.end() || !it->second.has_value()) {
+    return std::nullopt;
+}
+
+std::optional<double> GetReferencePriceBySymbol(
+    const std::shared_ptr<QTrading::Dto::Market::Binance::MultiKlineDto>& market,
+    const std::string& symbol,
+    bool use_mark_price)
+{
+    if (!market || !market->symbols) {
         return std::nullopt;
     }
-    return it->second->ClosePrice;
+
+    const auto& symbols = *market->symbols;
+    for (std::size_t i = 0; i < symbols.size(); ++i) {
+        if (symbols[i] != symbol) {
+            continue;
+        }
+
+        const auto& refs = use_mark_price ? market->mark_klines_by_id : market->index_klines_by_id;
+        if (i >= refs.size()) {
+            return std::nullopt;
+        }
+        const auto& opt = refs[i];
+        if (!opt.has_value()) {
+            return std::nullopt;
+        }
+        if (!std::isfinite(opt->ClosePrice) || opt->ClosePrice <= 0.0) {
+            return std::nullopt;
+        }
+        return opt->ClosePrice;
+    }
+
+    return std::nullopt;
 }
 
 std::optional<double> GetFundingRateBySymbol(
@@ -126,6 +155,14 @@ double ClampPositive(double value, double fallback)
     return value;
 }
 
+double ClampUnitOpenClosed(double value, double fallback)
+{
+    if (!std::isfinite(value) || value <= 0.0) {
+        return fallback;
+    }
+    return std::min(value, 1.0);
+}
+
 double EffectiveLegNotional(const QTrading::Risk::SimpleRiskEngine::Config& cfg)
 {
     const double desired = std::abs(cfg.notional_usdt);
@@ -166,6 +203,15 @@ SimpleRiskEngine::SimpleRiskEngine(Config cfg)
         cfg_.basis_overlay_downscale_floor = cfg_.basis_overlay_upscale_cap;
     }
     cfg_.basis_level_ema_alpha = ClampAlpha(cfg_.basis_level_ema_alpha);
+    cfg_.basis_alpha_overlay_band_pct = ClampPositive(cfg_.basis_alpha_overlay_band_pct, 0.01);
+    cfg_.basis_alpha_overlay_upscale_cap = ClampPositive(cfg_.basis_alpha_overlay_upscale_cap, 1.0);
+    if (cfg_.basis_alpha_overlay_upscale_cap < 1.0) {
+        cfg_.basis_alpha_overlay_upscale_cap = 1.0;
+    }
+    cfg_.basis_alpha_overlay_downscale_floor = Clamp01(cfg_.basis_alpha_overlay_downscale_floor);
+    if (cfg_.basis_alpha_overlay_downscale_floor <= 0.0) {
+        cfg_.basis_alpha_overlay_downscale_floor = 0.01;
+    }
     // Backward compatibility bridge:
     // If caller still uses the legacy fixed threshold only, map it to low/high anchors.
     if (cfg_.carry_size_min_gain_to_cost_low_confidence == 1.0 &&
@@ -228,6 +274,13 @@ SimpleRiskEngine::SimpleRiskEngine(Config cfg)
         cfg_.perp_liq_buffer_ceiling_ratio = cfg_.perp_liq_buffer_floor_ratio + 1.0;
     }
     cfg_.perp_liq_min_notional_scale = Clamp01(cfg_.perp_liq_min_notional_scale);
+    cfg_.mark_index_soft_derisk_start_bps = ClampNonNegative(cfg_.mark_index_soft_derisk_start_bps);
+    cfg_.mark_index_soft_derisk_full_bps = ClampNonNegative(cfg_.mark_index_soft_derisk_full_bps);
+    if (cfg_.mark_index_soft_derisk_full_bps < cfg_.mark_index_soft_derisk_start_bps) {
+        cfg_.mark_index_soft_derisk_full_bps = cfg_.mark_index_soft_derisk_start_bps;
+    }
+    cfg_.mark_index_soft_derisk_min_scale = ClampUnitOpenClosed(cfg_.mark_index_soft_derisk_min_scale, 0.30);
+    cfg_.mark_index_hard_guard_bps = ClampNonNegative(cfg_.mark_index_hard_guard_bps);
 
     for (const auto& kv : cfg_.instrument_types) {
         instrument_registry_.Set(kv.first, kv.second);
@@ -284,8 +337,17 @@ RiskTarget SimpleRiskEngine::position(const QTrading::Intent::TradeIntent& inten
         return out;
     }
 
-    const bool is_carry = (intent.strategy == "funding_carry") ||
-        (intent.structure == "delta_neutral_carry");
+    const auto strategy_kind =
+        QTrading::Contracts::ResolveStrategyKind(intent.strategy_kind, intent.strategy);
+    const auto structure_kind =
+        QTrading::Contracts::ResolveTradeStructureKind(intent.structure_kind, intent.structure);
+    const bool is_basis_arbitrage =
+        (strategy_kind == QTrading::Contracts::StrategyKind::BasisArbitrage) ||
+        (structure_kind == QTrading::Contracts::TradeStructureKind::DeltaNeutralBasis);
+    const bool is_carry = !is_basis_arbitrage &&
+        ((strategy_kind == QTrading::Contracts::StrategyKind::FundingCarry) ||
+            (structure_kind == QTrading::Contracts::TradeStructureKind::DeltaNeutralCarry));
+    const bool is_pair_trade = is_carry || is_basis_arbitrage;
     const double configured_leg_notional = EffectiveLegNotional(cfg_);
     const double carry_confidence = Clamp01(intent.confidence);
     const double confidence_notional_scale =
@@ -297,13 +359,15 @@ RiskTarget SimpleRiskEngine::position(const QTrading::Intent::TradeIntent& inten
         (cfg_.carry_confidence_max_leverage_scale - cfg_.carry_confidence_min_leverage_scale) *
         std::pow(carry_confidence, cfg_.carry_confidence_leverage_power);
 
-    if (is_carry && market && intent.legs.size() >= 2) {
+    if (is_pair_trade && market && intent.legs.size() >= 2) {
         double gross = 0.0;
         double net = 0.0;
         bool perp_is_short = false;
         bool perp_found = false;
         std::optional<double> spot_price_snapshot;
         std::optional<double> perp_price_snapshot;
+        std::optional<double> perp_mark_snapshot;
+        std::optional<double> perp_index_snapshot;
         std::string perp_symbol;
         std::unordered_map<std::string, double> current_notional;
         current_notional.reserve(intent.legs.size());
@@ -343,6 +407,47 @@ RiskTarget SimpleRiskEngine::position(const QTrading::Intent::TradeIntent& inten
             net += notional;
         }
 
+        if (!perp_symbol.empty()) {
+            perp_mark_snapshot = GetReferencePriceBySymbol(market, perp_symbol, true);
+            perp_index_snapshot = GetReferencePriceBySymbol(market, perp_symbol, false);
+        }
+        std::optional<double> mark_index_bps;
+        if (perp_mark_snapshot.has_value() &&
+            perp_index_snapshot.has_value() &&
+            std::abs(*perp_index_snapshot) > 1e-12)
+        {
+            mark_index_bps = ((*perp_mark_snapshot - *perp_index_snapshot) / *perp_index_snapshot) * 10000.0;
+        }
+        const bool mark_index_hard_guard =
+            (cfg_.mark_index_hard_guard_bps > 0.0) &&
+            mark_index_bps.has_value() &&
+            (std::abs(*mark_index_bps) >= cfg_.mark_index_hard_guard_bps);
+        if (mark_index_hard_guard) {
+            for (const auto& leg : intent.legs) {
+                out.target_positions[leg.instrument] = 0.0;
+                out.leverage[leg.instrument] = leverage_for_instrument_(leg.instrument);
+            }
+            return out;
+        }
+
+        double mark_index_soft_derisk_scale = 1.0;
+        if (cfg_.mark_index_soft_derisk_start_bps > 0.0 &&
+            mark_index_bps.has_value() &&
+            std::abs(*mark_index_bps) > cfg_.mark_index_soft_derisk_start_bps)
+        {
+            const double abs_bps = std::abs(*mark_index_bps);
+            if (cfg_.mark_index_soft_derisk_full_bps <= cfg_.mark_index_soft_derisk_start_bps + 1e-12) {
+                mark_index_soft_derisk_scale = cfg_.mark_index_soft_derisk_min_scale;
+            }
+            else {
+                const double progress = Clamp01(
+                    (abs_bps - cfg_.mark_index_soft_derisk_start_bps) /
+                    (cfg_.mark_index_soft_derisk_full_bps - cfg_.mark_index_soft_derisk_start_bps));
+                mark_index_soft_derisk_scale =
+                    1.0 - progress * (1.0 - cfg_.mark_index_soft_derisk_min_scale);
+            }
+        }
+
         if (spot_price_snapshot.has_value() && perp_price_snapshot.has_value()) {
             const double basis_pct = (*perp_price_snapshot - *spot_price_snapshot) / *spot_price_snapshot;
             if (!basis_level_ema_initialized_) {
@@ -363,10 +468,14 @@ RiskTarget SimpleRiskEngine::position(const QTrading::Intent::TradeIntent& inten
             spot_price = price_by_symbol.begin()->second;
         }
 
-        double dynamic_target_leg_notional = configured_leg_notional;
-        bool has_dynamic_target_leg_notional = false;
+        const double leg_cap = MaxLegCap(cfg_);
+        double dynamic_target_leg_notional = std::min(configured_leg_notional, leg_cap);
+        bool has_dynamic_target_leg_notional = is_basis_arbitrage;
         double effective_boost_max_scale = cfg_.carry_confidence_boost_max_scale;
-        if (cfg_.carry_confidence_boost_regime_aware_enabled && !perp_symbol.empty()) {
+        if (is_carry &&
+            cfg_.carry_confidence_boost_regime_aware_enabled &&
+            !perp_symbol.empty())
+        {
             const auto funding_snapshot = GetFundingSnapshotBySymbol(market, perp_symbol);
             if (funding_snapshot.has_value()) {
                 const uint64_t funding_time = funding_snapshot->FundingTime;
@@ -403,12 +512,11 @@ RiskTarget SimpleRiskEngine::position(const QTrading::Intent::TradeIntent& inten
                 effective_boost_max_scale *= Clamp01(regime_scale);
             }
         }
-        if (spot_price.has_value() && *spot_price > 0.0) {
-            // Build the same carry target that execution sizing will use later.
+        if ((is_carry || is_basis_arbitrage) && spot_price.has_value() && *spot_price > 0.0) {
+            // Build the same dynamic pair target that execution sizing will use later.
             // This avoids net-neutral early-return freezing rebalances when
             // auto-notional has grown far beyond the static configured notional.
             double target_leg_notional = configured_leg_notional;
-            const double leg_cap = MaxLegCap(cfg_);
 
             if (account.total_cash_balance.has_value() &&
                 std::isfinite(*account.total_cash_balance) &&
@@ -554,16 +662,22 @@ RiskTarget SimpleRiskEngine::position(const QTrading::Intent::TradeIntent& inten
                 target_leg_notional *= boost_scale;
             }
             target_leg_notional = std::min(target_leg_notional, leg_cap);
+            target_leg_notional *= mark_index_soft_derisk_scale;
 
             dynamic_target_leg_notional = target_leg_notional;
             has_dynamic_target_leg_notional = true;
+        }
+        else if (is_basis_arbitrage) {
+            dynamic_target_leg_notional = std::max(0.0, dynamic_target_leg_notional);
+            dynamic_target_leg_notional *= mark_index_soft_derisk_scale;
         }
 
         bool gross_deviation_exceeded = false;
         const double gross_reference_leg_notional =
             has_dynamic_target_leg_notional ? dynamic_target_leg_notional : configured_leg_notional;
         double effective_gross_deviation_trigger_ratio = cfg_.gross_deviation_trigger_ratio;
-        if (!std::isfinite(effective_gross_deviation_trigger_ratio) &&
+        if (is_pair_trade &&
+            !std::isfinite(effective_gross_deviation_trigger_ratio) &&
             (cfg_.dual_ledger_auto_notional_ratio > 0.0 ||
              cfg_.carry_allocator_leverage_model_enabled))
         {
@@ -589,8 +703,9 @@ RiskTarget SimpleRiskEngine::position(const QTrading::Intent::TradeIntent& inten
                 for (const auto& leg : intent.legs) {
                     out.target_positions[leg.instrument] = current_notional[leg.instrument];
                     if (is_perp_instrument_(leg.instrument)) {
-                        out.leverage[leg.instrument] =
-                            leverage_for_instrument_scaled_(leg.instrument, confidence_leverage_scale);
+                        out.leverage[leg.instrument] = is_pair_trade
+                            ? leverage_for_instrument_scaled_(leg.instrument, confidence_leverage_scale)
+                            : leverage_for_instrument_(leg.instrument);
                     }
                     else {
                         out.leverage[leg.instrument] = leverage_for_instrument_(leg.instrument);
@@ -607,7 +722,7 @@ RiskTarget SimpleRiskEngine::position(const QTrading::Intent::TradeIntent& inten
             if (perp_price.has_value()) {
                 const double basis_pct = (*perp_price - *spot_price) / *spot_price;
 
-                if (cfg_.basis_soft_cap_pct > 0.0 && cfg_.basis_soft_cap_pct < 1.0) {
+                if (is_carry && cfg_.basis_soft_cap_pct > 0.0 && cfg_.basis_soft_cap_pct < 1.0) {
                     const double basis_abs = std::abs(basis_pct);
                     const double raw_scale = 1.0 - (basis_abs / cfg_.basis_soft_cap_pct);
                     double level_scale = Clamp01(raw_scale);
@@ -617,7 +732,7 @@ RiskTarget SimpleRiskEngine::position(const QTrading::Intent::TradeIntent& inten
                     scale = std::min(scale, level_scale);
                 }
 
-                if (cfg_.neg_basis_scale < 1.0) {
+                if (is_carry && cfg_.neg_basis_scale < 1.0) {
                     if (cfg_.neg_basis_hysteresis_pct > 0.0) {
                         const double entry_threshold =
                             cfg_.neg_basis_threshold - cfg_.neg_basis_hysteresis_pct;
@@ -639,7 +754,7 @@ RiskTarget SimpleRiskEngine::position(const QTrading::Intent::TradeIntent& inten
                     }
                 }
 
-                if (cfg_.basis_overlay_cap > 0.0 && cfg_.basis_overlay_strength > 0.0) {
+                if (is_carry && cfg_.basis_overlay_cap > 0.0 && cfg_.basis_overlay_strength > 0.0) {
                     const bool refresh_overlay =
                         !basis_overlay_multiplier_initialized_ ||
                         cfg_.basis_overlay_refresh_ms == 0 ||
@@ -666,7 +781,7 @@ RiskTarget SimpleRiskEngine::position(const QTrading::Intent::TradeIntent& inten
                     scale *= basis_overlay_multiplier_;
                 }
 
-                if (cfg_.basis_trend_max_abs > 0.0 && cfg_.basis_trend_max_abs < 1.0) {
+                if (is_carry && cfg_.basis_trend_max_abs > 0.0 && cfg_.basis_trend_max_abs < 1.0) {
                     const double slope = basis_level_ema_ - basis_level_ema_prev_;
                     if (perp_found) {
                         const double adverse_slope = perp_is_short ? slope : -slope;
@@ -677,16 +792,51 @@ RiskTarget SimpleRiskEngine::position(const QTrading::Intent::TradeIntent& inten
                         }
                     }
                 }
+
+                if (is_basis_arbitrage && cfg_.basis_alpha_overlay_enabled) {
+                    const double centered_basis = basis_pct - cfg_.basis_alpha_overlay_center_pct;
+                    const double normalized = std::clamp(
+                        centered_basis / cfg_.basis_alpha_overlay_band_pct,
+                        -1.0,
+                        1.0);
+                    // For default receive-funding carry structure:
+                    // long spot + short perp prefers positive basis (perp rich to spot).
+                    const double directional = perp_is_short ? normalized : -normalized;
+                    double directional_scale = 1.0;
+                    if (directional >= 0.0) {
+                        directional_scale =
+                            1.0 + directional * (cfg_.basis_alpha_overlay_upscale_cap - 1.0);
+                    }
+                    else {
+                        directional_scale =
+                            1.0 + directional * (1.0 - cfg_.basis_alpha_overlay_downscale_floor);
+                    }
+                    directional_scale = std::clamp(
+                        directional_scale,
+                        cfg_.basis_alpha_overlay_downscale_floor,
+                        cfg_.basis_alpha_overlay_upscale_cap);
+                    scale *= directional_scale;
+                }
             }
 
-            const double base_qty = (target_leg_notional * scale) / *spot_price;
+            const double base_leg_notional = target_leg_notional * scale;
+            const bool enforce_linear_delta_neutral = is_basis_arbitrage;
+            const double base_qty = base_leg_notional / *spot_price;
             for (const auto& leg : intent.legs) {
                 const double price = price_by_symbol[leg.instrument];
                 const double sign = (leg.side == QTrading::Intent::TradeSide::Long) ? 1.0 : -1.0;
-                out.target_positions[leg.instrument] = base_qty * price * sign;
+                if (enforce_linear_delta_neutral) {
+                    // For USDT-margined linear perp, simulator quantity is base-asset quantity.
+                    // Match spot/perp coin exposure first, then derive each leg's notional.
+                    out.target_positions[leg.instrument] = base_qty * price * sign;
+                }
+                else {
+                    out.target_positions[leg.instrument] = base_qty * price * sign;
+                }
                 if (is_perp_instrument_(leg.instrument)) {
-                    out.leverage[leg.instrument] =
-                        leverage_for_instrument_scaled_(leg.instrument, confidence_leverage_scale);
+                    out.leverage[leg.instrument] = is_pair_trade
+                        ? leverage_for_instrument_scaled_(leg.instrument, confidence_leverage_scale)
+                        : leverage_for_instrument_(leg.instrument);
                 }
                 else {
                     out.leverage[leg.instrument] = leverage_for_instrument_(leg.instrument);
@@ -694,6 +844,7 @@ RiskTarget SimpleRiskEngine::position(const QTrading::Intent::TradeIntent& inten
             }
 
             const bool economics_gate_enabled =
+                is_carry &&
                 (cfg_.carry_size_cost_rate_per_leg > 0.0) &&
                 (cfg_.carry_size_expected_hold_settlements > 0.0) &&
                 !current_notional.empty();

@@ -20,6 +20,8 @@ namespace QTrading::Log::FileLogger::FeatherV2 {
         double rate{};
         bool has_mark_price{};
         double mark_price{};
+        int32_t mark_price_source{}; // 0=None, 1=Raw, 2=Interpolated
+        int32_t skip_reason{}; // 0=None, 1=MissingMarkPrice
         int64_t position_id{};
         bool is_long{};
         double quantity{};
@@ -40,6 +42,8 @@ namespace QTrading::Log::FileLogger::FeatherV2 {
                 arrow::field("rate", arrow::float64()),
                 arrow::field("has_mark_price", arrow::boolean()),
                 arrow::field("mark_price", arrow::float64()),
+                arrow::field("mark_price_source", arrow::int32()),
+                arrow::field("skip_reason", arrow::int32()),
                 arrow::field("position_id", arrow::int64()),
                 arrow::field("is_long", arrow::boolean()),
                 arrow::field("quantity", arrow::float64()),
@@ -61,11 +65,13 @@ namespace QTrading::Log::FileLogger::FeatherV2 {
             detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(7), e.rate);
             detail::AppendOrThrow(builder.GetFieldAs<arrow::BooleanBuilder>(8), e.has_mark_price);
             detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(9), e.mark_price);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::Int64Builder>(10), e.position_id);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::BooleanBuilder>(11), e.is_long);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(12), e.quantity);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(13), e.funding);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::UInt64Builder>(14), e.ts_local);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::Int32Builder>(10), e.mark_price_source);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::Int32Builder>(11), e.skip_reason);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::Int64Builder>(12), e.position_id);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::BooleanBuilder>(13), e.is_long);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(14), e.quantity);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(15), e.funding);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::UInt64Builder>(16), e.ts_local);
         }
     } // namespace FundingEvent
 

@@ -2,9 +2,7 @@ project(QTrading.Execution LANGUAGES CXX)
 
 add_library(QTrading.Execution.Library
   src/ExecutionModule.cpp
-  src/FundingCarryExecutionOrchestrator.cpp
-  src/FundingCarryExchangeGateway.cpp
-  src/FundingCarryStrategy.cpp
+  src/ExecutionOrchestrator.cpp
   src/LiquidityAwareExecutionScheduler.cpp
   src/MarketExecutionEngine.cpp
 )
@@ -14,10 +12,8 @@ target_include_directories(QTrading.Execution.Library PUBLIC
 )
 
 target_link_libraries(QTrading.Execution.Library PUBLIC
-  QTrading.Monitoring.Library
+  QTrading.Contracts.Library
   QTrading.Risk.Library
-  QTrading.Signal.Library
-  QTrading.Universe.Library
   QTrading.Infra.Library
 )
 

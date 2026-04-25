@@ -34,6 +34,12 @@ namespace QTrading::Log::FileLogger::FeatherV2 {
 
         int32_t event_type{};
         double wallet_delta{};
+        int32_t fee_asset{ -1 };
+        double fee_native{};
+        double fee_quote_equiv{};
+        double spot_cash_delta{};
+        double spot_inventory_delta{};
+        int32_t commission_model_source{ -1 };
 
         // Legacy perp-oriented snapshots.
         double wallet_balance_after{};
@@ -67,6 +73,12 @@ namespace QTrading::Log::FileLogger::FeatherV2 {
                 arrow::field("ledger", arrow::int32()),
                 arrow::field("event_type", arrow::int32()),
                 arrow::field("wallet_delta", arrow::float64()),
+                arrow::field("fee_asset", arrow::int32()),
+                arrow::field("fee_native", arrow::float64()),
+                arrow::field("fee_quote_equiv", arrow::float64()),
+                arrow::field("spot_cash_delta", arrow::float64()),
+                arrow::field("spot_inventory_delta", arrow::float64()),
+                arrow::field("commission_model_source", arrow::int32()),
                 arrow::field("wallet_balance_after", arrow::float64()),
                 arrow::field("margin_balance_after", arrow::float64()),
                 arrow::field("available_balance_after", arrow::float64()),
@@ -97,19 +109,25 @@ namespace QTrading::Log::FileLogger::FeatherV2 {
             detail::AppendOrThrow(builder.GetFieldAs<arrow::Int32Builder>(8), e.ledger);
             detail::AppendOrThrow(builder.GetFieldAs<arrow::Int32Builder>(9), e.event_type);
             detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(10), e.wallet_delta);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(11), e.wallet_balance_after);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(12), e.margin_balance_after);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(13), e.available_balance_after);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(14), e.perp_wallet_balance_after);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(15), e.perp_margin_balance_after);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(16), e.perp_available_balance_after);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(17), e.spot_wallet_balance_after);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(18), e.spot_available_balance_after);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(19), e.spot_inventory_value_after);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(20), e.spot_ledger_value_after);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(21), e.total_cash_balance_after);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(22), e.total_ledger_value_after);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::UInt64Builder>(23), e.ts_local);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::Int32Builder>(11), e.fee_asset);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(12), e.fee_native);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(13), e.fee_quote_equiv);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(14), e.spot_cash_delta);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(15), e.spot_inventory_delta);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::Int32Builder>(16), e.commission_model_source);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(17), e.wallet_balance_after);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(18), e.margin_balance_after);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(19), e.available_balance_after);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(20), e.perp_wallet_balance_after);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(21), e.perp_margin_balance_after);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(22), e.perp_available_balance_after);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(23), e.spot_wallet_balance_after);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(24), e.spot_available_balance_after);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(25), e.spot_inventory_value_after);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(26), e.spot_ledger_value_after);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(27), e.total_cash_balance_after);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(28), e.total_ledger_value_after);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::UInt64Builder>(29), e.ts_local);
         }
     } // namespace AccountEvent
 

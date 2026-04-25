@@ -1,29 +1,29 @@
 add_library(QTrading.Infra.Library STATIC
   Exchanges/BinanceSimulator/Account/Account.cpp
-  Exchanges/BinanceSimulator/Account/Account.IndexCache.cpp
-  Exchanges/BinanceSimulator/Account/Account.Opening.cpp
-  Exchanges/BinanceSimulator/Account/Account.UpdatePipeline.cpp
   Exchanges/BinanceSimulator/Account/AccountPolicies.cpp
-  Exchanges/BinanceSimulator/Spot/Account.SpotLedger.cpp
-  Exchanges/BinanceSimulator/Spot/Account.SpotPlacement.cpp
-  Exchanges/BinanceSimulator/Spot/Account.SpotCloseCancel.cpp
-  Exchanges/BinanceSimulator/Spot/Account.SpotOrderFlow.cpp
-  Exchanges/BinanceSimulator/Spot/Account.SpotApi.cpp
-  Exchanges/BinanceSimulator/Spot/SpotLedgerEngine.cpp
-  Exchanges/BinanceSimulator/Spot/BinanceExchange.SpotApi.cpp
-  Exchanges/BinanceSimulator/Perp/Account.PerpLedger.cpp
-  Exchanges/BinanceSimulator/Perp/Account.PerpPlacement.cpp
-  Exchanges/BinanceSimulator/Perp/Account.PerpCloseCancel.cpp
-  Exchanges/BinanceSimulator/Perp/Account.PerpClosePlacement.cpp
-  Exchanges/BinanceSimulator/Perp/Account.PerpOrderFlow.cpp
-  Exchanges/BinanceSimulator/Perp/Account.PerpLiquidation.cpp
-  Exchanges/BinanceSimulator/Perp/Account.PerpApi.cpp
-  Exchanges/BinanceSimulator/Perp/PerpLedgerEngine.cpp
-  Exchanges/BinanceSimulator/Perp/BinanceExchange.PerpApi.cpp
-  Exchanges/BinanceSimulator/DataProvider/MarketData.cpp
-  Exchanges/BinanceSimulator/DataProvider/FundingRateData.cpp
-  Exchanges/BinanceSimulator/Calibration/CalibrationMetrics.cpp
+  Data/Binance/FundingRateData.cpp
+  Data/Binance/MarketData.cpp
+  Exchanges/BinanceSimulator/Bootstrap/BinanceExchangeBootstrap.cpp
+  Exchanges/BinanceSimulator/Application/MarketReplayKernel.cpp
+  Exchanges/BinanceSimulator/Application/OrderCommandKernel.cpp
+  Exchanges/BinanceSimulator/Application/TerminationPolicy.cpp
+  Exchanges/BinanceSimulator/Application/StepKernel.cpp
+  Exchanges/BinanceSimulator/Domain/BinanceRejectSurface.cpp
+  Exchanges/BinanceSimulator/Domain/AccountPolicyExecutionService.cpp
+  Exchanges/BinanceSimulator/Domain/AsyncOrderLatencyScheduler.cpp
+  Exchanges/BinanceSimulator/Domain/FillSettlementEngine.cpp
+  Exchanges/BinanceSimulator/Domain/LiquidationEligibilityDecision.cpp
+  Exchanges/BinanceSimulator/Domain/LiquidationExecution.cpp
+  Exchanges/BinanceSimulator/Domain/MaintenanceMarginModel.cpp
+  Exchanges/BinanceSimulator/Domain/MatchingEngine.cpp
+  Exchanges/BinanceSimulator/Domain/OrderEntryService.cpp
+  Exchanges/BinanceSimulator/Domain/ReferencePriceResolver.cpp
+  Exchanges/BinanceSimulator/Output/ChannelPublisher.cpp
+  Exchanges/BinanceSimulator/Output/SnapshotBuilder.cpp
   Exchanges/BinanceSimulator/BinanceExchange.cpp
+  Exchanges/BinanceSimulator/Api/SpotApi.cpp
+  Exchanges/BinanceSimulator/Api/PerpApi.cpp
+  Exchanges/BinanceSimulator/Api/AccountApi.cpp
 )
 
 target_include_directories(QTrading.Infra.Library

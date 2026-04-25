@@ -1,17 +1,13 @@
 #include "ServiceHelpers.hpp"
 
-#include <rapidjson/document.h>
-
+#include <algorithm>
 #include <atomic>
 #include <csignal>
+#include <cmath>
 #include <cstdlib>
-#include <fstream>
 #include <iomanip>
 #include <iostream>
-#include <iterator>
-#include <stdexcept>
 #include <sstream>
-#include <type_traits>
 
 namespace QTrading::Service::Helpers {
 
@@ -22,66 +18,6 @@ std::atomic<bool> g_stop_requested{ false };
 void HandleSignal(int)
 {
     g_stop_requested.store(true, std::memory_order_relaxed);
-}
-
-const rapidjson::Value* FindObject(const rapidjson::Value& root, const char* key)
-{
-    if (!root.IsObject()) {
-        return nullptr;
-    }
-    const auto member = root.FindMember(key);
-    if (member == root.MemberEnd() || !member->value.IsObject()) {
-        return nullptr;
-    }
-    return &member->value;
-}
-
-void ApplyString(const rapidjson::Value* obj, const char* key, std::string& out)
-{
-    if (obj == nullptr) {
-        return;
-    }
-    const auto member = obj->FindMember(key);
-    if (member == obj->MemberEnd() || !member->value.IsString()) {
-        return;
-    }
-    out = member->value.GetString();
-}
-
-void ApplyBool(const rapidjson::Value* obj, const char* key, bool& out)
-{
-    if (obj == nullptr) {
-        return;
-    }
-    const auto member = obj->FindMember(key);
-    if (member == obj->MemberEnd() || !member->value.IsBool()) {
-        return;
-    }
-    out = member->value.GetBool();
-}
-
-template <typename T>
-void ApplyNumber(const rapidjson::Value* obj, const char* key, T& out)
-{
-    if (obj == nullptr) {
-        return;
-    }
-    const auto member = obj->FindMember(key);
-    if (member == obj->MemberEnd() || !member->value.IsNumber()) {
-        return;
-    }
-    if constexpr (std::is_same_v<T, double>) {
-        out = member->value.GetDouble();
-    }
-    else if constexpr (std::is_same_v<T, uint64_t>) {
-        out = static_cast<uint64_t>(member->value.GetUint64());
-    }
-    else if constexpr (std::is_same_v<T, uint32_t>) {
-        out = static_cast<uint32_t>(member->value.GetUint());
-    }
-    else if constexpr (std::is_same_v<T, std::size_t>) {
-        out = static_cast<std::size_t>(member->value.GetUint64());
-    }
 }
 
 } // namespace
@@ -179,89 +115,6 @@ QTrading::Log::LoggerBootstrapConfig BuildLoggerBootstrapConfig(
     };
 }
 
-void LoadFundingCarryConfig(
-    const std::filesystem::path& config_path,
-    QTrading::Signal::FundingCarrySignalEngine::Config& signal_cfg,
-    QTrading::Intent::FundingCarryIntentBuilder::Config& intent_cfg,
-    QTrading::Risk::SimpleRiskEngine::Config& risk_cfg,
-    QTrading::Execution::MarketExecutionEngine::Config& execution_cfg,
-    QTrading::Monitoring::SimpleMonitoring::Config& monitoring_cfg)
-{
-    std::ifstream in(config_path, std::ios::in | std::ios::binary);
-    if (!in) {
-        throw std::runtime_error("Failed to open funding-carry config: " + config_path.string());
-    }
-    const std::string json((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-
-    rapidjson::Document doc;
-    doc.Parse(json.c_str());
-    if (doc.HasParseError() || !doc.IsObject()) {
-        throw std::runtime_error("Invalid funding-carry config json: " + config_path.string());
-    }
-
-    const rapidjson::Value* signal = FindObject(doc, "signal");
-    ApplyString(signal, "spot_symbol", signal_cfg.spot_symbol);
-    ApplyString(signal, "perp_symbol", signal_cfg.perp_symbol);
-    ApplyNumber(signal, "entry_min_funding_rate", signal_cfg.entry_min_funding_rate);
-    ApplyNumber(signal, "exit_min_funding_rate", signal_cfg.exit_min_funding_rate);
-    ApplyNumber(signal, "hard_negative_funding_rate", signal_cfg.hard_negative_funding_rate);
-    ApplyNumber(signal, "entry_max_basis_pct", signal_cfg.entry_max_basis_pct);
-    ApplyNumber(signal, "exit_max_basis_pct", signal_cfg.exit_max_basis_pct);
-    ApplyNumber(signal, "cooldown_ms", signal_cfg.cooldown_ms);
-    ApplyNumber(signal, "min_hold_ms", signal_cfg.min_hold_ms);
-    ApplyNumber(signal, "entry_persistence_settlements", signal_cfg.entry_persistence_settlements);
-    ApplyNumber(signal, "exit_persistence_settlements", signal_cfg.exit_persistence_settlements);
-    ApplyBool(signal, "adaptive_confidence_enabled", signal_cfg.adaptive_confidence_enabled);
-    ApplyBool(signal, "adaptive_structure_enabled", signal_cfg.adaptive_structure_enabled);
-    ApplyBool(signal, "funding_nowcast_enabled", signal_cfg.funding_nowcast_enabled);
-    ApplyBool(signal, "funding_nowcast_use_for_entry_gate", signal_cfg.funding_nowcast_use_for_entry_gate);
-    ApplyBool(signal, "funding_nowcast_use_for_exit_gate", signal_cfg.funding_nowcast_use_for_exit_gate);
-    ApplyBool(signal, "pre_settlement_negative_exit_enabled", signal_cfg.pre_settlement_negative_exit_enabled);
-    ApplyNumber(signal, "pre_settlement_negative_exit_threshold", signal_cfg.pre_settlement_negative_exit_threshold);
-
-    const rapidjson::Value* intent = FindObject(doc, "intent");
-    ApplyString(intent, "spot_symbol", intent_cfg.spot_symbol);
-    ApplyString(intent, "perp_symbol", intent_cfg.perp_symbol);
-    ApplyBool(intent, "receive_funding", intent_cfg.receive_funding);
-
-    const rapidjson::Value* risk = FindObject(doc, "risk");
-    ApplyNumber(risk, "notional_usdt", risk_cfg.notional_usdt);
-    ApplyNumber(risk, "leverage", risk_cfg.leverage);
-    ApplyNumber(risk, "max_leverage", risk_cfg.max_leverage);
-    ApplyNumber(risk, "rebalance_threshold_ratio", risk_cfg.rebalance_threshold_ratio);
-    ApplyNumber(risk, "dual_ledger_auto_notional_ratio", risk_cfg.dual_ledger_auto_notional_ratio);
-    ApplyBool(risk, "carry_allocator_leverage_model_enabled", risk_cfg.carry_allocator_leverage_model_enabled);
-    ApplyNumber(risk, "carry_allocator_spot_cash_per_notional", risk_cfg.carry_allocator_spot_cash_per_notional);
-    ApplyNumber(risk, "carry_allocator_perp_margin_buffer_ratio", risk_cfg.carry_allocator_perp_margin_buffer_ratio);
-    ApplyNumber(risk, "carry_allocator_perp_leverage", risk_cfg.carry_allocator_perp_leverage);
-    ApplyNumber(risk, "perp_liq_buffer_floor_ratio", risk_cfg.perp_liq_buffer_floor_ratio);
-    ApplyNumber(risk, "perp_liq_buffer_ceiling_ratio", risk_cfg.perp_liq_buffer_ceiling_ratio);
-    ApplyNumber(risk, "perp_liq_min_notional_scale", risk_cfg.perp_liq_min_notional_scale);
-    ApplyBool(risk, "carry_core_overlay_enabled", risk_cfg.carry_core_overlay_enabled);
-    ApplyNumber(risk, "carry_core_notional_ratio", risk_cfg.carry_core_notional_ratio);
-    ApplyNumber(risk, "carry_overlay_notional_ratio", risk_cfg.carry_overlay_notional_ratio);
-    ApplyNumber(risk, "carry_overlay_confidence_power", risk_cfg.carry_overlay_confidence_power);
-    ApplyBool(risk, "carry_confidence_boost_enabled", risk_cfg.carry_confidence_boost_enabled);
-    ApplyNumber(risk, "carry_confidence_boost_reference", risk_cfg.carry_confidence_boost_reference);
-    ApplyNumber(risk, "carry_confidence_boost_max_scale", risk_cfg.carry_confidence_boost_max_scale);
-    ApplyNumber(risk, "carry_confidence_boost_power", risk_cfg.carry_confidence_boost_power);
-
-    const rapidjson::Value* execution = FindObject(doc, "execution");
-    ApplyNumber(execution, "min_notional", execution_cfg.min_notional);
-    ApplyNumber(execution, "carry_rebalance_cooldown_ms", execution_cfg.carry_rebalance_cooldown_ms);
-    ApplyNumber(execution, "carry_max_rebalance_step_ratio", execution_cfg.carry_max_rebalance_step_ratio);
-    ApplyNumber(execution, "carry_max_participation_rate", execution_cfg.carry_max_participation_rate);
-    ApplyBool(execution, "carry_maker_first_enabled", execution_cfg.carry_maker_first_enabled);
-    ApplyNumber(execution, "carry_maker_limit_offset_bps", execution_cfg.carry_maker_limit_offset_bps);
-    ApplyNumber(execution, "carry_maker_catchup_gap_ratio", execution_cfg.carry_maker_catchup_gap_ratio);
-    ApplyBool(execution, "carry_target_anchor_enabled", execution_cfg.carry_target_anchor_enabled);
-    ApplyNumber(execution, "carry_target_anchor_update_ratio", execution_cfg.carry_target_anchor_update_ratio);
-    ApplyBool(execution, "carry_confidence_adaptive_enabled", execution_cfg.carry_confidence_adaptive_enabled);
-
-    const rapidjson::Value* monitoring = FindObject(doc, "monitoring");
-    ApplyNumber(monitoring, "max_open_orders_per_symbol", monitoring_cfg.max_open_orders_per_symbol);
-}
-
 void EmitExchangeStatusLine(
     const std::shared_ptr<QTrading::Infra::Exchanges::BinanceSim::BinanceExchange>& exchange)
 {
@@ -287,18 +140,57 @@ void EmitExchangeStatusLine(
         << " total_ledger=" << snap.total_ledger_value
         << " progress=" << snap.progress_pct << "%";
     oss << " prices=";
+    double max_abs_mark_index_bps = 0.0;
+    size_t mark_index_warning_symbols = 0;
+    size_t mark_index_stress_symbols = 0;
+    constexpr double kMarkIndexWarningBps = 50.0;
+    constexpr double kMarkIndexStressBps = 150.0;
     for (size_t i = 0; i < snap.prices.size(); ++i) {
         const auto& p = snap.prices[i];
         if (i > 0) {
             oss << ",";
         }
-        oss << p.symbol << "=";
+        oss << p.symbol << "(t=";
         if (p.has_price) {
             oss << p.price;
         }
         else {
             oss << "n/a";
         }
+        oss << ",m=";
+        if (p.has_mark_price) {
+            oss << p.mark_price;
+        }
+        else {
+            oss << "n/a";
+        }
+        oss << ",i=";
+        if (p.has_index_price) {
+            oss << p.index_price;
+        }
+        else {
+            oss << "n/a";
+        }
+        oss << ")";
+
+        if (p.has_mark_price && p.has_index_price && std::abs(p.index_price) > 1e-12) {
+            const double basis_bps = ((p.mark_price - p.index_price) / p.index_price) * 10000.0;
+            const double abs_basis_bps = std::abs(basis_bps);
+            max_abs_mark_index_bps = std::max(max_abs_mark_index_bps, abs_basis_bps);
+            if (abs_basis_bps >= kMarkIndexStressBps) {
+                ++mark_index_stress_symbols;
+            }
+            else if (abs_basis_bps >= kMarkIndexWarningBps) {
+                ++mark_index_warning_symbols;
+            }
+        }
+    }
+    oss << " mi_max_bps=" << max_abs_mark_index_bps;
+    if (mark_index_stress_symbols > 0) {
+        oss << " mi_alert=stress(" << mark_index_stress_symbols << ")";
+    }
+    else if (mark_index_warning_symbols > 0) {
+        oss << " mi_alert=warning(" << mark_index_warning_symbols << ")";
     }
     std::cout << oss.str() << std::endl;
 }

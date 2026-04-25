@@ -11,7 +11,9 @@ std::shared_ptr<QTrading::Dto::Market::Binance::MultiKlineDto> MakeMarket(
     bool include_perp,
     double perp_close = 100.5,
     std::optional<double> perp_funding_rate = std::nullopt,
-    std::optional<unsigned long long> perp_funding_time = std::nullopt)
+    std::optional<unsigned long long> perp_funding_time = std::nullopt,
+    std::optional<double> perp_mark = std::nullopt,
+    std::optional<double> perp_index = std::nullopt)
 {
     auto dto = std::make_shared<QTrading::Dto::Market::Binance::MultiKlineDto>();
     dto->Timestamp = ts;
@@ -21,13 +23,21 @@ std::shared_ptr<QTrading::Dto::Market::Binance::MultiKlineDto> MakeMarket(
     symbols->push_back("BTCUSDT_SPOT");
     symbols->push_back("BTCUSDT_PERP");
     dto->symbols = symbols;
-    dto->klines_by_id.resize(symbols->size());
+    dto->trade_klines_by_id.resize(symbols->size());
     dto->funding_by_id.resize(symbols->size());
-    dto->klines_by_id[0] = include_spot ? std::optional<QTrading::Dto::Market::Binance::KlineDto>(spot) : std::nullopt;
-    dto->klines_by_id[1] = include_perp ? std::optional<QTrading::Dto::Market::Binance::KlineDto>(perp) : std::nullopt;
+    dto->mark_klines_by_id.resize(symbols->size());
+    dto->index_klines_by_id.resize(symbols->size());
+    dto->trade_klines_by_id[0] = include_spot ? std::optional<QTrading::Dto::Market::Binance::KlineDto>(spot) : std::nullopt;
+    dto->trade_klines_by_id[1] = include_perp ? std::optional<QTrading::Dto::Market::Binance::KlineDto>(perp) : std::nullopt;
     if (perp_funding_rate.has_value()) {
         const auto funding_ts = perp_funding_time.value_or(ts);
         dto->funding_by_id[1] = QTrading::Dto::Market::Binance::FundingRateDto(funding_ts, *perp_funding_rate);
+    }
+    if (perp_mark.has_value()) {
+        dto->mark_klines_by_id[1] = QTrading::Dto::Market::Binance::ReferenceKlineDto::Point(ts, *perp_mark);
+    }
+    if (perp_index.has_value()) {
+        dto->index_klines_by_id[1] = QTrading::Dto::Market::Binance::ReferenceKlineDto::Point(ts, *perp_index);
     }
     return dto;
 }
@@ -49,9 +59,9 @@ std::shared_ptr<QTrading::Dto::Market::Binance::MultiKlineDto> MakeMarketCustomS
     symbols->push_back(spot_symbol);
     symbols->push_back(perp_symbol);
     dto->symbols = symbols;
-    dto->klines_by_id.resize(symbols->size());
-    dto->klines_by_id[0] = include_spot ? std::optional<QTrading::Dto::Market::Binance::KlineDto>(spot) : std::nullopt;
-    dto->klines_by_id[1] = include_perp ? std::optional<QTrading::Dto::Market::Binance::KlineDto>(perp) : std::nullopt;
+    dto->trade_klines_by_id.resize(symbols->size());
+    dto->trade_klines_by_id[0] = include_spot ? std::optional<QTrading::Dto::Market::Binance::KlineDto>(spot) : std::nullopt;
+    dto->trade_klines_by_id[1] = include_perp ? std::optional<QTrading::Dto::Market::Binance::KlineDto>(perp) : std::nullopt;
     return dto;
 }
 
@@ -118,6 +128,42 @@ TEST(FundingCarrySignalEngineTests, ConfidenceDropsWhenBasisApproachesExitBand)
     EXPECT_EQ(s2.status, QTrading::Signal::SignalStatus::Active);
     EXPECT_GT(s1.confidence, s2.confidence);
     EXPECT_GT(s2.confidence, 0.0);
+}
+
+TEST(FundingCarrySignalEngineTests, MarkIndexSoftDeriskReducesConfidence)
+{
+    QTrading::Signal::FundingCarrySignalEngine::Config cfg{
+        "BTCUSDT_SPOT", "BTCUSDT_PERP", 0.0, 0.0, -1.0, 1.0, 1.0, 0
+    };
+    cfg.mark_index_soft_derisk_start_bps = 50.0;
+    cfg.mark_index_soft_derisk_full_bps = 150.0;
+    cfg.mark_index_soft_derisk_min_confidence_scale = 0.4;
+
+    QTrading::Signal::FundingCarrySignalEngine engine(cfg);
+    auto calm = engine.on_market(MakeMarket(1000, true, true, 100.5, std::nullopt, std::nullopt, 100.0, 100.0));
+    auto stressed = engine.on_market(MakeMarket(2000, true, true, 100.5, std::nullopt, std::nullopt, 101.5, 100.0));
+
+    EXPECT_EQ(calm.status, QTrading::Signal::SignalStatus::Active);
+    EXPECT_EQ(stressed.status, QTrading::Signal::SignalStatus::Active);
+    EXPECT_GT(calm.confidence, stressed.confidence);
+}
+
+TEST(FundingCarrySignalEngineTests, MarkIndexHardGuardBlocksEntryAndForcesExit)
+{
+    QTrading::Signal::FundingCarrySignalEngine::Config cfg{
+        "BTCUSDT_SPOT", "BTCUSDT_PERP", 0.0, 0.0, -1.0, 1.0, 1.0, 0
+    };
+    cfg.mark_index_hard_exit_bps = 150.0;
+
+    QTrading::Signal::FundingCarrySignalEngine engine(cfg);
+
+    const auto enter = engine.on_market(MakeMarket(1000, true, true, 100.5, std::nullopt, std::nullopt, 100.2, 100.0));
+    const auto forced_exit = engine.on_market(MakeMarket(2000, true, true, 100.5, std::nullopt, std::nullopt, 102.0, 100.0));
+    const auto blocked_entry = engine.on_market(MakeMarket(3000, true, true, 100.5, std::nullopt, std::nullopt, 102.0, 100.0));
+
+    EXPECT_EQ(enter.status, QTrading::Signal::SignalStatus::Active);
+    EXPECT_EQ(forced_exit.status, QTrading::Signal::SignalStatus::Inactive);
+    EXPECT_EQ(blocked_entry.status, QTrading::Signal::SignalStatus::Inactive);
 }
 
 TEST(FundingCarrySignalEngineTests, UsesObservedFundingRateFromMarketWhenAvailable)

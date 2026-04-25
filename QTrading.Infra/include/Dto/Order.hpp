@@ -1,5 +1,6 @@
 ﻿#pragma once
 
+#include <cstdint>
 #include <string>
 #include "Dto/Trading/Side.hpp"
 #include "Dto/Trading/InstrumentSpec.hpp"
@@ -42,6 +43,21 @@ namespace QTrading::dto {
 
         /// @brief STP mode associated with this order (0=None, 1=ExpireTaker, 2=ExpireMaker, 3=ExpireBoth).
         int stp_mode{ 0 };
+
+        /// @brief If true, this order originated from closePosition-style close-all intent.
+        bool close_position{ false };
+
+        /// @brief Original quote-order amount for spot market quoteOrderQty style requests.
+        double quote_order_qty{ 0.0 };
+
+        /// @brief Internal flag for one-way overshoot reverse orders pending close->open transition.
+        bool one_way_reverse{ false };
+
+        /// @brief Limit-order time in force; market-style orders ignore this field.
+        QTrading::Dto::Trading::TimeInForce time_in_force{ QTrading::Dto::Trading::TimeInForce::GTC };
+
+        /// @brief First replay step when this order is eligible to match.
+        uint64_t first_matching_step{ 0 };
     };
 
 }  // namespace QTrading::dto

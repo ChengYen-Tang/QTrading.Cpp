@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
 #include <boost/filesystem.hpp>
 #include <boost/filesystem/fstream.hpp>
-#include <Exchanges/BinanceSimulator/DataProvider/FundingRateData.hpp>
+#include <Data/Binance/FundingRateData.hpp>
 
 static const char* test_csv_filename = "test_funding_rate_data.csv";
 
@@ -50,4 +50,19 @@ TEST_F(FundingRateDataTests, IteratorTraversal) {
         index++;
     }
     EXPECT_EQ(index, fd.get_count());
+}
+
+TEST_F(FundingRateDataTests, GetLatestThrowsWhenNoParsedRows)
+{
+    const char* header_only_csv = "test_funding_header_only.csv";
+    {
+        boost::filesystem::ofstream ofs(header_only_csv);
+        ofs << "FundingTime,Rate,MarkPrice\n";
+    }
+
+    FundingRateData fd("BTCUSDT", header_only_csv);
+    EXPECT_EQ(fd.get_count(), 0u);
+    EXPECT_THROW(fd.get_latest(), std::out_of_range);
+
+    boost::filesystem::remove(header_only_csv);
 }

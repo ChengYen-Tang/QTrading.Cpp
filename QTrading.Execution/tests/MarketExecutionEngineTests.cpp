@@ -36,8 +36,8 @@ MarketPtr MakeMarket(unsigned long long ts, const std::string& symbol, double cl
     auto symbols = std::make_shared<std::vector<std::string>>();
     symbols->push_back(symbol);
     dto->symbols = symbols;
-    dto->klines_by_id.resize(symbols->size());
-    dto->klines_by_id[0] = k;
+    dto->trade_klines_by_id.resize(symbols->size());
+    dto->trade_klines_by_id[0] = k;
     return dto;
 }
 
@@ -53,8 +53,8 @@ MarketPtr MakeMarketWithQuoteVolume(
     auto symbols = std::make_shared<std::vector<std::string>>();
     symbols->push_back(symbol);
     dto->symbols = symbols;
-    dto->klines_by_id.resize(symbols->size());
-    dto->klines_by_id[0] = k;
+    dto->trade_klines_by_id.resize(symbols->size());
+    dto->trade_klines_by_id[0] = k;
     return dto;
 }
 
@@ -71,9 +71,9 @@ MarketPtr MakeTwoSymbolMarket(
     symbols->push_back(symbol_a);
     symbols->push_back(symbol_b);
     dto->symbols = symbols;
-    dto->klines_by_id.resize(symbols->size());
-    dto->klines_by_id[0] = QTrading::Dto::Market::Binance::KlineDto(ts, 0, 0, 0, close_a, 0, ts, 0, 0, 0, 0);
-    dto->klines_by_id[1] = QTrading::Dto::Market::Binance::KlineDto(ts, 0, 0, 0, close_b, 0, ts, 0, 0, 0, 0);
+    dto->trade_klines_by_id.resize(symbols->size());
+    dto->trade_klines_by_id[0] = QTrading::Dto::Market::Binance::KlineDto(ts, 0, 0, 0, close_a, 0, ts, 0, 0, 0, 0);
+    dto->trade_klines_by_id[1] = QTrading::Dto::Market::Binance::KlineDto(ts, 0, 0, 0, close_b, 0, ts, 0, 0, 0, 0);
     return dto;
 }
 
@@ -93,7 +93,7 @@ TEST(MarketExecutionEngineTests, GeneratesOrderForNotionalDelta)
     target.target_positions["BTCUSDT_PERP"] = 1000.0;
     target.leverage["BTCUSDT_PERP"] = 3.0;
 
-    QTrading::Signal::SignalDecision signal;
+    QTrading::Execution::ExecutionSignal signal;
     auto orders = engine.plan(target, signal, MakeMarket(1, "BTCUSDT_PERP", 10000.0));
 
     ASSERT_EQ(orders.size(), 1u);
@@ -114,7 +114,7 @@ TEST(MarketExecutionEngineTests, PlansMixedTypedSymbolsWithoutSuffixAssumptions)
     target.leverage["BTCUSDT_CASH"] = 1.0;
     target.leverage["BTCUSDT_SWAP"] = 3.0;
 
-    QTrading::Signal::SignalDecision signal;
+    QTrading::Execution::ExecutionSignal signal;
     auto market = MakeTwoSymbolMarket(1, "BTCUSDT_CASH", 100.0, "BTCUSDT_SWAP", 3000.0);
     auto orders = engine.plan(target, signal, market);
 
@@ -156,9 +156,9 @@ TEST(MarketExecutionEngineTests, CarryRebalanceRespectsCooldown)
     target.target_positions["BTCUSDT_PERP"] = 1000.0;
     target.leverage["BTCUSDT_PERP"] = 2.0;
 
-    QTrading::Signal::SignalDecision signal;
+    QTrading::Execution::ExecutionSignal signal;
     signal.strategy = "funding_carry";
-    signal.urgency = QTrading::Signal::SignalUrgency::Low;
+    signal.urgency = QTrading::Execution::ExecutionUrgency::Low;
 
     auto first = engine.plan(target, signal, MakeMarket(1, "BTCUSDT_PERP", 10000.0));
     ASSERT_EQ(first.size(), 1u);
@@ -168,6 +168,61 @@ TEST(MarketExecutionEngineTests, CarryRebalanceRespectsCooldown)
 
     auto third = engine.plan(target, signal, MakeMarket(1500, "BTCUSDT_PERP", 10000.0));
     EXPECT_EQ(third.size(), 1u);
+}
+
+TEST(MarketExecutionEngineTests, BasisArbitrageAlsoUsesCarryCooldownControls)
+{
+    auto ex = std::make_shared<FakeExchange>();
+
+    QTrading::Execution::MarketExecutionEngine::Config cfg;
+    cfg.min_notional = 10.0;
+    cfg.carry_rebalance_cooldown_ms = 1000;
+    cfg.carry_max_rebalance_step_ratio = 1.0;
+    QTrading::Execution::MarketExecutionEngine engine(ex, cfg);
+
+    QTrading::Risk::RiskTarget target;
+    target.target_positions["BTCUSDT_PERP"] = 1000.0;
+    target.leverage["BTCUSDT_PERP"] = 2.0;
+
+    QTrading::Execution::ExecutionSignal signal;
+    signal.strategy = "basis_arbitrage";
+    signal.urgency = QTrading::Execution::ExecutionUrgency::Low;
+
+    auto first = engine.plan(target, signal, MakeMarket(1, "BTCUSDT_PERP", 10000.0));
+    ASSERT_EQ(first.size(), 1u);
+
+    auto second = engine.plan(target, signal, MakeMarket(500, "BTCUSDT_PERP", 10000.0));
+    EXPECT_TRUE(second.empty());
+
+    auto third = engine.plan(target, signal, MakeMarket(1500, "BTCUSDT_PERP", 10000.0));
+    EXPECT_EQ(third.size(), 1u);
+}
+
+TEST(MarketExecutionEngineTests, BasisArbitrageDoesNotSkipWhenOpenOrderExists)
+{
+    auto ex = std::make_shared<FakeExchange>();
+    QTrading::dto::Order existing{};
+    existing.symbol = "BTCUSDT_PERP";
+    existing.side = QTrading::Dto::Trading::OrderSide::Buy;
+    existing.quantity = 0.01;
+    ex->orders_.push_back(existing);
+
+    QTrading::Execution::MarketExecutionEngine::Config cfg;
+    cfg.min_notional = 10.0;
+    cfg.carry_rebalance_cooldown_ms = 0;
+    cfg.carry_max_rebalance_step_ratio = 1.0;
+    QTrading::Execution::MarketExecutionEngine engine(ex, cfg);
+
+    QTrading::Risk::RiskTarget target;
+    target.target_positions["BTCUSDT_PERP"] = 1000.0;
+    target.leverage["BTCUSDT_PERP"] = 2.0;
+
+    QTrading::Execution::ExecutionSignal signal;
+    signal.strategy = "basis_arbitrage";
+    signal.urgency = QTrading::Execution::ExecutionUrgency::Low;
+
+    auto orders = engine.plan(target, signal, MakeMarket(1, "BTCUSDT_PERP", 10'000.0));
+    ASSERT_EQ(orders.size(), 1u);
 }
 
 TEST(MarketExecutionEngineTests, CarryLargeNotionalUsesLongerCooldown)
@@ -189,9 +244,9 @@ TEST(MarketExecutionEngineTests, CarryLargeNotionalUsesLongerCooldown)
     target.target_positions["BTCUSDT_PERP"] = 1000.0; // Large notional branch.
     target.leverage["BTCUSDT_PERP"] = 2.0;
 
-    QTrading::Signal::SignalDecision signal;
+    QTrading::Execution::ExecutionSignal signal;
     signal.strategy = "funding_carry";
-    signal.urgency = QTrading::Signal::SignalUrgency::Low;
+    signal.urgency = QTrading::Execution::ExecutionUrgency::Low;
 
     auto first = engine.plan(target, signal, MakeMarket(1, "BTCUSDT_PERP", 10000.0));
     ASSERT_EQ(first.size(), 1u);
@@ -219,9 +274,9 @@ TEST(MarketExecutionEngineTests, CarryRebalanceStepRatioCapsOrderSize)
     target.target_positions["BTCUSDT_PERP"] = 1000.0;
     target.leverage["BTCUSDT_PERP"] = 2.0;
 
-    QTrading::Signal::SignalDecision signal;
+    QTrading::Execution::ExecutionSignal signal;
     signal.strategy = "funding_carry";
-    signal.urgency = QTrading::Signal::SignalUrgency::Low;
+    signal.urgency = QTrading::Execution::ExecutionUrgency::Low;
 
     auto orders = engine.plan(target, signal, MakeMarket(1, "BTCUSDT_PERP", 10000.0));
     ASSERT_EQ(orders.size(), 1u);
@@ -244,9 +299,9 @@ TEST(MarketExecutionEngineTests, CarryRebalanceRespectsParticipationCap)
     target.target_positions["BTCUSDT_PERP"] = 1000.0;
     target.leverage["BTCUSDT_PERP"] = 2.0;
 
-    QTrading::Signal::SignalDecision signal;
+    QTrading::Execution::ExecutionSignal signal;
     signal.strategy = "funding_carry";
-    signal.urgency = QTrading::Signal::SignalUrgency::Low;
+    signal.urgency = QTrading::Execution::ExecutionUrgency::Low;
 
     auto orders = engine.plan(
         target,
@@ -273,9 +328,9 @@ TEST(MarketExecutionEngineTests, CarryRebalanceRespectsDailyQuota)
     target.target_positions["BTCUSDT_PERP"] = 1000.0;
     target.leverage["BTCUSDT_PERP"] = 2.0;
 
-    QTrading::Signal::SignalDecision signal;
+    QTrading::Execution::ExecutionSignal signal;
     signal.strategy = "funding_carry";
-    signal.urgency = QTrading::Signal::SignalUrgency::Low;
+    signal.urgency = QTrading::Execution::ExecutionUrgency::Low;
 
     auto first = engine.plan(target, signal, MakeMarketWithQuoteVolume(1, "BTCUSDT_PERP", 10000.0, 1'000'000.0));
     ASSERT_EQ(first.size(), 1u);
@@ -309,9 +364,9 @@ TEST(MarketExecutionEngineTests, CarryWindowBudgetCapsAndResetsByWindow)
     target.target_positions["BTCUSDT_PERP"] = 1000.0;
     target.leverage["BTCUSDT_PERP"] = 2.0;
 
-    QTrading::Signal::SignalDecision signal;
+    QTrading::Execution::ExecutionSignal signal;
     signal.strategy = "funding_carry";
-    signal.urgency = QTrading::Signal::SignalUrgency::Low;
+    signal.urgency = QTrading::Execution::ExecutionUrgency::Low;
 
     auto first = engine.plan(target, signal, MakeMarketWithQuoteVolume(1, "BTCUSDT_PERP", 10000.0, 1000.0));
     ASSERT_EQ(first.size(), 1u);
@@ -346,9 +401,9 @@ TEST(MarketExecutionEngineTests, CarryLargeNotionalUsesMoreConservativeStepRatio
     target.target_positions["BTCUSDT_PERP"] = 1000.0;
     target.leverage["BTCUSDT_PERP"] = 2.0;
 
-    QTrading::Signal::SignalDecision signal;
+    QTrading::Execution::ExecutionSignal signal;
     signal.strategy = "funding_carry";
-    signal.urgency = QTrading::Signal::SignalUrgency::Low;
+    signal.urgency = QTrading::Execution::ExecutionUrgency::Low;
 
     auto orders = engine.plan(target, signal, MakeMarketWithQuoteVolume(1, "BTCUSDT_PERP", 10000.0, 1'000'000.0));
     ASSERT_EQ(orders.size(), 1u);
@@ -380,9 +435,9 @@ TEST(MarketExecutionEngineTests, CarryMinNotionalRatioPreventsTinyLargeBookRebal
     target.target_positions["BTCUSDT_PERP"] = 1000.0;
     target.leverage["BTCUSDT_PERP"] = 2.0;
 
-    QTrading::Signal::SignalDecision signal;
+    QTrading::Execution::ExecutionSignal signal;
     signal.strategy = "funding_carry";
-    signal.urgency = QTrading::Signal::SignalUrgency::Low;
+    signal.urgency = QTrading::Execution::ExecutionUrgency::Low;
 
     auto orders = engine.plan(target, signal, MakeMarketWithQuoteVolume(1, "BTCUSDT_PERP", 10000.0, 1'000'000.0));
     // Delta is only 50 notional; dynamic min notional is 100, so this micro rebalance is skipped.
@@ -410,9 +465,9 @@ TEST(MarketExecutionEngineTests, CarryBootstrapModeAcceleratesInitialConvergence
     target.target_positions["BTCUSDT_PERP"] = 1000.0;
     target.leverage["BTCUSDT_PERP"] = 2.0;
 
-    QTrading::Signal::SignalDecision signal;
+    QTrading::Execution::ExecutionSignal signal;
     signal.strategy = "funding_carry";
-    signal.urgency = QTrading::Signal::SignalUrgency::Low;
+    signal.urgency = QTrading::Execution::ExecutionUrgency::Low;
 
     auto orders = engine.plan(
         target,
@@ -451,12 +506,12 @@ TEST(MarketExecutionEngineTests, CarryConfidenceAdaptiveStepScaleDependsOnSignal
     target.target_positions["BTCUSDT_PERP"] = 1000.0;
     target.leverage["BTCUSDT_PERP"] = 2.0;
 
-    QTrading::Signal::SignalDecision low_signal;
+    QTrading::Execution::ExecutionSignal low_signal;
     low_signal.strategy = "funding_carry";
-    low_signal.urgency = QTrading::Signal::SignalUrgency::Low;
+    low_signal.urgency = QTrading::Execution::ExecutionUrgency::Low;
     low_signal.confidence = 0.0;
 
-    QTrading::Signal::SignalDecision high_signal = low_signal;
+    QTrading::Execution::ExecutionSignal high_signal = low_signal;
     high_signal.confidence = 1.0;
 
     auto low_orders = low_engine.plan(target, low_signal, MakeMarketWithQuoteVolume(1, "BTCUSDT_PERP", 10000.0, 1'000'000.0));
@@ -496,12 +551,12 @@ TEST(MarketExecutionEngineTests, CarryConfidenceAdaptiveCooldownScalesByConfiden
     target.target_positions["BTCUSDT_PERP"] = 1000.0;
     target.leverage["BTCUSDT_PERP"] = 2.0;
 
-    QTrading::Signal::SignalDecision low_signal;
+    QTrading::Execution::ExecutionSignal low_signal;
     low_signal.strategy = "funding_carry";
-    low_signal.urgency = QTrading::Signal::SignalUrgency::Low;
+    low_signal.urgency = QTrading::Execution::ExecutionUrgency::Low;
     low_signal.confidence = 0.0;
 
-    QTrading::Signal::SignalDecision high_signal = low_signal;
+    QTrading::Execution::ExecutionSignal high_signal = low_signal;
     high_signal.confidence = 1.0;
 
     ASSERT_EQ(low_engine.plan(target, low_signal, MakeMarket(1, "BTCUSDT_PERP", 10000.0)).size(), 1u);
@@ -530,9 +585,9 @@ TEST(MarketExecutionEngineTests, CarryRequireTwoSidedRebalanceSkipsOneSidedOrder
     target.target_positions["BTCUSDT_PERP"] = 1000.0;
     target.leverage["BTCUSDT_PERP"] = 2.0;
 
-    QTrading::Signal::SignalDecision signal;
+    QTrading::Execution::ExecutionSignal signal;
     signal.strategy = "funding_carry";
-    signal.urgency = QTrading::Signal::SignalUrgency::Low;
+    signal.urgency = QTrading::Execution::ExecutionUrgency::Low;
 
     auto orders = engine.plan(target, signal, MakeMarket(1, "BTCUSDT_PERP", 10000.0));
     EXPECT_TRUE(orders.empty());
@@ -558,9 +613,9 @@ TEST(MarketExecutionEngineTests, CarryBalanceTwoSidedRebalanceClipsLargerSide)
     target.leverage["BTCUSDT_SPOT"] = 1.0;
     target.leverage["BTCUSDT_PERP"] = 2.0;
 
-    QTrading::Signal::SignalDecision signal;
+    QTrading::Execution::ExecutionSignal signal;
     signal.strategy = "funding_carry";
-    signal.urgency = QTrading::Signal::SignalUrgency::Low;
+    signal.urgency = QTrading::Execution::ExecutionUrgency::Low;
 
     auto market = MakeTwoSymbolMarket(1, "BTCUSDT_SPOT", 10000.0, "BTCUSDT_PERP", 10000.0);
     auto orders = engine.plan(target, signal, market);
@@ -584,6 +639,85 @@ TEST(MarketExecutionEngineTests, CarryBalanceTwoSidedRebalanceClipsLargerSide)
     // Spot leg is clipped from 2000 notional to 1000 notional to match perp side.
     EXPECT_NEAR(spot->qty, 1000.0 / 10000.0, 1e-9);
     EXPECT_NEAR(perp->qty, 1000.0 / 10000.0, 1e-9);
+}
+
+TEST(MarketExecutionEngineTests, BasisTwoSidedInvariantAppliesEvenAtHighUrgency)
+{
+    auto ex = std::make_shared<FakeExchange>();
+
+    QTrading::Execution::MarketExecutionEngine::Config cfg;
+    cfg.min_notional = 10.0;
+    cfg.carry_rebalance_cooldown_ms = 0;
+    cfg.carry_max_rebalance_step_ratio = 1.0;
+    cfg.carry_max_participation_rate = 1.0;
+    cfg.carry_require_two_sided_rebalance = true;
+
+    QTrading::Execution::MarketExecutionEngine engine(ex, cfg);
+
+    QTrading::Risk::RiskTarget target;
+    target.target_positions["BTCUSDT_PERP"] = -1000.0;
+    target.leverage["BTCUSDT_PERP"] = 2.0;
+
+    QTrading::Execution::ExecutionSignal signal;
+    signal.strategy = "basis_arbitrage";
+    signal.urgency = QTrading::Execution::ExecutionUrgency::High;
+
+    auto orders = engine.plan(target, signal, MakeMarket(1, "BTCUSDT_PERP", 10000.0));
+    EXPECT_TRUE(orders.empty());
+}
+
+TEST(MarketExecutionEngineTests, TwoSidedInvariantIsEnforcedPerPairNotGlobally)
+{
+    auto ex = std::make_shared<FakeExchange>();
+
+    QTrading::Execution::MarketExecutionEngine::Config cfg;
+    cfg.min_notional = 10.0;
+    cfg.carry_rebalance_cooldown_ms = 0;
+    cfg.carry_max_rebalance_step_ratio = 1.0;
+    cfg.carry_max_participation_rate = 1.0;
+    cfg.carry_require_two_sided_rebalance = true;
+    cfg.carry_balance_two_sided_rebalance = true;
+
+    QTrading::Execution::MarketExecutionEngine engine(ex, cfg);
+
+    QTrading::Risk::RiskTarget target;
+    target.target_positions["BTCUSDT_SPOT"] = 1000.0;
+    target.target_positions["BTCUSDT_PERP"] = -1000.0;
+    target.target_positions["APTUSDT_PERP"] = -1000.0;
+    target.leverage["BTCUSDT_SPOT"] = 1.0;
+    target.leverage["BTCUSDT_PERP"] = 2.0;
+    target.leverage["APTUSDT_PERP"] = 2.0;
+
+    QTrading::Execution::ExecutionSignal signal;
+    signal.strategy = "basis_arbitrage";
+    signal.urgency = QTrading::Execution::ExecutionUrgency::High;
+
+    auto market = std::make_shared<QTrading::Dto::Market::Binance::MultiKlineDto>();
+    market->Timestamp = 1;
+    market->symbols = std::make_shared<std::vector<std::string>>(
+        std::initializer_list<std::string>{ "BTCUSDT_SPOT", "BTCUSDT_PERP", "APTUSDT_PERP" });
+    market->trade_klines_by_id.resize(3);
+    market->trade_klines_by_id[0] =
+        QTrading::Dto::Market::Binance::KlineDto(1, 0, 0, 0, 10000.0, 0, 1, 0, 0, 0, 0);
+    market->trade_klines_by_id[1] =
+        QTrading::Dto::Market::Binance::KlineDto(1, 0, 0, 0, 10000.0, 0, 1, 0, 0, 0, 0);
+    market->trade_klines_by_id[2] =
+        QTrading::Dto::Market::Binance::KlineDto(1, 0, 0, 0, 10000.0, 0, 1, 0, 0, 0, 0);
+
+    auto orders = engine.plan(target, signal, market);
+
+    ASSERT_EQ(orders.size(), 2u);
+    bool has_btc_spot = false;
+    bool has_btc_perp = false;
+    bool has_apt_perp = false;
+    for (const auto& order : orders) {
+        has_btc_spot = has_btc_spot || order.symbol == "BTCUSDT_SPOT";
+        has_btc_perp = has_btc_perp || order.symbol == "BTCUSDT_PERP";
+        has_apt_perp = has_apt_perp || order.symbol == "APTUSDT_PERP";
+    }
+    EXPECT_TRUE(has_btc_spot);
+    EXPECT_TRUE(has_btc_perp);
+    EXPECT_FALSE(has_apt_perp);
 }
 
 TEST(MarketExecutionEngineTests, CarryMakerFirstUsesLimitOrderWhenGapIsSmall)
@@ -611,9 +745,9 @@ TEST(MarketExecutionEngineTests, CarryMakerFirstUsesLimitOrderWhenGapIsSmall)
     target.target_positions["BTCUSDT_PERP"] = 1000.0; // delta ~30 notional => small gap
     target.leverage["BTCUSDT_PERP"] = 2.0;
 
-    QTrading::Signal::SignalDecision signal;
+    QTrading::Execution::ExecutionSignal signal;
     signal.strategy = "funding_carry";
-    signal.urgency = QTrading::Signal::SignalUrgency::Low;
+    signal.urgency = QTrading::Execution::ExecutionUrgency::Low;
 
     auto orders = engine.plan(target, signal, MakeMarket(1, "BTCUSDT_PERP", 10000.0));
     ASSERT_EQ(orders.size(), 1u);
@@ -640,9 +774,9 @@ TEST(MarketExecutionEngineTests, CarryMakerFirstFallsBackToMarketWhenGapIsLarge)
     target.target_positions["BTCUSDT_PERP"] = 1000.0; // delta ~1000 notional => large gap
     target.leverage["BTCUSDT_PERP"] = 2.0;
 
-    QTrading::Signal::SignalDecision signal;
+    QTrading::Execution::ExecutionSignal signal;
     signal.strategy = "funding_carry";
-    signal.urgency = QTrading::Signal::SignalUrgency::Low;
+    signal.urgency = QTrading::Execution::ExecutionUrgency::Low;
 
     auto orders = engine.plan(target, signal, MakeMarket(1, "BTCUSDT_PERP", 10000.0));
     ASSERT_EQ(orders.size(), 1u);
@@ -671,9 +805,9 @@ TEST(MarketExecutionEngineTests, CarryTargetAnchorSuppressesSmallTargetJitter)
 
     QTrading::Execution::MarketExecutionEngine engine(ex, cfg);
 
-    QTrading::Signal::SignalDecision signal;
+    QTrading::Execution::ExecutionSignal signal;
     signal.strategy = "funding_carry";
-    signal.urgency = QTrading::Signal::SignalUrgency::Low;
+    signal.urgency = QTrading::Execution::ExecutionUrgency::Low;
 
     QTrading::Risk::RiskTarget target_small_drift;
     target_small_drift.target_positions["BTCUSDT_PERP"] = 1010.0; // +1% from anchored 1000.
@@ -690,3 +824,4 @@ TEST(MarketExecutionEngineTests, CarryTargetAnchorSuppressesSmallTargetJitter)
     // 50 notional delta => 0.005 BTC at price 10000.
     EXPECT_NEAR(large_orders[0].qty, 50.0 / 10000.0, 1e-9);
 }
+

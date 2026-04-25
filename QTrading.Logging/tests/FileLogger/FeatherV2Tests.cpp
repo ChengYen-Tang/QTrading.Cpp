@@ -2,6 +2,7 @@
 #include "FileLogger/FeatherV2/AccountLog.hpp"
 #include "FileLogger/FeatherV2/AccountEvent.hpp"
 #include "FileLogger/FeatherV2/FundingEvent.hpp"
+#include "FileLogger/FeatherV2/MarketEvent.hpp"
 #include "FileLogger/FeatherV2/Order.hpp"
 #include "FileLogger/FeatherV2/OrderEvent.hpp"
 #include "FileLogger/FeatherV2/Position.hpp"
@@ -294,11 +295,47 @@ TEST(FeatherSchemaTests, EventSchemasExposeInstrumentType)
     const auto account_total_ledger = account_schema->GetFieldByName("total_ledger_value_after");
     ASSERT_NE(account_total_ledger, nullptr);
     EXPECT_TRUE(account_total_ledger->type()->Equals(arrow::float64()));
+    const auto account_fee_asset = account_schema->GetFieldByName("fee_asset");
+    ASSERT_NE(account_fee_asset, nullptr);
+    EXPECT_TRUE(account_fee_asset->type()->Equals(arrow::int32()));
+    const auto account_fee_native = account_schema->GetFieldByName("fee_native");
+    ASSERT_NE(account_fee_native, nullptr);
+    EXPECT_TRUE(account_fee_native->type()->Equals(arrow::float64()));
+    const auto account_fee_quote_equiv = account_schema->GetFieldByName("fee_quote_equiv");
+    ASSERT_NE(account_fee_quote_equiv, nullptr);
+    EXPECT_TRUE(account_fee_quote_equiv->type()->Equals(arrow::float64()));
+    const auto account_spot_cash_delta = account_schema->GetFieldByName("spot_cash_delta");
+    ASSERT_NE(account_spot_cash_delta, nullptr);
+    EXPECT_TRUE(account_spot_cash_delta->type()->Equals(arrow::float64()));
+    const auto account_spot_inventory_delta = account_schema->GetFieldByName("spot_inventory_delta");
+    ASSERT_NE(account_spot_inventory_delta, nullptr);
+    EXPECT_TRUE(account_spot_inventory_delta->type()->Equals(arrow::float64()));
+    const auto account_commission_model_source = account_schema->GetFieldByName("commission_model_source");
+    ASSERT_NE(account_commission_model_source, nullptr);
+    EXPECT_TRUE(account_commission_model_source->type()->Equals(arrow::int32()));
 
     const auto order_schema = QTrading::Log::FileLogger::FeatherV2::OrderEvent::Schema();
     const auto order_type = order_schema->GetFieldByName("instrument_type");
     ASSERT_NE(order_type, nullptr);
     EXPECT_TRUE(order_type->type()->Equals(arrow::int32()));
+    const auto order_fee_asset = order_schema->GetFieldByName("fee_asset");
+    ASSERT_NE(order_fee_asset, nullptr);
+    EXPECT_TRUE(order_fee_asset->type()->Equals(arrow::int32()));
+    const auto order_fee_native = order_schema->GetFieldByName("fee_native");
+    ASSERT_NE(order_fee_native, nullptr);
+    EXPECT_TRUE(order_fee_native->type()->Equals(arrow::float64()));
+    const auto order_fee_quote_equiv = order_schema->GetFieldByName("fee_quote_equiv");
+    ASSERT_NE(order_fee_quote_equiv, nullptr);
+    EXPECT_TRUE(order_fee_quote_equiv->type()->Equals(arrow::float64()));
+    const auto order_spot_cash_delta = order_schema->GetFieldByName("spot_cash_delta");
+    ASSERT_NE(order_spot_cash_delta, nullptr);
+    EXPECT_TRUE(order_spot_cash_delta->type()->Equals(arrow::float64()));
+    const auto order_spot_inventory_delta = order_schema->GetFieldByName("spot_inventory_delta");
+    ASSERT_NE(order_spot_inventory_delta, nullptr);
+    EXPECT_TRUE(order_spot_inventory_delta->type()->Equals(arrow::float64()));
+    const auto order_commission_model_source = order_schema->GetFieldByName("commission_model_source");
+    ASSERT_NE(order_commission_model_source, nullptr);
+    EXPECT_TRUE(order_commission_model_source->type()->Equals(arrow::int32()));
 
     const auto position_schema = QTrading::Log::FileLogger::FeatherV2::PositionEvent::Schema();
     const auto position_type = position_schema->GetFieldByName("instrument_type");
@@ -309,5 +346,13 @@ TEST(FeatherSchemaTests, EventSchemasExposeInstrumentType)
     const auto funding_type = funding_schema->GetFieldByName("instrument_type");
     ASSERT_NE(funding_type, nullptr);
     EXPECT_TRUE(funding_type->type()->Equals(arrow::int32()));
+
+    const auto market_schema = QTrading::Log::FileLogger::FeatherV2::MarketEvent::Schema();
+    const auto market_mark = market_schema->GetFieldByName("mark_price");
+    ASSERT_NE(market_mark, nullptr);
+    EXPECT_TRUE(market_mark->type()->Equals(arrow::float64()));
+    const auto market_has_index = market_schema->GetFieldByName("has_index_price");
+    ASSERT_NE(market_has_index, nullptr);
+    EXPECT_TRUE(market_has_index->type()->Equals(arrow::boolean()));
 }
 

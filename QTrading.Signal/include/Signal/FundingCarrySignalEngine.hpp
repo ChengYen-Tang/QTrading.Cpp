@@ -17,7 +17,7 @@ namespace QTrading::Signal {
 /// 2) The signal validates market readiness (spot + perp data available).
 /// 3) Guardrails (funding/basis thresholds) prevent holding during unfavorable regimes.
 /// 4) Execution urgency stays low; funding is earned over time, not a single tick.
-class FundingCarrySignalEngine final : public ISignalEngine<
+class FundingCarrySignalEngine : public ISignalEngine<
     std::shared_ptr<QTrading::Dto::Market::Binance::MultiKlineDto>> {
 public:
     /// @brief Configuration for funding carry signal.
@@ -173,12 +173,91 @@ public:
         /// @brief If true, pre-settlement emergency exit only applies when funding gate is enabled.
         ///        This prevents accidental churn in always-on (no funding gate) configurations.
         bool pre_settlement_negative_exit_require_funding_gate = true;
+        /// @brief Mark-index basis soft-derisk start threshold (bps). <=0 disables soft derisk.
+        double mark_index_soft_derisk_start_bps = 0.0;
+        /// @brief Mark-index basis soft-derisk full threshold (bps). Must be >= start threshold.
+        double mark_index_soft_derisk_full_bps = 0.0;
+        /// @brief Minimum confidence multiplier under full soft-derisk pressure (0..1].
+        double mark_index_soft_derisk_min_confidence_scale = 0.30;
+        /// @brief Mark-index basis hard-exit threshold (bps). <=0 disables hard guard.
+        double mark_index_hard_exit_bps = 0.0;
+        /// @brief Basis-mean-reversion overlay switch (used by BasisArbitrageSignalEngine only).
+        ///        When disabled, basis strategy falls back to carry-like always-on behavior.
+        bool basis_mr_enabled = false;
+        /// @brief Prefer mark-index basis for MR z-score input when available.
+        bool basis_mr_use_mark_index = true;
+        /// @brief Rolling window (bars) for basis z-score mean/std estimation.
+        std::size_t basis_mr_window_bars = 1440;
+        /// @brief Minimum samples before basis MR z-score becomes active.
+        std::size_t basis_mr_min_samples = 240;
+        /// @brief Entry threshold on |z| for basis MR activation.
+        double basis_mr_entry_z = 1.5;
+        /// @brief Exit threshold on |z| for basis MR deactivation (hysteresis).
+        double basis_mr_exit_z = 0.6;
+        /// @brief Hard stop threshold on |z| to avoid carrying extreme dislocations.
+        double basis_mr_max_abs_z = 6.0;
+        /// @brief Consecutive bars required for MR entry candidate confirmation.
+        uint32_t basis_mr_entry_persistence_bars = 1;
+        /// @brief Consecutive bars required for MR exit candidate confirmation.
+        uint32_t basis_mr_exit_persistence_bars = 1;
+        /// @brief Re-entry cooldown after MR exit (ms).
+        uint64_t basis_mr_cooldown_ms = 0;
+        /// @brief Minimum std floor for z-score denominator; avoids divide-by-near-zero.
+        double basis_mr_std_floor = 1e-6;
+        /// @brief If true, multiply confidence by z-intensity map inside MR active zone.
+        bool basis_mr_confidence_from_z = true;
+        /// @brief Lower bound for z-intensity confidence scale when MR is active.
+        double basis_mr_confidence_floor = 0.35;
+        /// @brief Basis-regime confidence overlay (size modulation only, no entry/exit gating).
+        bool basis_regime_confidence_enabled = false;
+        /// @brief Prefer mark-index basis for regime z-score input when available.
+        bool basis_regime_use_mark_index = true;
+        /// @brief Rolling window (bars) for basis-regime z-score.
+        std::size_t basis_regime_window_bars = 1440;
+        /// @brief Minimum samples before basis-regime confidence overlay activates.
+        std::size_t basis_regime_min_samples = 240;
+        /// @brief |z| below this is considered calm (no confidence penalty).
+        double basis_regime_calm_z = 1.0;
+        /// @brief |z| above this is considered stress (max confidence penalty).
+        double basis_regime_stress_z = 2.5;
+        /// @brief Minimum confidence multiplier under stress regime.
+        double basis_regime_min_confidence_scale = 0.5;
+        /// @brief Explicit alpha stop on trade-basis |z|. <= 0 disables.
+        double basis_stop_alpha_z = 0.0;
+        /// @brief Explicit risk stop on risk-basis |z|. <= 0 disables.
+        double basis_stop_risk_z = 0.0;
+        /// @brief Enable basis standalone cost-aware net-edge gate.
+        bool basis_cost_gate_enabled = false;
+        /// @brief Minimum required net edge after costs/penalties (basis pct units).
+        double basis_cost_edge_threshold_pct = 0.0;
+        /// @brief Expected holding horizon used to convert borrow APR into holding cost.
+        double basis_cost_expected_hold_hours = 8.0;
+        /// @brief Expected future funding settlements accrued during holding horizon.
+        double basis_cost_expected_funding_settlements = 1.0;
+        /// @brief Borrow APR used for cost-aware gate (annualized decimal, e.g. 0.12 = 12%).
+        double basis_cost_borrow_apr = 0.0;
+        /// @brief One-way execution cost rate per leg (decimal); round-trip pair ~= 2 legs.
+        double basis_cost_trading_cost_rate_per_leg = 0.0;
+        /// @brief Penalty weight applied to risk_basis when computing net edge.
+        double basis_cost_risk_penalty_weight = 0.0;
+        /// @brief Additional penalty weight for persistent trend pressure in basis alpha EMA structure.
+        double basis_cost_trend_penalty_weight = 0.0;
+        /// @brief If true, observed perp funding contributes to net edge as carry side-effect.
+        bool basis_cost_include_funding = true;
+        /// @brief Rolling lookback used to detect large common-mode spot/perp moves before basis entries.
+        std::size_t basis_cost_common_move_penalty_window_bars = 10;
+        /// @brief Average absolute common-mode return where basis common-move penalty starts ramping in.
+        double basis_cost_common_move_penalty_start_pct = 0.03;
+        /// @brief Average absolute common-mode return where basis common-move penalty reaches full strength.
+        double basis_cost_common_move_penalty_full_pct = 0.08;
+        /// @brief Minimum multiplier applied under full common-move penalty pressure.
+        double basis_cost_common_move_penalty_min_scale = 0.20;
     };
 
     explicit FundingCarrySignalEngine(Config cfg);
 
     /// @brief Update signal based on latest market snapshot.
-    SignalDecision on_market(
+    virtual SignalDecision on_market(
         const std::shared_ptr<QTrading::Dto::Market::Binance::MultiKlineDto>& market) override;
 
 private:

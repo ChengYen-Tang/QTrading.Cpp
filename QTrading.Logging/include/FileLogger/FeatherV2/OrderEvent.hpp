@@ -31,6 +31,8 @@ namespace QTrading::Log::FileLogger::FeatherV2 {
         int32_t side{};          // Dto::Trading::OrderSide (int)
         int32_t position_side{}; // Dto::Trading::PositionSide (int)
         bool reduce_only{};
+        bool close_position{};
+        double quote_order_qty{};
 
         double qty{};
         double price{};          // order price (0 => market)
@@ -44,6 +46,12 @@ namespace QTrading::Log::FileLogger::FeatherV2 {
         bool is_taker{};
         double fee{};
         double fee_rate{};
+        int32_t fee_asset{ -1 };
+        double fee_native{};
+        double fee_quote_equiv{};
+        double spot_cash_delta{};
+        double spot_inventory_delta{};
+        int32_t commission_model_source{ -1 };
 
         int32_t reject_reason{}; // 0 = none
     };
@@ -64,6 +72,8 @@ namespace QTrading::Log::FileLogger::FeatherV2 {
                 arrow::field("side", arrow::int32()),
                 arrow::field("position_side", arrow::int32()),
                 arrow::field("reduce_only", arrow::boolean()),
+                arrow::field("close_position", arrow::boolean()),
+                arrow::field("quote_order_qty", arrow::float64()),
                 arrow::field("qty", arrow::float64()),
                 arrow::field("price", arrow::float64()),
                 arrow::field("exec_qty", arrow::float64()),
@@ -73,6 +83,12 @@ namespace QTrading::Log::FileLogger::FeatherV2 {
                 arrow::field("is_taker", arrow::boolean()),
                 arrow::field("fee", arrow::float64()),
                 arrow::field("fee_rate", arrow::float64()),
+                arrow::field("fee_asset", arrow::int32()),
+                arrow::field("fee_native", arrow::float64()),
+                arrow::field("fee_quote_equiv", arrow::float64()),
+                arrow::field("spot_cash_delta", arrow::float64()),
+                arrow::field("spot_inventory_delta", arrow::float64()),
+                arrow::field("commission_model_source", arrow::int32()),
                 arrow::field("reject_reason", arrow::int32()),
                 arrow::field("ts_local", arrow::uint64())
             });
@@ -93,17 +109,25 @@ namespace QTrading::Log::FileLogger::FeatherV2 {
             detail::AppendOrThrow(builder.GetFieldAs<arrow::Int32Builder>(9), e.side);
             detail::AppendOrThrow(builder.GetFieldAs<arrow::Int32Builder>(10), e.position_side);
             detail::AppendOrThrow(builder.GetFieldAs<arrow::BooleanBuilder>(11), e.reduce_only);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(12), e.qty);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(13), e.price);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(14), e.exec_qty);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(15), e.exec_price);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(16), e.remaining_qty);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::Int64Builder>(17), e.closing_position_id);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::BooleanBuilder>(18), e.is_taker);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(19), e.fee);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(20), e.fee_rate);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::Int32Builder>(21), e.reject_reason);
-            detail::AppendOrThrow(builder.GetFieldAs<arrow::UInt64Builder>(22), e.ts_local);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::BooleanBuilder>(12), e.close_position);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(13), e.quote_order_qty);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(14), e.qty);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(15), e.price);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(16), e.exec_qty);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(17), e.exec_price);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(18), e.remaining_qty);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::Int64Builder>(19), e.closing_position_id);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::BooleanBuilder>(20), e.is_taker);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(21), e.fee);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(22), e.fee_rate);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::Int32Builder>(23), e.fee_asset);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(24), e.fee_native);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(25), e.fee_quote_equiv);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(26), e.spot_cash_delta);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::DoubleBuilder>(27), e.spot_inventory_delta);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::Int32Builder>(28), e.commission_model_source);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::Int32Builder>(29), e.reject_reason);
+            detail::AppendOrThrow(builder.GetFieldAs<arrow::UInt64Builder>(30), e.ts_local);
         }
     } // namespace OrderEvent
 

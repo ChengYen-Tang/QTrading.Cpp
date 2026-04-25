@@ -3,23 +3,24 @@
 #include <memory>
 #include <optional>
 #include <string>
-#include <unordered_map>
 #include <vector>
 #include "Dto/Market/Base.hpp"
 #include "Dto/Market/Binance/FundingRate.hpp"
 #include "Dto/Market/Binance/Kline.hpp"
+#include "Dto/Market/Binance/ReferenceKline.hpp"
 
 namespace QTrading::Dto::Market::Binance {
 
-    /// @brief DTO containing multiple symbols?1-minute klines at a given timestamp.
-    /// @details Map key = trading symbol; map value = optional KlineDto (nullopt if no data this minute).
+    /// @brief DTO containing multiple symbols 1-minute klines at a given timestamp.
     struct MultiKlineDto : QTrading::Dto::Market::BaseMarketDto {
-        /// @brief Per-symbol minute bar data; std::nullopt if missing for that symbol.
-        std::unordered_map<std::string, std::optional<KlineDto>> klines;
-        /// @brief Stable symbol table (same order as klines_by_id).
+        /// @brief Stable symbol table (same order as trade_klines_by_id).
         std::shared_ptr<const std::vector<std::string>> symbols;
-        /// @brief Per-symbol minute bar data aligned to symbols (index-based).
-        std::vector<std::optional<KlineDto>> klines_by_id;
+        /// @brief Per-symbol trade kline data aligned to symbols (index-based).
+        std::vector<std::optional<TradeKlineDto>> trade_klines_by_id;
+        /// @brief Per-symbol mark reference kline data aligned to symbols (index-based).
+        std::vector<std::optional<ReferenceKlineDto>> mark_klines_by_id;
+        /// @brief Per-symbol index reference kline data aligned to symbols (index-based).
+        std::vector<std::optional<ReferenceKlineDto>> index_klines_by_id;
         /// @brief Latest known funding snapshot per symbol aligned to symbols.
         /// @details This is piecewise-constant between funding updates (e.g., 8h cadence).
         std::vector<std::optional<FundingRateDto>> funding_by_id;

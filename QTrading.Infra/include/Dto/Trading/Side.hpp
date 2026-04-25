@@ -16,4 +16,12 @@ namespace QTrading::Dto::Trading {
         Both
     };
 
+    /// @brief Limit-order time in force semantics supported by the simulator.
+    enum class TimeInForce {
+        GTC,
+        IOC,
+        FOK,
+        GTX
+    };
+
 }  // namespace QTrading::Dto::Trading

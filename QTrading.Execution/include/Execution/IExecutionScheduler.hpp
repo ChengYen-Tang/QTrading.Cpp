@@ -2,8 +2,8 @@
 
 #include "Dto/Market/Binance/MultiKline.hpp"
 #include "Execution/ExecutionParentOrder.hpp"
+#include "Execution/ExecutionSignal.hpp"
 #include "Risk/AccountState.hpp"
-#include "Signal/SignalDecision.hpp"
 
 #include <memory>
 #include <vector>
@@ -18,7 +18,7 @@ public:
     virtual std::vector<ExecutionSlice> BuildSlices(
         const std::vector<ExecutionParentOrder>& parent_orders,
         const QTrading::Risk::AccountState& account,
-        const QTrading::Signal::SignalDecision& signal,
+        const ExecutionSignal& signal,
         const std::shared_ptr<QTrading::Dto::Market::Binance::MultiKlineDto>& market) = 0;
 };
 
@@ -28,7 +28,7 @@ public:
     std::vector<ExecutionSlice> BuildSlices(
         const std::vector<ExecutionParentOrder>& parent_orders,
         const QTrading::Risk::AccountState&,
-        const QTrading::Signal::SignalDecision&,
+        const ExecutionSignal&,
         const std::shared_ptr<QTrading::Dto::Market::Binance::MultiKlineDto>&) override
     {
         std::vector<ExecutionSlice> slices;

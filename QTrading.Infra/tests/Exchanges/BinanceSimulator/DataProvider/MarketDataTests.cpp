@@ -1,7 +1,7 @@
 ﻿#include <gtest/gtest.h>
 #include <boost/filesystem.hpp>
 #include <boost/filesystem/fstream.hpp>
-#include <Exchanges/BinanceSimulator/DataProvider/MarketData.hpp>
+#include <Data/Binance/MarketData.hpp>
 
 static const char* test_csv_filename = "test_kline_data.csv";
 
@@ -100,4 +100,51 @@ TEST_F(MarketDataTests, ConstIteratorTraversal) {
         count++;
     }
     EXPECT_EQ(count, md.get_klines_count());
+}
+
+/// @brief Verifies compact 6-column CSV format can be parsed for mark/index klines.
+TEST_F(MarketDataTests, LoadCompactSixColumnCsv)
+{
+    const char* compact_csv = "test_kline_data_compact.csv";
+    {
+        boost::filesystem::ofstream ofs(compact_csv);
+        ofs << "OpenTime,OpenPrice,HighPrice,LowPrice,ClosePrice,CloseTime\n";
+        ofs << "1733497260000,7000,7050,6950,7020,1733497319999\n";
+        ofs << "1733497320000,7020,7100,7000,7050,1733497379999\n";
+    }
+
+    MarketData md("BTCUSDT", compact_csv);
+    EXPECT_EQ(md.get_klines_count(), 2u);
+    const auto& latest = md.get_latest_kline();
+    EXPECT_EQ(latest.Timestamp, 1733497320000);
+    EXPECT_DOUBLE_EQ(latest.ClosePrice, 7050.0);
+    EXPECT_DOUBLE_EQ(latest.Volume, 0.0);
+    EXPECT_EQ(latest.TradeCount, 0);
+
+    boost::filesystem::remove(compact_csv);
+}
+
+TEST_F(MarketDataTests, LowerUpperBoundByTimestamp)
+{
+    MarketData md("BTCUSDT", test_csv_filename);
+
+    EXPECT_EQ(md.lower_bound_ts(1733497260000), 0u);
+    EXPECT_EQ(md.upper_bound_ts(1733497260000), 1u);
+    EXPECT_EQ(md.lower_bound_ts(1733497260001), 1u);
+    EXPECT_EQ(md.upper_bound_ts(1733497320000), 2u);
+}
+
+TEST_F(MarketDataTests, GetLatestKlineThrowsWhenNoParsedRows)
+{
+    const char* header_only_csv = "test_kline_header_only.csv";
+    {
+        boost::filesystem::ofstream ofs(header_only_csv);
+        ofs << "OpenTime,OpenPrice,HighPrice,LowPrice,ClosePrice,Volume,CloseTime,QuoteVolume,TradeCount,TakerBuyBaseVolume,TakerBuyQuoteVolume\n";
+    }
+
+    MarketData md("BTCUSDT", header_only_csv);
+    EXPECT_EQ(md.get_klines_count(), 0u);
+    EXPECT_THROW(md.get_latest_kline(), std::out_of_range);
+
+    boost::filesystem::remove(header_only_csv);
 }

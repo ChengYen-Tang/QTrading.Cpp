@@ -1,14 +1,9 @@
 #include "Exchanges/BinanceSimulator/BinanceExchange.hpp"
-#include "ServiceHelpers.hpp"
 #include "LoggerBootstrap.hpp"
-#include "Execution/FundingCarryStrategy.hpp"
-#include "Execution/MarketExecutionEngine.hpp"
-#include "Intent/FundingCarryIntentBuilder.hpp"
-#include "Monitoring/SimpleMonitoring.hpp"
-#include "Risk/SimpleRiskEngine.hpp"
-#include "Signal/FundingCarrySignalEngine.hpp"
-#include "Universe/FixedUniverseSelector.hpp"
+#include "DatasetUniverseConfig.hpp"
+#include "ServiceHelpers.hpp"
 #include "Diagnostics/Trace.hpp"
+#include "Strategy/StrategyModuleBuilder.hpp"
 
 #include <chrono>
 #include <cstdlib>
@@ -21,11 +16,12 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 using namespace std;
 using BinanceExchange = QTrading::Infra::Exchanges::BinanceSim::BinanceExchange;
-using SimAccount = ::Account;
+using SimAccount = QTrading::Infra::Exchanges::BinanceSim::Account;
 
 /// @file QTrading.Service.cpp
 /// @brief Defines the application entry point and wires together exchange and arbitrage pipeline modules.
@@ -82,15 +78,27 @@ int main()
         account_init.perp_initial_wallet = kInitialPerpWallet;
         account_init.vip_level = kVipLevel;
 
-        std::ostringstream strategy_params_builder;
-        strategy_params_builder << "strategy_profile=funding_carry_default"
-                                << ";initial_spot_cash=" << kInitialSpotCash
-                                << ";initial_perp_wallet=" << kInitialPerpWallet;
+        // Change this one line to switch assembled strategy modules.
+        constexpr auto kStrategyProfile = QTrading::Strategy::StrategyProfile::BasisArbitrage;
+        const auto strategy_meta = QTrading::Strategy::GetStrategyMetadata(kStrategyProfile);
+        const std::string strategy_name = strategy_meta.strategy_name;
         const std::filesystem::path strategy_config_path =
             QTrading::Service::Helpers::ResolveRepoRelativePath(
                 std::filesystem::path(__FILE__),
-                R"(research/funding_carry/config/funding_carry_v1.json)");
+                strategy_meta.config_relative_path);
+        const std::filesystem::path simulator_config_path =
+            QTrading::Service::Helpers::ResolveRepoRelativePath(
+                std::filesystem::path(__FILE__),
+                R"(research/config/simulator.json)");
+        const auto simulator_config =
+            QTrading::Service::LoadSimulatorConfig(simulator_config_path);
+
+        std::ostringstream strategy_params_builder;
+        strategy_params_builder << "strategy_profile=" << strategy_meta.strategy_profile_param
+                                << ";initial_spot_cash=" << kInitialSpotCash
+                                << ";initial_perp_wallet=" << kInitialPerpWallet;
         strategy_params_builder << ";strategy_config=" << strategy_config_path.string();
+        strategy_params_builder << ";simulator_config=" << simulator_config_path.string();
         if (!sim_start_date.empty()) {
             strategy_params_builder << ";sim_start_date=" << sim_start_date;
         }
@@ -99,17 +107,8 @@ int main()
         }
         const std::string strategy_params = strategy_params_builder.str();
 
-        /// @brief Mapping from symbol string to CSV file path.
-        std::vector<BinanceExchange::SymbolDataset> symbolCsv = {
-            {"BTCUSDT_SPOT",
-                QTrading::Service::Helpers::Utf8Path(u8R"(\\synology\MarketData\General\MarketData\Kline\Spot\BTCUSDT.csv)"),
-                std::nullopt,
-                QTrading::Dto::Trading::InstrumentType::Spot},
-            {"BTCUSDT_PERP",
-                QTrading::Service::Helpers::Utf8Path(u8R"(\\synology\MarketData\General\MarketData\Kline\UsdFutures\BTCUSDT.csv)"),
-                QTrading::Service::Helpers::Utf8Path(u8R"(\\synology\MarketData\General\MarketData\FundingRate\UsdFutures\BTCUSDT.csv)"),
-                QTrading::Dto::Trading::InstrumentType::Perp}
-        };
+        std::vector<BinanceExchange::SymbolDataset> symbolCsv =
+            QTrading::Service::BuildSymbolDatasets(simulator_config.symbols);
         std::unordered_map<std::string, QTrading::Dto::Trading::InstrumentType> instrument_types;
         instrument_types.reserve(symbolCsv.size());
         for (const auto& ds : symbolCsv) {
@@ -122,7 +121,7 @@ int main()
         const auto logger_cfg = QTrading::Service::Helpers::BuildLoggerBootstrapConfig(
             logs_root,
             symbolCsv,
-            "FundingCarryMVP",
+            strategy_name,
             "0.1",
             strategy_params);
         const auto logger_init = QTrading::Log::InitializeFeatherLogger(logger_cfg);
@@ -137,35 +136,16 @@ int main()
         std::cerr << "[Service] exchange constructed" << std::endl;
         std::cerr.flush();
 
-        QTrading::Signal::FundingCarrySignalEngine::Config signal_cfg;
-        QTrading::Intent::FundingCarryIntentBuilder::Config intent_cfg;
-        QTrading::Risk::SimpleRiskEngine::Config risk_cfg;
-        QTrading::Execution::MarketExecutionEngine::Config execution_cfg;
-        QTrading::Monitoring::SimpleMonitoring::Config monitoring_cfg;
-        QTrading::Service::Helpers::LoadFundingCarryConfig(
+        QTrading::Strategy::StrategyModuleConfigs module_configs;
+        QTrading::Strategy::LoadStrategyModuleConfigs(
+            kStrategyProfile,
             strategy_config_path,
-            signal_cfg,
-            intent_cfg,
-            risk_cfg,
-            execution_cfg,
-            monitoring_cfg);
+            module_configs);
 
-        // @brief Assemble arbitrage pipeline (currently null implementations).
-        QTrading::Universe::FixedUniverseSelector universe_selector;
-        QTrading::Signal::FundingCarrySignalEngine signal_engine(signal_cfg);
-        QTrading::Intent::FundingCarryIntentBuilder intent_builder(intent_cfg);
-        risk_cfg.instrument_types = instrument_types;
-        QTrading::Risk::SimpleRiskEngine risk_engine(risk_cfg);
-        QTrading::Execution::MarketExecutionEngine execution_engine(exchange, execution_cfg);
-        QTrading::Monitoring::SimpleMonitoring monitoring(monitoring_cfg);
-        auto strategy = std::make_shared<QTrading::Execution::FundingCarryStrategy>(
+        auto modules = QTrading::Strategy::BuildStrategyModules(
+            kStrategyProfile,
             exchange,
-            universe_selector,
-            signal_engine,
-            intent_builder,
-            risk_engine,
-            execution_engine,
-            monitoring,
+            std::move(module_configs),
             instrument_types);
 
         std::cerr << "[Service] entering main loop..." << std::endl;
@@ -203,7 +183,7 @@ int main()
                 Shutdown("stop requested, shutting down modules...");
                 break;
             }
-            strategy->wait_for_done();
+            modules.strategy->RunOneCycle();
 
             ++steps;
 
