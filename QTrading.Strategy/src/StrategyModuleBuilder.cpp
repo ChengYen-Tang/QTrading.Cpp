@@ -1,8 +1,11 @@
 #include "Strategy/StrategyModuleBuilder.hpp"
 
 #include "Intent/BasisArbitrageIntentBuilder.hpp"
+#include "Intent/CarryBasisHybridIntentBuilder.hpp"
 #include "Signal/BasisArbitrageSignalEngine.hpp"
+#include "Signal/CarryBasisHybridSignalEngine.hpp"
 #include "Strategy/BasisArbitrageMultiPairRuntime.hpp"
+#include "Strategy/CarryBasisHybridMultiPairRuntime.hpp"
 #include "Strategy/FundingCarryStrategyRuntime.hpp"
 #include "Universe/IUniverseSelector.hpp"
 
@@ -66,6 +69,37 @@ StrategyModuleBundle BuildBasisArbitrageModules(
     return bundle;
 }
 
+StrategyModuleBundle BuildCarryBasisHybridModules(
+    const std::shared_ptr<QTrading::Infra::Exchanges::BinanceSim::BinanceExchange>& exchange,
+    StrategyModuleConfigs configs,
+    const std::unordered_map<std::string, QTrading::Dto::Trading::InstrumentType>& instrument_types)
+{
+    configs.risk_cfg.instrument_types = instrument_types;
+    configs.execution_cfg.carry_require_two_sided_rebalance = true;
+    configs.execution_cfg.carry_balance_two_sided_rebalance = true;
+
+    StrategyModuleBundle bundle;
+    bundle.universe_selector = std::make_unique<QTrading::Universe::NullUniverseSelector>();
+    bundle.signal_engine =
+        std::make_shared<QTrading::Signal::CarryBasisHybridSignalEngine>(configs.hybrid_signal_cfg);
+    bundle.intent_builder =
+        std::make_shared<QTrading::Intent::CarryBasisHybridIntentBuilder>(configs.hybrid_intent_cfg);
+    bundle.risk_engine = std::make_unique<QTrading::Risk::SimpleRiskEngine>(configs.risk_cfg);
+    bundle.execution_engine = std::make_unique<QTrading::Execution::MarketExecutionEngine>(exchange, configs.execution_cfg);
+    bundle.monitoring = std::make_unique<QTrading::Monitoring::SimpleMonitoring>(configs.monitoring_cfg);
+    bundle.strategy = std::make_shared<QTrading::Strategy::CarryBasisHybridMultiPairRuntime>(
+        exchange,
+        *bundle.universe_selector,
+        configs.hybrid_signal_cfg,
+        configs.hybrid_intent_cfg,
+        configs.runtime_cfg,
+        *bundle.risk_engine,
+        *bundle.execution_engine,
+        *bundle.monitoring,
+        instrument_types);
+    return bundle;
+}
+
 } // namespace
 
 StrategyMetadata GetStrategyMetadata(StrategyProfile profile)
@@ -75,13 +109,22 @@ StrategyMetadata GetStrategyMetadata(StrategyProfile profile)
         return {
             "FundingCarryMVP",
             "funding_carry_default",
-            R"(research/funding_carry/config/funding_carry_v1.json)"
+            R"(research/funding_carry/config/funding_carry_v1.json)",
+            R"(research/config/simulator.json)"
         };
     case StrategyProfile::BasisArbitrage:
         return {
             "BasisArbitrageMVP",
             "basis_arbitrage_default",
-            R"(research/basis_arbitrage/config/basis_arbitrage_v1.json)"
+            R"(research/basis_arbitrage/config/basis_arbitrage_v1.json)",
+            R"(research/config/simulator.json)"
+        };
+    case StrategyProfile::CarryBasisHybrid:
+        return {
+            "CarryBasisHybridMVP",
+            "carry_basis_hybrid_default",
+            R"(research/carry_basis_hybrid/config/carry_basis_hybrid_v1.json)",
+            R"(research/carry_basis_hybrid/config/simulator.json)"
         };
     }
     throw std::invalid_argument("Unsupported strategy profile");
@@ -99,6 +142,9 @@ void LoadStrategyModuleConfigs(
     case StrategyProfile::BasisArbitrage:
         LoadBasisArbitrageConfig(config_path, configs);
         return;
+    case StrategyProfile::CarryBasisHybrid:
+        LoadCarryBasisHybridConfig(config_path, configs);
+        return;
     }
     throw std::invalid_argument("Unsupported strategy profile");
 }
@@ -114,6 +160,8 @@ StrategyModuleBundle BuildStrategyModules(
         return BuildFundingCarryModules(exchange, std::move(configs), instrument_types);
     case StrategyProfile::BasisArbitrage:
         return BuildBasisArbitrageModules(exchange, std::move(configs), instrument_types);
+    case StrategyProfile::CarryBasisHybrid:
+        return BuildCarryBasisHybridModules(exchange, std::move(configs), instrument_types);
     }
     throw std::invalid_argument("Unsupported strategy profile");
 }

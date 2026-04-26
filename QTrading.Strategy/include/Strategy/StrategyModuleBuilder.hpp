@@ -20,13 +20,15 @@ namespace QTrading::Strategy {
 
 enum class StrategyProfile {
     FundingCarry,
-    BasisArbitrage
+    BasisArbitrage,
+    CarryBasisHybrid
 };
 
 struct StrategyMetadata {
     std::string strategy_name;
     std::string strategy_profile_param;
     std::filesystem::path config_relative_path;
+    std::filesystem::path simulator_config_relative_path;
 };
 
 struct StrategyModuleBundle {

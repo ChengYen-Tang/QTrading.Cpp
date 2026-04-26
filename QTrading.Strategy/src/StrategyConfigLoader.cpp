@@ -223,6 +223,21 @@ void ApplySharedStrategyConfigSections(
     ApplyNumber(runtime, "basis_multi_max_pair_weight", configs.runtime_cfg.basis_multi_max_pair_weight);
     ApplyNumber(runtime, "basis_multi_min_effective_quality_scale", configs.runtime_cfg.basis_multi_min_effective_quality_scale);
     ApplyNumber(runtime, "basis_multi_min_effective_allocator_score", configs.runtime_cfg.basis_multi_min_effective_allocator_score);
+    ApplyBool(runtime, "carry_basis_turnover_gate_enabled", configs.runtime_cfg.carry_basis_turnover_gate_enabled);
+    ApplyNumber(runtime, "carry_basis_turnover_cost_rate", configs.runtime_cfg.carry_basis_turnover_cost_rate);
+    ApplyNumber(
+        runtime,
+        "carry_basis_turnover_expected_funding_settlements",
+        configs.runtime_cfg.carry_basis_turnover_expected_funding_settlements);
+    ApplyNumber(
+        runtime,
+        "carry_basis_turnover_min_gain_to_cost",
+        configs.runtime_cfg.carry_basis_turnover_min_gain_to_cost);
+    ApplyBool(runtime, "carry_basis_delta_clamp_enabled", configs.runtime_cfg.carry_basis_delta_clamp_enabled);
+    ApplyNumber(
+        runtime,
+        "carry_basis_delta_max_base_imbalance_ratio",
+        configs.runtime_cfg.carry_basis_delta_max_base_imbalance_ratio);
     ApplyNumber(runtime, "basis_pair_min_spot_quote_volume", configs.runtime_cfg.basis_pair_min_spot_quote_volume);
     ApplyNumber(runtime, "basis_pair_min_perp_quote_volume", configs.runtime_cfg.basis_pair_min_perp_quote_volume);
     ApplyNumber(runtime, "basis_pair_min_quote_volume_ratio", configs.runtime_cfg.basis_pair_min_quote_volume_ratio);
@@ -301,6 +316,41 @@ void ApplyBasisArbitrageSpecificConfigSections(
     ApplyNumber(risk, "mark_index_hard_guard_bps", configs.risk_cfg.mark_index_hard_guard_bps);
 }
 
+void ApplyCarryBasisHybridSpecificConfigSections(
+    const rapidjson::Document& doc,
+    StrategyModuleConfigs& configs)
+{
+    configs.hybrid_signal_cfg.funding_cfg = configs.signal_cfg;
+    configs.hybrid_signal_cfg.basis_cfg = configs.signal_cfg;
+    configs.hybrid_intent_cfg.spot_symbol = configs.intent_cfg.spot_symbol;
+    configs.hybrid_intent_cfg.perp_symbol = configs.intent_cfg.perp_symbol;
+    configs.hybrid_intent_cfg.receive_funding = configs.intent_cfg.receive_funding;
+
+    const rapidjson::Value* hybrid = FindObject(doc, "hybrid_signal");
+    ApplyBool(hybrid, "require_funding_active", configs.hybrid_signal_cfg.require_funding_active);
+    ApplyBool(hybrid, "allow_basis_only_entry", configs.hybrid_signal_cfg.allow_basis_only_entry);
+    ApplyBool(hybrid, "basis_overlay_enabled", configs.hybrid_signal_cfg.basis_overlay_enabled);
+    ApplyNumber(hybrid, "funding_confidence_weight", configs.hybrid_signal_cfg.funding_confidence_weight);
+    ApplyNumber(hybrid, "basis_confidence_weight", configs.hybrid_signal_cfg.basis_confidence_weight);
+    ApplyNumber(hybrid, "basis_inactive_confidence_scale", configs.hybrid_signal_cfg.basis_inactive_confidence_scale);
+    ApplyNumber(hybrid, "basis_active_boost_scale", configs.hybrid_signal_cfg.basis_active_boost_scale);
+    ApplyNumber(hybrid, "min_active_confidence", configs.hybrid_signal_cfg.min_active_confidence);
+    ApplyBool(hybrid, "funding_regime_filter_enabled", configs.hybrid_signal_cfg.funding_regime_filter_enabled);
+    ApplyNumber(hybrid, "funding_regime_window_settlements", configs.hybrid_signal_cfg.funding_regime_window_settlements);
+    ApplyNumber(hybrid, "funding_regime_min_samples", configs.hybrid_signal_cfg.funding_regime_min_samples);
+    ApplyNumber(hybrid, "funding_regime_min_mean_rate", configs.hybrid_signal_cfg.funding_regime_min_mean_rate);
+    ApplyNumber(hybrid, "funding_regime_max_negative_share", configs.hybrid_signal_cfg.funding_regime_max_negative_share);
+    ApplyNumber(hybrid, "funding_regime_confidence_floor", configs.hybrid_signal_cfg.funding_regime_confidence_floor);
+
+    const rapidjson::Value* risk = FindObject(doc, "risk");
+    ApplyNumber(risk, "carry_confidence_min_scale", configs.risk_cfg.carry_confidence_min_scale);
+    ApplyNumber(risk, "carry_confidence_max_scale", configs.risk_cfg.carry_confidence_max_scale);
+    ApplyNumber(risk, "carry_confidence_power", configs.risk_cfg.carry_confidence_power);
+    ApplyNumber(risk, "carry_confidence_min_leverage_scale", configs.risk_cfg.carry_confidence_min_leverage_scale);
+    ApplyNumber(risk, "carry_confidence_max_leverage_scale", configs.risk_cfg.carry_confidence_max_leverage_scale);
+    ApplyNumber(risk, "carry_confidence_leverage_power", configs.risk_cfg.carry_confidence_leverage_power);
+}
+
 } // namespace
 
 void LoadFundingCarryConfig(
@@ -320,6 +370,17 @@ void LoadBasisArbitrageConfig(
     ParseStrategyConfigDocument(config_path, "basis-arbitrage", doc);
     ApplySharedStrategyConfigSections(doc, configs);
     ApplyBasisArbitrageSpecificConfigSections(doc, configs);
+}
+
+void LoadCarryBasisHybridConfig(
+    const std::filesystem::path& config_path,
+    StrategyModuleConfigs& configs)
+{
+    rapidjson::Document doc;
+    ParseStrategyConfigDocument(config_path, "carry-basis-hybrid", doc);
+    ApplySharedStrategyConfigSections(doc, configs);
+    ApplyBasisArbitrageSpecificConfigSections(doc, configs);
+    ApplyCarryBasisHybridSpecificConfigSections(doc, configs);
 }
 
 } // namespace QTrading::Strategy

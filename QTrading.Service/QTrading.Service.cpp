@@ -79,7 +79,7 @@ int main()
         account_init.vip_level = kVipLevel;
 
         // Change this one line to switch assembled strategy modules.
-        constexpr auto kStrategyProfile = QTrading::Strategy::StrategyProfile::BasisArbitrage;
+        constexpr auto kStrategyProfile = QTrading::Strategy::StrategyProfile::CarryBasisHybrid;
         const auto strategy_meta = QTrading::Strategy::GetStrategyMetadata(kStrategyProfile);
         const std::string strategy_name = strategy_meta.strategy_name;
         const std::filesystem::path strategy_config_path =
@@ -89,7 +89,7 @@ int main()
         const std::filesystem::path simulator_config_path =
             QTrading::Service::Helpers::ResolveRepoRelativePath(
                 std::filesystem::path(__FILE__),
-                R"(research/config/simulator.json)");
+                strategy_meta.simulator_config_relative_path);
         const auto simulator_config =
             QTrading::Service::LoadSimulatorConfig(simulator_config_path);
 

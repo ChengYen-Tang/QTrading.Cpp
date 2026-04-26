@@ -1,9 +1,11 @@
 #pragma once
 
 #include "Execution/MarketExecutionEngine.hpp"
+#include "Intent/CarryBasisHybridIntentBuilder.hpp"
 #include "Intent/FundingCarryIntentBuilder.hpp"
 #include "Monitoring/SimpleMonitoring.hpp"
 #include "Risk/SimpleRiskEngine.hpp"
+#include "Signal/CarryBasisHybridSignalEngine.hpp"
 #include "Signal/FundingCarrySignalEngine.hpp"
 
 #include <filesystem>
@@ -20,6 +22,12 @@ struct StrategyRuntimeConfig {
     double basis_multi_max_pair_weight = 0.60;
     double basis_multi_min_effective_quality_scale = 0.0;
     double basis_multi_min_effective_allocator_score = 0.0;
+    bool carry_basis_turnover_gate_enabled = false;
+    double carry_basis_turnover_cost_rate = 0.0015;
+    double carry_basis_turnover_expected_funding_settlements = 1.0;
+    double carry_basis_turnover_min_gain_to_cost = 1.25;
+    bool carry_basis_delta_clamp_enabled = false;
+    double carry_basis_delta_max_base_imbalance_ratio = 0.02;
     double basis_pair_min_spot_quote_volume = 0.0;
     double basis_pair_min_perp_quote_volume = 0.0;
     double basis_pair_min_quote_volume_ratio = 0.0;
@@ -42,6 +50,8 @@ struct StrategyRuntimeConfig {
 struct StrategyModuleConfigs {
     QTrading::Signal::FundingCarrySignalEngine::Config signal_cfg;
     QTrading::Intent::FundingCarryIntentBuilder::Config intent_cfg;
+    QTrading::Signal::CarryBasisHybridSignalEngine::Config hybrid_signal_cfg;
+    QTrading::Intent::CarryBasisHybridIntentBuilder::Config hybrid_intent_cfg;
     QTrading::Risk::SimpleRiskEngine::Config risk_cfg;
     QTrading::Execution::MarketExecutionEngine::Config execution_cfg;
     QTrading::Monitoring::SimpleMonitoring::Config monitoring_cfg;
@@ -53,6 +63,10 @@ void LoadFundingCarryConfig(
     StrategyModuleConfigs& configs);
 
 void LoadBasisArbitrageConfig(
+    const std::filesystem::path& config_path,
+    StrategyModuleConfigs& configs);
+
+void LoadCarryBasisHybridConfig(
     const std::filesystem::path& config_path,
     StrategyModuleConfigs& configs);
 
