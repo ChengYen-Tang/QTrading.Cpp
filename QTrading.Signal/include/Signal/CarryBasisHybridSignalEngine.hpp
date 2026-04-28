@@ -35,6 +35,10 @@ public:
         double funding_regime_min_mean_rate = 0.0;
         double funding_regime_max_negative_share = 0.45;
         double funding_regime_confidence_floor = 0.20;
+        bool funding_allocator_score_enabled = true;
+        double funding_allocator_reference_rate = 0.00010;
+        double funding_allocator_weight = 1.0;
+        double basis_allocator_weight = 0.25;
     };
 
     explicit CarryBasisHybridSignalEngine(Config cfg);

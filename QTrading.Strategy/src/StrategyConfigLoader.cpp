@@ -238,6 +238,26 @@ void ApplySharedStrategyConfigSections(
         runtime,
         "carry_basis_delta_max_base_imbalance_ratio",
         configs.runtime_cfg.carry_basis_delta_max_base_imbalance_ratio);
+    ApplyNumber(
+        runtime,
+        "carry_basis_max_pair_leg_notional_usdt",
+        configs.runtime_cfg.carry_basis_max_pair_leg_notional_usdt);
+    ApplyBool(
+        runtime,
+        "carry_basis_turnover_bypass_on_imbalance",
+        configs.runtime_cfg.carry_basis_turnover_bypass_on_imbalance);
+    ApplyNumber(
+        runtime,
+        "carry_basis_turnover_bypass_imbalance_ratio",
+        configs.runtime_cfg.carry_basis_turnover_bypass_imbalance_ratio);
+    ApplyBool(
+        runtime,
+        "carry_basis_liquidity_sync_enabled",
+        configs.runtime_cfg.carry_basis_liquidity_sync_enabled);
+    ApplyNumber(
+        runtime,
+        "carry_basis_liquidity_sync_participation_rate",
+        configs.runtime_cfg.carry_basis_liquidity_sync_participation_rate);
     ApplyNumber(runtime, "basis_pair_min_spot_quote_volume", configs.runtime_cfg.basis_pair_min_spot_quote_volume);
     ApplyNumber(runtime, "basis_pair_min_perp_quote_volume", configs.runtime_cfg.basis_pair_min_perp_quote_volume);
     ApplyNumber(runtime, "basis_pair_min_quote_volume_ratio", configs.runtime_cfg.basis_pair_min_quote_volume_ratio);
@@ -341,6 +361,10 @@ void ApplyCarryBasisHybridSpecificConfigSections(
     ApplyNumber(hybrid, "funding_regime_min_mean_rate", configs.hybrid_signal_cfg.funding_regime_min_mean_rate);
     ApplyNumber(hybrid, "funding_regime_max_negative_share", configs.hybrid_signal_cfg.funding_regime_max_negative_share);
     ApplyNumber(hybrid, "funding_regime_confidence_floor", configs.hybrid_signal_cfg.funding_regime_confidence_floor);
+    ApplyBool(hybrid, "funding_allocator_score_enabled", configs.hybrid_signal_cfg.funding_allocator_score_enabled);
+    ApplyNumber(hybrid, "funding_allocator_reference_rate", configs.hybrid_signal_cfg.funding_allocator_reference_rate);
+    ApplyNumber(hybrid, "funding_allocator_weight", configs.hybrid_signal_cfg.funding_allocator_weight);
+    ApplyNumber(hybrid, "basis_allocator_weight", configs.hybrid_signal_cfg.basis_allocator_weight);
 
     const rapidjson::Value* risk = FindObject(doc, "risk");
     ApplyNumber(risk, "carry_confidence_min_scale", configs.risk_cfg.carry_confidence_min_scale);

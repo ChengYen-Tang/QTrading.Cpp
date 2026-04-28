@@ -28,6 +28,11 @@ struct StrategyRuntimeConfig {
     double carry_basis_turnover_min_gain_to_cost = 1.25;
     bool carry_basis_delta_clamp_enabled = false;
     double carry_basis_delta_max_base_imbalance_ratio = 0.02;
+    double carry_basis_max_pair_leg_notional_usdt = 0.0;
+    bool carry_basis_turnover_bypass_on_imbalance = true;
+    double carry_basis_turnover_bypass_imbalance_ratio = 0.03;
+    bool carry_basis_liquidity_sync_enabled = false;
+    double carry_basis_liquidity_sync_participation_rate = 0.35;
     double basis_pair_min_spot_quote_volume = 0.0;
     double basis_pair_min_perp_quote_volume = 0.0;
     double basis_pair_min_quote_volume_ratio = 0.0;

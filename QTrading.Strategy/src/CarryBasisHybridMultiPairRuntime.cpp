@@ -147,6 +147,12 @@ CarryBasisHybridMultiPairRuntime::CarryBasisHybridMultiPairRuntime(
         std::max(0.0, runtime_cfg_.carry_basis_turnover_min_gain_to_cost);
     runtime_cfg_.carry_basis_delta_max_base_imbalance_ratio =
         Clamp01(runtime_cfg_.carry_basis_delta_max_base_imbalance_ratio);
+    runtime_cfg_.carry_basis_max_pair_leg_notional_usdt =
+        std::max(0.0, runtime_cfg_.carry_basis_max_pair_leg_notional_usdt);
+    runtime_cfg_.carry_basis_turnover_bypass_imbalance_ratio =
+        Clamp01(runtime_cfg_.carry_basis_turnover_bypass_imbalance_ratio);
+    runtime_cfg_.carry_basis_liquidity_sync_participation_rate =
+        Clamp01(runtime_cfg_.carry_basis_liquidity_sync_participation_rate);
 }
 
 void CarryBasisHybridMultiPairRuntime::InitializePairsIfNeeded(const MarketPtr& market)
@@ -168,7 +174,10 @@ void CarryBasisHybridMultiPairRuntime::InitializePairsIfNeeded(const MarketPtr& 
         }
         const std::string raw = StripSuffix(symbol, "_SPOT");
         const std::string perp = raw + "_PERP";
-        if (symbol_to_market_id.find(perp) == symbol_to_market_id.end()) {
+        const auto spot_id_it = symbol_to_market_id.find(symbol);
+        const auto perp_id_it = symbol_to_market_id.find(perp);
+        if (spot_id_it == symbol_to_market_id.end() ||
+            perp_id_it == symbol_to_market_id.end()) {
             continue;
         }
         if (!runtime_cfg_.basis_allowed_raw_symbols.empty() &&
@@ -177,7 +186,8 @@ void CarryBasisHybridMultiPairRuntime::InitializePairsIfNeeded(const MarketPtr& 
         }
 
         const std::size_t pair_index = pair_static_infos_.size();
-        pair_static_infos_.push_back(PairStaticInfo{ raw, symbol, perp });
+        pair_static_infos_.push_back(
+            PairStaticInfo{ raw, symbol, perp, spot_id_it->second, perp_id_it->second });
         pair_runtime_states_.emplace_back(
             symbol,
             perp,
@@ -510,6 +520,122 @@ void CarryBasisHybridMultiPairRuntime::ClampPairTargetDelta(
     perp_it->second = std::copysign(clamped_base * perp_price, perp_target);
 }
 
+void CarryBasisHybridMultiPairRuntime::CancelOpenOrdersForPair(
+    const PairStaticInfo& pair) const
+{
+    if (!exchange_) {
+        return;
+    }
+    exchange_->spot.cancel_open_orders(pair.spot_symbol);
+    exchange_->perp.cancel_open_orders(pair.perp_symbol);
+}
+
+void CarryBasisHybridMultiPairRuntime::CapPairTargetNotional(
+    const PairStaticInfo& pair,
+    QTrading::Risk::RiskTarget& target) const
+{
+    const double cap = runtime_cfg_.carry_basis_max_pair_leg_notional_usdt;
+    if (!(cap > 0.0) || !std::isfinite(cap)) {
+        return;
+    }
+
+    for (const auto* symbol : { &pair.spot_symbol, &pair.perp_symbol }) {
+        auto it = target.target_positions.find(*symbol);
+        if (it == target.target_positions.end()) {
+            continue;
+        }
+        if (std::abs(it->second) > cap) {
+            it->second = std::copysign(cap, it->second);
+        }
+    }
+}
+
+double CarryBasisHybridMultiPairRuntime::QuoteVolume(
+    const PairStaticInfo& pair,
+    bool spot_leg,
+    const MarketPtr& market) const
+{
+    if (!market) {
+        return 0.0;
+    }
+    const std::size_t id = spot_leg ? pair.spot_market_id : pair.perp_market_id;
+    if (id >= market->trade_klines_by_id.size()) {
+        return 0.0;
+    }
+    const auto& kline = market->trade_klines_by_id[id];
+    if (!kline.has_value()) {
+        return 0.0;
+    }
+    return std::max(0.0, kline->QuoteVolume);
+}
+
+void CarryBasisHybridMultiPairRuntime::ClampPairTargetLiquidity(
+    const PairStaticInfo& pair,
+    QTrading::Risk::RiskTarget& target,
+    const QTrading::Risk::AccountState& account,
+    const MarketPtr& market) const
+{
+    if (!runtime_cfg_.carry_basis_liquidity_sync_enabled) {
+        return;
+    }
+
+    auto spot_it = target.target_positions.find(pair.spot_symbol);
+    auto perp_it = target.target_positions.find(pair.perp_symbol);
+    if (spot_it == target.target_positions.end() ||
+        perp_it == target.target_positions.end())
+    {
+        return;
+    }
+
+    const double spot_price = LastPrice(pair.spot_symbol, market);
+    const double perp_price = LastPrice(pair.perp_symbol, market);
+    if (!(spot_price > 0.0) || !(perp_price > 0.0)) {
+        return;
+    }
+
+    const double current_spot =
+        CurrentSignedNotional(pair.spot_symbol, account, market) +
+        CurrentSignedOpenOrderNotional(pair.spot_symbol, account, market);
+    const double current_perp =
+        CurrentSignedNotional(pair.perp_symbol, account, market) +
+        CurrentSignedOpenOrderNotional(pair.perp_symbol, account, market);
+    const double spot_delta = spot_it->second - current_spot;
+    const double perp_delta = perp_it->second - current_perp;
+    if (spot_delta == 0.0 || perp_delta == 0.0 || spot_delta * perp_delta >= 0.0) {
+        return;
+    }
+    if (!(current_spot > 0.0 && current_perp < 0.0 &&
+        spot_delta < 0.0 && perp_delta > 0.0))
+    {
+        return;
+    }
+
+    const double spot_quote_cap =
+        QuoteVolume(pair, true, market) * runtime_cfg_.carry_basis_liquidity_sync_participation_rate;
+    const double perp_quote_cap =
+        QuoteVolume(pair, false, market) * runtime_cfg_.carry_basis_liquidity_sync_participation_rate;
+    if (!(spot_quote_cap > 0.0) || !(perp_quote_cap > 0.0)) {
+        return;
+    }
+
+    const double spot_delta_base = std::abs(spot_delta) / spot_price;
+    const double perp_delta_base = std::abs(perp_delta) / perp_price;
+    const double spot_cap_base = spot_quote_cap / spot_price;
+    const double perp_cap_base = perp_quote_cap / perp_price;
+    const double synced_base = std::min({
+        spot_delta_base,
+        perp_delta_base,
+        spot_cap_base,
+        perp_cap_base
+    });
+    if (!(synced_base > 0.0)) {
+        return;
+    }
+
+    spot_it->second = current_spot + std::copysign(synced_base * spot_price, spot_delta);
+    perp_it->second = current_perp + std::copysign(synced_base * perp_price, perp_delta);
+}
+
 bool CarryBasisHybridMultiPairRuntime::PassesTurnoverEconomicsGate(
     const PairStaticInfo& pair,
     const QTrading::Risk::RiskTarget& target,
@@ -534,6 +660,22 @@ bool CarryBasisHybridMultiPairRuntime::PassesTurnoverEconomicsGate(
     const double current_perp =
         CurrentSignedNotional(pair.perp_symbol, account, market) +
         CurrentSignedOpenOrderNotional(pair.perp_symbol, account, market);
+
+    if (runtime_cfg_.carry_basis_turnover_bypass_on_imbalance) {
+        const double spot_price = LastPrice(pair.spot_symbol, market);
+        const double perp_price = LastPrice(pair.perp_symbol, market);
+        if (spot_price > 0.0 && perp_price > 0.0 && current_spot * current_perp < 0.0) {
+            const double spot_base = std::abs(current_spot) / spot_price;
+            const double perp_base = std::abs(current_perp) / perp_price;
+            const double base_ref = std::max(spot_base, perp_base);
+            if (base_ref > 0.0) {
+                const double imbalance = std::abs(spot_base - perp_base) / base_ref;
+                if (imbalance > runtime_cfg_.carry_basis_turnover_bypass_imbalance_ratio) {
+                    return true;
+                }
+            }
+        }
+    }
 
     const double delta_turnover =
         std::abs(spot_target_it->second - current_spot) +
@@ -589,6 +731,8 @@ void CarryBasisHybridMultiPairRuntime::RunOneCycle()
         }
         const auto& pair = pair_static_infos_[ranked.pair_index];
         ClampPairTargetDelta(pair, risk, market);
+        CapPairTargetNotional(pair, risk);
+        ClampPairTargetLiquidity(pair, risk, account, market);
         if (!PassesTurnoverEconomicsGate(pair, risk, account, market)) {
             risk = FreezePairToCurrentRiskTarget(pair, risk, account, market);
         }
@@ -611,6 +755,7 @@ void CarryBasisHybridMultiPairRuntime::RunOneCycle()
             continue;
         }
         const auto& pair = pair_static_infos_[pair_index];
+        CancelOpenOrdersForPair(pair);
         QTrading::Risk::RiskTarget flatten{};
         flatten.ts_ms = market ? market->Timestamp : 0;
         flatten.strategy = "carry_basis_hybrid";

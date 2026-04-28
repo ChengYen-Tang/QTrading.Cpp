@@ -23,6 +23,14 @@ double ClampPositive(double value, double fallback)
     return value;
 }
 
+double ClampNonNegative(double value)
+{
+    if (!std::isfinite(value) || value < 0.0) {
+        return 0.0;
+    }
+    return value;
+}
+
 template <typename T>
 void PushBounded(std::deque<T>& values, T value, std::size_t max_size)
 {
@@ -65,6 +73,10 @@ CarryBasisHybridSignalEngine::CarryBasisHybridSignalEngine(Config cfg)
         std::min(cfg_.funding_regime_min_samples, cfg_.funding_regime_window_settlements);
     cfg_.funding_regime_max_negative_share = Clamp01(cfg_.funding_regime_max_negative_share);
     cfg_.funding_regime_confidence_floor = Clamp01(cfg_.funding_regime_confidence_floor);
+    cfg_.funding_allocator_reference_rate =
+        ClampPositive(cfg_.funding_allocator_reference_rate, 0.00010);
+    cfg_.funding_allocator_weight = ClampNonNegative(cfg_.funding_allocator_weight);
+    cfg_.basis_allocator_weight = ClampNonNegative(cfg_.basis_allocator_weight);
 }
 
 bool CarryBasisHybridSignalEngine::funding_regime_allows_entry(
@@ -198,8 +210,25 @@ SignalDecision CarryBasisHybridSignalEngine::on_market(
         Clamp01(confidence * funding_regime_confidence_scale));
 
     out.allocator_score =
-        std::max(0.0, funding.allocator_score) +
-        std::max(0.0, basis.allocator_score);
+        cfg_.basis_allocator_weight * std::max(0.0, basis.allocator_score);
+    if (cfg_.funding_allocator_score_enabled &&
+        QTrading::Signal::Support::ResolvePairSymbolIds(
+            market,
+            cfg_.funding_cfg.spot_symbol,
+            cfg_.funding_cfg.perp_symbol,
+            symbol_ids_) &&
+        market &&
+        symbol_ids_.perp_id < market->funding_by_id.size() &&
+        market->funding_by_id[symbol_ids_.perp_id].has_value())
+    {
+        const double rate = market->funding_by_id[symbol_ids_.perp_id]->Rate;
+        if (std::isfinite(rate) && rate > 0.0) {
+            const double funding_score =
+                std::tanh(rate / cfg_.funding_allocator_reference_rate);
+            out.allocator_score +=
+                cfg_.funding_allocator_weight * funding_score * out.confidence;
+        }
+    }
     return out;
 }
 

@@ -49,6 +49,8 @@ private:
         std::string raw_symbol;
         std::string spot_symbol;
         std::string perp_symbol;
+        std::size_t spot_market_id = 0;
+        std::size_t perp_market_id = 0;
     };
 
     struct PairRuntimeState {
@@ -87,6 +89,16 @@ private:
         const PairStaticInfo& pair,
         QTrading::Risk::RiskTarget& target,
         const MarketPtr& market) const;
+    void CapPairTargetNotional(
+        const PairStaticInfo& pair,
+        QTrading::Risk::RiskTarget& target) const;
+    void ClampPairTargetLiquidity(
+        const PairStaticInfo& pair,
+        QTrading::Risk::RiskTarget& target,
+        const QTrading::Risk::AccountState& account,
+        const MarketPtr& market) const;
+    void CancelOpenOrdersForPair(const PairStaticInfo& pair) const;
+    double QuoteVolume(const PairStaticInfo& pair, bool spot_leg, const MarketPtr& market) const;
     double CurrentSignedNotional(
         const std::string& symbol,
         const QTrading::Risk::AccountState& account,
